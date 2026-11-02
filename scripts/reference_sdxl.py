@@ -51,6 +51,11 @@ with torch.no_grad():
         save(f"{part}-penultimate", result.hidden_states[-2])
         if part == "text_encoder_2":
             save(f"{part}-projected", result.text_embeds)
+            save("text_encoder_2-eos-override", model.text_projection(torch.stack([
+                result.last_hidden_state[0, 3], result.last_hidden_state[1, 2]])))
+            modern_ids = torch.tensor([[0, 29, 17, 29, 1, 1], [0, 22, 17, 1, 1, 1]])
+            model.text_model.eos_token_id = 29
+            save("text_encoder_2-modern-eos", model(modern_ids).text_embeds)
         else:
             save(f"{part}-final", result.last_hidden_state)
     unet = UNet2DConditionModel.from_pretrained(root / "unet", local_files_only=True).eval()

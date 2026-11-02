@@ -42,7 +42,9 @@ object PretrainedClip:
           linear(s"$p.self_attn.out_proj",c.width,c.width),norm(s"$p.layer_norm2"),
           linear(s"$p.mlp.fc1",c.width,c.intermediate),linear(s"$p.mlp.fc2",c.intermediate,c.width),c.heads,c.activation)
       }
-      val model=ClipTextModel(tokens,positions,layers,norm("text_model.final_layer_norm"),maxScoreElements,maxHiddenElements)
+      val projection=c.projectionWidth.map(width => Linear(parameter("text_projection.weight",width,c.width),None))
+      val model=ClipTextModel(tokens,positions,layers,norm("text_model.final_layer_norm"),maxScoreElements,maxHiddenElements,
+        projection,c.eosId.toLong)
       require(used.toSet==archive.tensors.keySet,s"unused CLIP weights: ${(archive.tensors.keySet--used).toVector.sorted.mkString(", ")}")
       model
     }

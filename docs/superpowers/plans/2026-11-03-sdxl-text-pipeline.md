@@ -34,10 +34,10 @@ Files: modify `models/src/main/scala/scalatorch/models/ClipTextConfig.scala`, `C
 
 Interfaces: append defaulted projection dimension/architecture data to ClipTextConfig and optional `textProjection: Option[Linear]`/EOS ID to ClipTextModel. Add `ClipTextOutput(hidden: Variable,finalHidden: Variable,pooled: Variable,projected: Option[Variable])` and `encode(tokens: Tensor[Long],skipLastLayers: Int=1,legacyEosOverride: Option[Long]=None): ClipTextOutput`. Selected hidden is raw; pooled is gathered from the fully executed, final-normalized sequence. Run the stack once and retain only requested hidden state.
 
-- [ ] Write failing tests using checked-in text_encoder-penultimate/final and text_encoder_2-penultimate/projected fixtures; require maxabs<2e-5.
-- [ ] Implement raw state selection, projection-free and WithProjection configs/loaders; text_projection.weight must be exactly(projection_dim,hidden_size), no bias. Preserve strict unused-weight checks and public load return type.
-- [ ] Add oracle cases for legacy maximum-token pooling, modern first EOS, repeated EOS, added-ID override, no EOS fallback and skip bounds. Validate allocation budgets and trainability/gradient path.
-- [ ] Run SdxlClipSuite,PretrainedClipSuite and existing ClipTextModel tests; commit when all pass.
+- [x] Write failing tests using checked-in text_encoder-penultimate/final and text_encoder_2-penultimate/projected fixtures; require maxabs<2e-5.
+- [x] Implement raw state selection, projection-free and WithProjection configs/loaders; text_projection.weight must be exactly(projection_dim,hidden_size), no bias. Preserve strict unused-weight checks and public load return type.
+- [x] Add oracle cases for legacy maximum-token pooling, modern first EOS, repeated EOS, added-ID override, no EOS fallback and skip bounds. Validate allocation budgets and trainability/gradient path.
+- [x] Run SdxlClipSuite,PretrainedClipSuite and existing ClipTextModel tests; commit when all pass.
 
 ## Task2: NUI dual-encoder prompt semantics
 

@@ -35,15 +35,20 @@ final case class ClipTextLayer(norm1: LayerNorm,qProj: Linear,kProj: Linear,vPro
     val flat=norm2(hidden).reshape(Shape.from(Seq(b*t,width.toLong)))
     hidden+fc2(activation(fc1(flat))).reshape(input.data.shape)
 
-/** Per-token CLIP text conditioning. Earlier-layer output is always passed through final LayerNorm. */
+final case class ClipTextOutput(hidden: Variable,finalHidden: Variable,pooled: Variable,projected: Option[Variable])
+
+/** apply preserves normalized SD1.x output; encode exposes raw selected states and pooled projection. */
 final case class ClipTextModel(tokenEmbedding: Embedding,positionEmbedding: Embedding,layers: Vector[ClipTextLayer],
-    finalNorm: LayerNorm,maxScoreElements: Long=16777216L,maxHiddenElements: Long=16777216L) derives Module:
+    finalNorm: LayerNorm,maxScoreElements: Long=16777216L,maxHiddenElements: Long=16777216L,
+    textProjection: Option[Linear]=None,eosTokenId: Long=2L) derives Module:
   private val width=finalNorm.width
   require(layers.nonEmpty && layers.size<=512 && layers.forall(_.width==width),"invalid CLIP layer stack")
   require(tokenEmbedding.weight.data.shape.dims(1)==width && positionEmbedding.weight.data.shape.dims(1)==width &&
     tokenEmbedding.weight.data.shape.dims.head>0 && positionEmbedding.weight.data.shape.dims.head>0,"CLIP embedding shape mismatch")
   require(maxScoreElements>=0 && maxHiddenElements>=0,"negative CLIP workspace limit")
-  def apply(tokens: Tensor[Long],skipLastLayers: Int=0): Variable =
+  require(eosTokenId>=0,"negative CLIP EOS ID")
+  textProjection.foreach(p => require(p.weight.data.shape.dims(1)==width && p.bias.isEmpty,"invalid CLIP text projection"))
+  private def input(tokens: Tensor[Long],skipLastLayers: Int): Variable =
     require(tokens.shape.rank==2,"CLIP token IDs must have shape (batch,tokens)")
     val b=tokens.shape.dims(0);val t=tokens.shape.dims(1)
     require(t>0 && t<=positionEmbedding.weight.data.shape.dims.head && t<=Int.MaxValue,"CLIP context length exceeded or empty")
@@ -59,6 +64,47 @@ final case class ClipTextModel(tokenEmbedding: Embedding,positionEmbedding: Embe
       val mlp=Shape.from(Seq(b,t,layer.fc1.weight.data.shape.dims.head)).numel
       require(mlp<=maxHiddenElements && mlp<=Int.MaxValue,"CLIP MLP workspace limit exceeded")
     val positions=Tensor.fromLongs(Array.tabulate(t.toInt)(_.toLong),Shape.from(Seq(1L,t)))
-    val input=tokenEmbedding(tokens)+positionEmbedding(positions)
-    val encoded=layers.take(layers.size-skipLastLayers).foldLeft(input)((x,layer) => layer(x,maxScoreElements))
+    tokenEmbedding(tokens)+positionEmbedding(positions)
+
+  def apply(tokens: Tensor[Long],skipLastLayers: Int=0): Variable =
+    val embedded=input(tokens,skipLastLayers)
+    val encoded=layers.take(layers.size-skipLastLayers).foldLeft(embedded)((x,layer) => layer(x,maxScoreElements))
     finalNorm(encoded)
+
+  /** Raw state after N-skip layers, plus fully executed normalized/pooled output.
+    * legacyEosOverride follows NUI's added-token fix only for legacy eosTokenId=2.
+    */
+  def encode(tokens: Tensor[Long],skipLastLayers: Int=1,legacyEosOverride: Option[Long]=None): ClipTextOutput =
+    require(skipLastLayers>=0 && skipLastLayers<=layers.size,"invalid CLIP skipped layer count")
+    require(legacyEosOverride.forall(_>=0),"negative legacy EOS override")
+    require(tokens.shape.rank==2,"CLIP token IDs must have shape (batch,tokens)")
+    textProjection.foreach { p =>
+      val projected=Shape.from(Seq(tokens.shape.dims.head,p.weight.data.shape.dims.head)).numel
+      require(projected<=maxHiddenElements && projected<=Int.MaxValue,"CLIP projected workspace limit exceeded")
+    }
+    var hidden=input(tokens,0)
+    var selected=hidden
+    val selectedDepth=layers.size-skipLastLayers
+    layers.zipWithIndex.foreach { (layer,index) =>
+      hidden=layer(hidden,maxScoreElements)
+      if index+1==selectedDepth then selected=hidden
+    }
+    val normalized=finalNorm(hidden)
+    val ids=tokens.toLongArray
+    val batch=tokens.shape.dims.head.toInt;val count=tokens.shape.dims(1).toInt
+    val rows=Vector.tabulate(batch) { row =>
+      var maximum=0
+      var firstEos= -1
+      var overrideEos= -1
+      for col <- 0 until count do
+        val id=ids(row*count+col)
+        if id>ids(row*count+maximum) then maximum=col
+        if id==eosTokenId && firstEos<0 then firstEos=col
+        if legacyEosOverride.contains(id) && overrideEos<0 then overrideEos=col
+      val position=if eosTokenId!=2 then math.max(0,firstEos)
+        else if overrideEos>=0 && ids(row*count+maximum)>legacyEosOverride.get then overrideEos
+        else maximum
+      normalized.narrow(0,row,1).narrow(1,position,1).reshape(Shape.from(Seq(1L,width.toLong)))
+    }
+    val pooled=if rows.isEmpty then normalized.narrow(1,0,1).reshape(Shape.from(Seq(0L,width.toLong))) else Variable.cat(rows,0)
+    ClipTextOutput(selected,normalized,pooled,textProjection.map(_(pooled)))

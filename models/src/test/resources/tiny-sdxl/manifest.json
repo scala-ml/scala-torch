@@ -36,6 +36,20 @@
       ],
       "sha256": "3bd91412e8c0482c90e0f3ce95fc9c80b0f27d0e4590177b0a083d8c4ce24c4d"
     },
+    "text_encoder_2-eos-override": {
+      "shape": [
+        2,
+        32
+      ],
+      "sha256": "7719c883183b3bcc7eeb7ae2a7b5608c7668ef62ae372fe418eda2f159613fbe"
+    },
+    "text_encoder_2-modern-eos": {
+      "shape": [
+        2,
+        32
+      ],
+      "sha256": "0eb19fc9b15f54d466cbce5f7c80c87bb193cf5eadc8ac0736d2fbc39edd4674"
+    },
     "sample": {
       "shape": [
         1,

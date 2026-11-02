@@ -1,3 +1,34 @@
+## SDXL CLIP raw states and pooling projection (2026-11-03)
+
+Text-pipeline planTask1implemented. ClipTextConfig appends projectionWidth,
+recognizesCLIPTextModelWithProjection. Loader validates text_projection.weight
+exact2Dshape/noextraweights; modelappends textProjection andeosTokenId.
+ClipTextModel.apply unchanged normalized earlier-layer behavior.
+Newencode(tokens,skipLastLayers=1,legacyEosOverride=None): ClipTextOutput with
+rawselectedhidden,finalnormalizedhidden,pooled,optionalprojected. Fullstackruns
+once,selectedstate retained;pooling fromfinalnormalized state. LegacyEOS2 uses
+firstmax-token;NUIoverride firstactualEOS onlywhenpresentandmaxIDexceedsit.
+ModernEOSusesfirstmatch,missingEOSfallbackindex0 (Transformersbehavior).
+
+SdxlClipSuite matches independentTransformers raw/projected output max1.2e-6,
+tolerance2e-5. Addedoverride andmodernrepeated/missingEOS oraclefixtures (total16
+SDXLtensors);skip0/skipall,emptybatch,budgets,gradients verified. CLIP3suites
+passed15;finalextended SdxlClipSuite passed4 includingmissing/incorrect/undeclared
+projectionweight rejection. OptionaloraclePythononly,runtimeisScala.
+Task1ledger.superpowers/sdd/2026-11-03-sdxl-text-pipeline/progress.md.
+
+NEXT Task2 NUIpromptsyntax/chunks/emphasis anddualencoder. Read localprompt.py:
+75contenttokens,BREAK,comma backtrack20,repeatshorterencoderlastchunk,pad after
+firstEOS toactualpadID;pooled fromencoder2firstchunk beforeemphasis. NUIweights
+multiplythenpreservemean;clip_skip1/2rawpenultimate;blanknegativezerosbothoutputs.
+Parseralso supports(xN) repeats andescapedbrackets; preservebehaviorwithfixtures.
+NofullnativeSDXL pipelineyet; nextworkerfamilyrouting/sizeconditions afterward.
+
+SD1.5 immutable512run session80265 reached20/20;VAEdecode ACTIVE, confirmedGPU
+100%,987MiB andactualJava40024(parentlauncher13624). NoPNG/resultyet. This time
+runtimejarsfixed. Keep samehandle andinspectcompletion;do notconfuseoldterminal
+11471. Scala-torch sbtliveCUDA+tinySDXLprops;NUI treeunchangedon dedicatedbranch.
+
 ## SDXL CUDA U-Net and retained CFG additions (2026-11-03)
 
 U-Net planTask3 implemented. CudaUNet.apply appends optional
