@@ -4,11 +4,14 @@ import scalatorch.*
 import scalatorch.autograd.Variable
 
 class DpmReferenceSuite extends munit.FunSuite:
-  test("DPM++ trajectories match pinned Diffusers CPU outputs for all prediction modes") {
-    val stream=getClass.getResourceAsStream("/dpm/trajectory.tsv")
+  for (file,hash,karras) <- Vector(
+      ("trajectory.tsv","ee9b33bc17640039c2d93e118ebf380103fb4ba0bc37809057037583f1a0a188",true),
+      ("uniform-trajectory.tsv","a300fb807445688e1810b02195968d92f933019cb09f0a8497783098038f7cfe",false)) do
+   test(s"DPM++ $file matches pinned Diffusers CPU outputs for all prediction modes") {
+    val stream=getClass.getResourceAsStream(s"/dpm/$file")
     val bytes=try stream.readAllBytes() finally stream.close()
     assertEquals(java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)),
-      "ee9b33bc17640039c2d93e118ebf380103fb4ba0bc37809057037583f1a0a188")
+      hash)
     val rows=new String(bytes,java.nio.charset.StandardCharsets.UTF_8).linesIterator.drop(1)
       .map(_.split("\t").toVector).toVector
     def variable(values: Vector[Float])=Variable(Tensor.fromFloats(values.toArray,Shape.from(Seq(2))),false)
@@ -28,7 +31,8 @@ class DpmReferenceSuite extends munit.FunSuite:
         }
         sample=result.previous
         history=Some(result.predictedOriginal)
-      val schedule=DpmSchedule.karras(DiffusionNoiseSchedule.linear(1000,.00085,.012,true),4)
+      val noise=DiffusionNoiseSchedule.linear(1000,.00085,.012,true)
+      val schedule=if karras then DpmSchedule.karras(noise,4) else DpmSchedule.uniform(noise,4)
       assertEquals(schedule.timesteps,cases.map(_(2).toFloat))
       schedule.sigmas.zip(sigmas).foreach { (actual,expected) =>
         assertEqualsDouble(actual,expected,3e-5)

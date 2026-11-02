@@ -1,3 +1,21 @@
+## DPM++ Uniform support (2026-11-03)
+
+DpmSchedule.uniform implements Diffusers DPM linspace: steps+1 evenly spaced
+training indices, ties-to-even rounding, descending order, discard zero endpoint,
+terminal zero sigma, unit initial noise. Native worker accepts Uniform for DPM++ 2M
+as well as Karras, eliminating the earlier catalog/execution gap for normal step
+counts. This is explicit DPM linspace, not Euler's endpoint-inclusive schedule.
+Duplicate-sigma schedules are still rejected by DpmSchedule validation.
+
+Extended the offline pinned Diffusers 0.33.1 reference generator with an optional
+uniform argument. uniform-trajectory.tsv adds 12 updates across epsilon/sample/
+v_prediction; static Scala tests verify timestep/sigma and recurrent solver output
+against those rows. Existing Karras reference still passes. Backend test now writes
+both Karras and Uniform real tiny-model PNGs. Final focused run: 3 tests passed.
+Python was used only to create the checked-in oracle, never by native runtime/tests.
+NUI integration was not rerun this turn; its earlier Karras path remains verified.
+Current sbt server is scala-torch with tiny-model property enabled. NUI branch and
+product remain unchanged this turn. Full migration remains active and incomplete.
 ## Native model/sampler catalog checkpoint (2026-11-03)
 
 NativeDiffusionBackend now supports list_models and list_samplers. Model listing

@@ -16,7 +16,7 @@ for prediction in ("epsilon", "sample", "v_prediction"):
     scheduler = DPMSolverMultistepScheduler(
         num_train_timesteps=1000, beta_start=0.00085, beta_end=0.012,
         beta_schedule="scaled_linear", algorithm_type="dpmsolver++",
-        solver_order=2, solver_type="midpoint", use_karras_sigmas=True,
+        solver_order=2, solver_type="midpoint", use_karras_sigmas=not (len(sys.argv) > 2 and sys.argv[2] == "uniform"),
         prediction_type=prediction, final_sigmas_type="zero",
     )
     scheduler.set_timesteps(4)

@@ -130,7 +130,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         val requestedSchedule=str(g,"scheduler","Automatic")
         val schedule=if requestedSchedule=="Automatic" then (if sampler=="DPM++ 2M" then "Karras" else "Uniform") else requestedSchedule
         if !(sampler=="Euler" && Set("Uniform","Karras").contains(schedule)) &&
-            !(sampler=="DPM++ 2M" && schedule=="Karras") then unsupported(s"unsupported sampler/schedule: $sampler/$schedule")
+            !(sampler=="DPM++ 2M" && Set("Uniform","Karras").contains(schedule)) then unsupported(s"unsupported sampler/schedule: $sampler/$schedule")
         val outputName=str(p,"output_dir","")
         require(outputName.nonEmpty,"output_dir is required")
         val output=Path.of(outputName).toAbsolutePath.normalize()
@@ -144,7 +144,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
             context.checkCancelled()
             context.event("preview",Map("step"->Number(value.completedSteps),"jpeg_b64"->Str(NativePreview.jpegBase64(value.latents))))
         val image=if sampler=="DPM++ 2M" then
-          pipeline.generateDpm(imageRequest,DpmSchedule.karras(config.noise,steps),onProgress=progress,
+          val layout=if schedule=="Karras" then DpmSchedule.karras(config.noise,steps) else DpmSchedule.uniform(config.noise,steps)
+          pipeline.generateDpm(imageRequest,layout,onProgress=progress,
             cancelled=context.cancelled,prediction=config.prediction)
         else
           val layout=if schedule=="Karras" then config.noise.karrasEuler(steps) else config.noise.euler(steps,config.spacing,config.stepsOffset)

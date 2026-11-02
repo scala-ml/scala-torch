@@ -34,6 +34,12 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       val image=javax.imageio.ImageIO.read(path.toFile)
       assertEquals(image.getWidth,10);assertEquals(image.getHeight,6)
       assertEquals(events.toVector,Vector("progress","progress"))
+      val uniform=run("txt2img",Map("output_dir"->Str(output.toString),"params"->Obj(Map(
+        "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(2),
+        "seed"->Number(42),"sampler_name"->Str("DPM++ 2M"),"scheduler"->Str("Uniform")))))
+      assertEquals(uniform("scheduler"),Str("Uniform"))
+      val uniformPath=Path.of(uniform("images").asInstanceOf[Arr].values.head.asInstanceOf[Obj].fields("path").asInstanceOf[Str].value)
+      assertEquals(javax.imageio.ImageIO.read(uniformPath.toFile).getWidth,10)
       val cancelled=new NativeWorkContext(() => true,() => false,(_,_) => ())
       intercept[java.util.concurrent.CancellationException](backend.execute(NativeRequest("x","unload",Map.empty,None),cancelled))
       val invalid=intercept[NativeBackendError](run("txt2img",Map("unknown"->Bool(true))))
