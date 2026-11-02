@@ -74,6 +74,15 @@ Interfaces: append optional SDXL conditioning to pipeline construction; keep exi
 - [ ] Test failed load/set_vae retains published state, correct model family/hash, cancellation/staging/recovery, and strict unsupported variants.
 - [ ] Run SD1.5 image/worker regressions plus SDXL suites; commit.
 
+Task3 partial evidence: shared sampler now accepts optional SDXL conditioning
+and default/custom original size/crop IDs; constructor validates U-Net context
+and addition dimensions. Eight fixed-noise Diffusers Euler/DPM cases compare
+final latent and VAE output, CPU maxabs1.956e-5. CUDA offload16MiB agreement max
+6.021e-6. Seed replay after cancellation and cancellation during text encoding
+pass. SD1.5 CudaImagePipelineSuite and ImageToImageSuite regressions also pass.
+Worker family loading, tokenizer config/hash and replacement-state tests remain
+before Task3 can be considered complete. No real SDXL image acceptance yet.
+
 ## Task4: NUI and real-model acceptance
 
 - [ ] Extend NUI opt-in NativeScalaEngineSuite/NativeGeneratorSuite to actual tiny SDXL typed requests and PNG save/replay on the dedicated branch.

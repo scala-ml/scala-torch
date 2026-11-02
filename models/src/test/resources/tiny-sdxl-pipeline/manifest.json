@@ -1,0 +1,243 @@
+{
+  "cases": [
+    {
+      "name": "plain",
+      "guidance": "7.5",
+      "empty": false,
+      "img2img": false,
+      "custom": false
+    },
+    {
+      "name": "empty",
+      "guidance": "7.5",
+      "empty": true,
+      "img2img": false,
+      "custom": false
+    },
+    {
+      "name": "unguided",
+      "guidance": "1.0",
+      "empty": false,
+      "img2img": false,
+      "custom": true
+    },
+    {
+      "name": "img2img",
+      "guidance": "7.5",
+      "empty": false,
+      "img2img": true,
+      "custom": true
+    },
+    {
+      "name": "dpm-plain",
+      "guidance": "7.5",
+      "empty": false,
+      "img2img": false,
+      "custom": false
+    },
+    {
+      "name": "dpm-empty",
+      "guidance": "7.5",
+      "empty": true,
+      "img2img": false,
+      "custom": false
+    },
+    {
+      "name": "dpm-unguided",
+      "guidance": "1.0",
+      "empty": false,
+      "img2img": false,
+      "custom": true
+    },
+    {
+      "name": "dpm-img2img",
+      "guidance": "7.5",
+      "empty": false,
+      "img2img": true,
+      "custom": true
+    }
+  ],
+  "tensors": {
+    "noise": {
+      "shape": [
+        1,
+        4,
+        4,
+        4
+      ],
+      "sha256": "49ca1425249a3b3a69ffe6d0da419955ab48ee772f1f0cf3ab6cd3b3102ae8e0"
+    },
+    "source": {
+      "shape": [
+        1,
+        3,
+        8,
+        8
+      ],
+      "sha256": "84bc0a9b96f98f3db22abf410f98abf75ef97fb3d80022dbba581f7cb100b78e"
+    },
+    "posterior-noise": {
+      "shape": [
+        1,
+        4,
+        4,
+        4
+      ],
+      "sha256": "8d52eba72142b9ca0b13db568cefae439a86569fcf359beef0b7c742aae090cd"
+    },
+    "plain-latent": {
+      "shape": [
+        1,
+        4,
+        4,
+        4
+      ],
+      "sha256": "6027ff2258cbe423135750463833f075b8da530e7ef18dce995d1b74bb069215"
+    },
+    "plain-image": {
+      "shape": [
+        1,
+        3,
+        8,
+        8
+      ],
+      "sha256": "c9af9c08087312170829157bc575b99176e145017e1266d6e59a2e87007369fd"
+    },
+    "empty-latent": {
+      "shape": [
+        1,
+        4,
+        4,
+        4
+      ],
+      "sha256": "00ca4c2eae6a6c47ad6e27e41ebdc974d51af933738cd9b121683ee98b3eac13"
+    },
+    "empty-image": {
+      "shape": [
+        1,
+        3,
+        8,
+        8
+      ],
+      "sha256": "47e7041b54f57f3d8ef21135172c870984905551a88dd5db05e4a0e550d4e5c5"
+    },
+    "unguided-latent": {
+      "shape": [
+        1,
+        4,
+        4,
+        4
+      ],
+      "sha256": "aab3e408a88115f6e70149aab82f63f649a00968dbecccf4cee6297c2f9cd054"
+    },
+    "unguided-image": {
+      "shape": [
+        1,
+        3,
+        8,
+        8
+      ],
+      "sha256": "ea89e15d660becc8a2af21533bccb704a5ed75f901c4543af8fd176e52f7e10c"
+    },
+    "img2img-latent": {
+      "shape": [
+        1,
+        4,
+        4,
+        4
+      ],
+      "sha256": "764975ac73281aa3c746a17cae6c81c71d483daf78a32e0054741e6941bffa37"
+    },
+    "img2img-image": {
+      "shape": [
+        1,
+        3,
+        8,
+        8
+      ],
+      "sha256": "42c3053b8db319f8871a3f3454dbf8805e08e37bf20a8af8086ed3409a65476d"
+    },
+    "dpm-plain-latent": {
+      "shape": [
+        1,
+        4,
+        4,
+        4
+      ],
+      "sha256": "0755c23447082f3195f9ca0e838ef712ec3f31b9b7495e15fd0661b8723d3df3"
+    },
+    "dpm-plain-image": {
+      "shape": [
+        1,
+        3,
+        8,
+        8
+      ],
+      "sha256": "c6897f20fc310eae9021f9a8f43e696e353f9c4a391849349f4c97cc5fa292d8"
+    },
+    "dpm-empty-latent": {
+      "shape": [
+        1,
+        4,
+        4,
+        4
+      ],
+      "sha256": "c3fe4ac166a7f2fb8b7dc578e1c0567f525c988ad2283f628e863575e9604841"
+    },
+    "dpm-empty-image": {
+      "shape": [
+        1,
+        3,
+        8,
+        8
+      ],
+      "sha256": "4b01c1cff3a93f872a8338553cea6941872a46b9f0c49ca1e2ce10c212038458"
+    },
+    "dpm-unguided-latent": {
+      "shape": [
+        1,
+        4,
+        4,
+        4
+      ],
+      "sha256": "dc3ef34cf8cf5574789ca9b06ee8574b43586202df1ac00de3f77468e59f7fc8"
+    },
+    "dpm-unguided-image": {
+      "shape": [
+        1,
+        3,
+        8,
+        8
+      ],
+      "sha256": "67cacbd6e7b5193310b370c99f2658289b95a61a542ba520a72824133257ddbf"
+    },
+    "dpm-img2img-latent": {
+      "shape": [
+        1,
+        4,
+        4,
+        4
+      ],
+      "sha256": "2e4acb02b03e333e5123c3b51b5d4120c2fa5f943087d165d7580f020e11c0a0"
+    },
+    "dpm-img2img-image": {
+      "shape": [
+        1,
+        3,
+        8,
+        8
+      ],
+      "sha256": "619776ecc083d472ba44f70fef5a825c93df8e3d6d4e8183cdce38f6d6cd58e1"
+    }
+  },
+  "torch": "2.7.1+cpu",
+  "diffusers": "0.33.1",
+  "model_revision": "fa06b5c3d6d45fabd978486616c6dae068519e85",
+  "inputs": {
+    "unet\\config.json": "000fc142c223376bf8760b3988bd5b86d96775f75faba616a5d71e1eb9242188",
+    "unet\\diffusion_pytorch_model.safetensors": "db8347b4f212b7a54e493876045f994602d5876ad93b344bd268c473d249182d",
+    "vae\\config.json": "6656da5fdc12f48164d58b75fae480ed518be02a1a53e2bf7968a07abb5e8348",
+    "vae\\diffusion_pytorch_model.safetensors": "805db5f11178b8b3080f675e825bf8eaef45461333ffc5cf63423133bfddf4bf"
+  },
+  "prompt_manifest_sha256": "f9285311fdf3a8c7c11f7cec840ec070eeb540f4f7dd432c2699834f85582315"
+}

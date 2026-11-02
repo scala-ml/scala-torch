@@ -1,3 +1,24 @@
+## SDXL shared image pipeline verified; worker loading next (2026-11-03)
+
+EulerImagePipeline now accepts optional SdxlTextConditioning and routes raw
+dual contexts plus pooled/size-time additions into retained CPU/CUDA predictor.
+SdxlImageSize stores original(height,width),crop(top,left); target=request size.
+Default originals=request size,crop0. Constructor checks context and addition
+width compatibility. SD1 paths/default arguments preserved. SDXL text checks
+cancellation between chunks/encoders; shared sampler retains cancellation and
+per-call history. Explicit noise and posterior-noise independent oracle covers
+Euler/DPM++2M, CFG enabled/disabled, blank/nonempty negatives and img2img suffix.
+8 tiny SDXL cases compare both final latent and decoded image vs Diffusers;
+maxabs1.956e-5, CUDA16MiB offload vs CPU max6.021e-6. Three regression suites
+passed8 tests; final extended pipeline/conditioning suites passed2, including
+seed replay after mid-generation cancellation and text-chunk cancellation.
+Fixtures tiny-sdxl-pipeline; optional script reference_sdxl_pipeline.py records
+weights/config hashes, dependency versions and prompt fixture manifest hash.
+Next Task3: NativeDiffusionBackend family selection/load both CLIPs/tokenizers,
+explicit PAD config and full-SDXL U-Net parameter budget, checkpoint hashing,
+set_vae retains sdxlConditioning, failed-load publication tests. Worker currently
+still loads single CLIP; do not claim NUI SDXL requests work yet. No live jobs.
+
 ## Full512 SD1.5 img2img completed (2026-11-03)
 
 Session62925 now TERMINAL exit0, empty stderr, timing669.8015785s. Output

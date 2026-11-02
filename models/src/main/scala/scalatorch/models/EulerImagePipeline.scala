@@ -5,7 +5,12 @@ import scalatorch.autograd.{Autograd,Variable}
 import java.util.concurrent.CancellationException
 
 final case class DiffusionImageRequest(prompt: String,negativePrompt: String,width: Int,height: Int,seed: Long,
-    guidanceScale: Float=7.5f,truncatePrompt: Boolean=false,clipSkip: Int=1)
+    guidanceScale: Float=7.5f,truncatePrompt: Boolean=false,clipSkip: Int=1,sdxlSize: Option[SdxlImageSize]=None)
+/** SDXL original size and crop; target size is the requested output dimensions. */
+final case class SdxlImageSize(originalHeight: Int,originalWidth: Int,cropTop: Int=0,cropLeft: Int=0):
+  require(originalHeight>0 && originalWidth>0 && cropTop>=0 && cropLeft>=0,"invalid SDXL original size or crop")
+  private[models] def timeIds(height: Int,width: Int): Tensor[Float] =
+    Tensor.fromFloats(Array(originalHeight.toFloat,originalWidth.toFloat,cropTop.toFloat,cropLeft.toFloat,height.toFloat,width.toFloat),Shape.from(Seq(1L,6L)))
 /** Single NCHW image in [-1,1]; optional standard-normal posterior noise for replay. */
 final case class DiffusionImageSource(image: Tensor[Float],strength: Double,posteriorNoise: Option[Tensor[Float]]=None)
 final case class DiffusionImageProgress(completedSteps: Int,totalSteps: Int,timestep: Float,latents: Tensor[Float])
@@ -13,12 +18,18 @@ final case class DiffusionImageProgress(completedSteps: Int,totalSteps: Int,time
 /** Single-image Euler/DPM++ sampling with explicit U-Net and VAE placement. */
 final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder: ClipTextModel,
     val unet: ConditionalUNet2d,val vae: VaeModel,maxImagePixels: Long=16777216L,maxLatentElements: Long=16777216L,
-    val vaeExecution: VaeExecution=VaeExecution.Cpu,val unetExecution: UNetExecution=UNetExecution.Cpu):
+    val vaeExecution: VaeExecution=VaeExecution.Cpu,val unetExecution: UNetExecution=UNetExecution.Cpu,
+    val sdxlConditioning: Option[SdxlTextConditioning]=None):
   require(maxImagePixels>=0 && maxLatentElements>=0,"negative image pipeline allocation limit")
   require(tokenizer.vocabSize<=textEncoder.tokenEmbedding.weight.data.shape.dims.head &&
     tokenizer.maxLength<=textEncoder.positionEmbedding.weight.data.shape.dims.head,"pipeline tokenizer/text encoder mismatch")
-  require(textEncoder.finalNorm.width==unet.midBlock.attention.blocks.head.attn2.toK.weight.data.shape.dims(1),
+  require(sdxlConditioning.fold(textEncoder.finalNorm.width)(_.contextWidth)==unet.midBlock.attention.blocks.head.attn2.toK.weight.data.shape.dims(1),
     "pipeline text context width mismatch")
+  require(sdxlConditioning.isDefined==unet.additionEmbedding.isDefined,"pipeline SDXL addition/model mismatch")
+  sdxlConditioning.foreach { text =>
+    unet.addedFeatures(1L,Some(DiffusionAddedConditioning(
+      Tensor.fromFloats(new Array[Float](text.pooledWidth),Shape.from(Seq(1L,text.pooledWidth.toLong))),SdxlImageSize(1,1).timeIds(1,1))))
+  }
   require(unet.convIn.weight.data.shape.dims(1)==vae.config.latentChannels &&
     unet.convOut.weight.data.shape.dims.head==vae.config.latentChannels,"pipeline latent channel mismatch")
   private val factor=1 << (vae.decoder.upBlocks.size-1)
@@ -43,6 +54,7 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
     def checkCancelled(): Unit =
       if cancelled() || Thread.currentThread().isInterrupted then throw new CancellationException("image generation cancelled")
     checkCancelled()
+    require(sdxlConditioning.nonEmpty || request.sdxlSize.isEmpty,"SDXL size conditioning requires an SDXL model")
     require(request.clipSkip>=1 && request.clipSkip<=textEncoder.layers.size+1,"CLIP skip exceeds text encoder layer count")
     require(request.guidanceScale.isFinite && request.guidanceScale>=0,"invalid image guidance scale")
     require(request.width>0 && request.height>0 && request.width%factor==0 && request.height%factor==0,
@@ -83,8 +95,15 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
       val ids=tokenizer.batch(Vector(text),truncate=request.truncatePrompt).ids
       checkCancelled()
       textEncoder(ids,skipLastLayers=request.clipSkip-1)
-    val conditional=encode(request.prompt)
-    val unconditional=if request.guidanceScale>1 then Some(encode(request.negativePrompt)) else None
+    val sdxl=sdxlConditioning.map(_.encode(request.prompt,request.negativePrompt,request.clipSkip,cancelled))
+    val conditional=sdxl.fold(encode(request.prompt))(p => Variable(p.positive,requiresGrad=false))
+    val unconditional=if request.guidanceScale>1 then Some(sdxl.fold(encode(request.negativePrompt))(p => Variable(p.negative,requiresGrad=false))) else None
+    val positiveAdded=sdxl.map { pair =>
+      val size=request.sdxlSize.getOrElse(SdxlImageSize(request.height,request.width))
+      DiffusionAddedConditioning(pair.pooled,size.timeIds(request.height,request.width))
+    }
+    val negativeAdded=if request.guidanceScale>1 then sdxl.map(pair =>
+      DiffusionAddedConditioning(pair.negativePooled,positiveAdded.get.timeIds)) else None
     checkCancelled()
     val initial=noise.getOrElse(randomNoise())
     var latent=clean.fold(Variable(initial,requiresGrad=false)*schedule.initialNoiseSigma.toFloat) { encoded =>
@@ -95,7 +114,7 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
     val scheduler=EulerScheduler(schedule,prediction,maxElements=maxLatentElements)
     val dpmSolver=if dpm then Some(DpmPlusPlus2M(schedule.sigmas,prediction,maxLatentElements)) else None
     var history: Option[Variable]=None
-    unetExecution.withPredictor(unet,conditional.data,unconditional.map(_.data),cancelled) { predict =>
+    unetExecution.withPredictor(unet,conditional.data,unconditional.map(_.data),cancelled,positiveAdded,negativeAdded) { predict =>
       for i <- schedule.timesteps.indices do
         checkCancelled()
         val input=if dpm then latent else scheduler.scaleModelInput(i,latent)
