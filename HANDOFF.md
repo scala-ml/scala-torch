@@ -1,3 +1,22 @@
+## NUI native application launch route (2026-11-03)
+
+On NUI dedicated feat/scala-torch-native-engine branch, ScalaTorchLaunch now reads
+SDFX_SCALATORCH_CLASSPATH_FILE, SDFX_SCALATORCH_MODEL, SDFX_SCALATORCH_SCHEDULER and
+optional SDFX_SCALATORCH_JAVA (Java25; important for Java21 packaged runtimes).
+AppServices chooses it before PythonEnv when configured; explicit launchOverride
+still wins. SdfxApp skips Python bootstrap when any native variable is set.
+Partial config fails explicitly, not via fallback; native dry-run rejects.
+Classpath requires absolute existing entries; Java/model/config paths validated.
+No change to default Python selection when no native environment variables exist.
+
+Two launch tests passed and ui/compile passed (one preexisting deprecation warning).
+Real NativeScalaEngineSuite now constructs launch through ScalaTorchLaunch and
+passed its model/sampler load/64x64 generation/preview/unload flow in 17 seconds.
+Desktop interaction was NOT exercised yet. Native AppServices still encounters
+unsupported list_files/system_status and other missing features; model loading
+must be configured CPU/Float32. Full migration remains incomplete.
+NUI sbt server currently active with integration env values; stop before building
+scala-torch. docs/scala-torch-native-engine.md documents native launch variables.
 ## Native iteration generation (2026-11-03)
 
 Native worker accepts n_iter 1..100 with batch_size still 1. Each iteration uses
