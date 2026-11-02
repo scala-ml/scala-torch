@@ -17,6 +17,11 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       def run(kind: String,params: Map[String,NativeJson])=
         backend.execute(NativeRequest("r",kind,params,None),context)
       import NativeJson.*
+      val catalog=run("list_models",Map("dirs"->Arr(Vector(Str(root.getParent.toString)))))
+      assertEquals(catalog("models").asInstanceOf[Arr].values.size,1)
+      assertEquals(run("list_models",Map("dirs"->Arr(Vector(Str(output.toString)))))("models"),Arr(Vector.empty))
+      val samplers=run("list_samplers",Map.empty)("samplers").asInstanceOf[Arr].values
+      assertEquals(samplers.map(_.asInstanceOf[Obj].fields("name")),Vector(Str("Euler"),Str("DPM++ 2M")))
       val metadata=run("load_model",Map("path"->Str(root.toString),"dtype"->Str("fp32"),"vram_mode"->Str("cpu")))
       assert(metadata("hash").asInstanceOf[Str].value.matches("[0-9a-f]{64}"))
       intercept[NativeBackendError](run("load_model",Map("dtype"->Str("fp16"))))

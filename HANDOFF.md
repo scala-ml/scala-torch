@@ -1,3 +1,16 @@
+## Native model/sampler catalog checkpoint (2026-11-03)
+
+NativeDiffusionBackend now supports list_models and list_samplers. Model listing
+returns only the configured loadable root when it is beneath one of the requested
+directories; it reports directory size without following symlinks while walking.
+This is not yet arbitrary checkpoint discovery/loading. Sampler catalog advertises
+Euler (Uniform default) and DPM++ 2M (Karras default), plus Automatic/Uniform/Karras.
+DPM++ Uniform remains unsupported by execution; the protocol catalog does not
+encode per-sampler schedule compatibility. Unit tests cover directory filtering
+and names. NUI NativeScalaEngineSuite now verifies typed model and sampler lists
+before load/generation/unload and passed (16.948 seconds).
+Both repos still use their dedicated branches. NUI sbt server is currently active;
+shutdown before returning to scala-torch builds. Classpath file was refreshed.
 ## Real NUI EngineClient integration (2026-11-03)
 
 Created NUI branch feat/scala-torch-native-engine BEFORE edits, as requested.

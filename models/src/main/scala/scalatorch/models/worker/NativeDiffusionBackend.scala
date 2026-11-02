@@ -31,7 +31,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
       finally input.close()
     }
     java.util.HexFormat.of().formatHex(digest.digest())
-  val supported=Set("load_model","unload","txt2img")
+  val supported=Set("load_model","unload","txt2img","list_models","list_samplers")
   private def unsupported(message: String): Nothing=throw new NativeBackendError("unsupported",message)
   private def keys(p: Map[String,NativeJson],allowed: Set[String]): Unit=
     val unknown=p.keySet--allowed
@@ -53,6 +53,36 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
     val p=request.params
     context.checkCancelled()
     request.kind match
+      case "list_models" =>
+        keys(p,Set("dirs"))
+        val directories=p.get("dirs") match
+          case Some(Arr(values)) => values.map {
+            case Str(path) => Path.of(path).toAbsolutePath.normalize()
+            case _ => throw IllegalArgumentException("dirs must contain strings")
+          }
+          case _ => throw IllegalArgumentException("dirs must be an array")
+        // Advertise only the configured checkpoint that this worker can load.
+        val visible=directories.exists(path => Files.isDirectory(path) && root.startsWith(path.toRealPath()))
+        val entries=if !visible then Vector.empty else
+          val files=Files.walk(root)
+          val bytes=try
+            val iterator=files.iterator()
+            var total=BigInt(0)
+            while iterator.hasNext do
+              context.checkCancelled()
+              val file=iterator.next()
+              if Files.isRegularFile(file,java.nio.file.LinkOption.NOFOLLOW_LINKS) then total+=Files.size(file)
+            total
+          finally files.close()
+          Vector(Obj(Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),
+            "kind"->Str("diffusers"),"size_mb"->Number(BigDecimal(bytes)/BigDecimal(1048576)))))
+        Map("models"->Arr(entries))
+      case "list_samplers" =>
+        keys(p,Set.empty)
+        def sampler(name: String,schedule: String)=Obj(Map("name"->Str(name),"supported"->Bool(true),"default_scheduler"->Str(schedule)))
+        Map("samplers"->Arr(Vector(sampler("Euler","Uniform"),sampler("DPM++ 2M","Karras"))),
+          "schedulers"->Arr(Vector("Automatic","Uniform","Karras").map(Str.apply)),
+          "upscalers"->Arr(Vector.empty),"preprocessors"->Arr(Vector.empty))
       case "load_model" =>
         keys(p,Set("path","dtype","vram_mode","vae_path","vae_tiling"))
         require(Path.of(str(p,"path",root.toString)).toRealPath()==root,"model path differs from configured checkpoint")
