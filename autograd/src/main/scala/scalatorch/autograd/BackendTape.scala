@@ -59,6 +59,8 @@ final class BackendTape[T](val backend: TrainingBackend[T]) extends AutoCloseabl
       this -> ((g,_) => backend.multiply(g,other.data)),other -> ((g,_) => backend.multiply(g,data))))
     def *(scalar: Float): Value = result(backend.scale(data,scalar),Vector(this -> ((g,_) => backend.scale(g,scalar))))
     def -(other: Value): Value = this + other * -1f
+    def rope(positionStart: Int = 0,theta: Double = 10000.0): Value =
+      result(backend.rope(data,positionStart,theta),Vector(this -> ((g,_) => backend.ropeBackward(g,positionStart,theta))))
     def silu(): Value = result(backend.silu(data),Vector(this -> ((g,_) => backend.siluBackward(data,g))))
     def rmsNorm(weight: Value,epsilon: Double = 1e-6): Value = result(backend.rmsNorm(data,weight.data,epsilon),Vector(
       this -> ((g,_) => backend.rmsNormInputBackward(data,weight.data,g,epsilon)),

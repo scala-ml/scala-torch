@@ -4,9 +4,11 @@ Updated 2026-11-02. The design was approved by the user. Subsequent explicit req
 
 ## Verified checkpoint
 
-Full verification: **185 passed, 0 failed, 0 skipped** (core 10, CPU 15, autograd 38, tensorio 17, nn 33, models 46, FFM 26), with public single/sharded tiny-Llama, trained SmolLM2, SmolLM2 tokenizer and all three autograd/model/FFM CUDA gates explicitly enabled. Run the module test commands from README; enable public model properties and the CUDA settings documented in backend-llama.md and backend-autograd.md. Scala's runtime dependencies still emit an Unsafe deprecation warning on Java 25; warning-free runtime compatibility is not claimed.
+Full verification: **189 passed, 0 failed, 0 skipped** (core 10, CPU 15, autograd 41, tensorio 17, nn 33, models 46, FFM 27), with public single/sharded tiny-Llama, trained SmolLM2, SmolLM2 tokenizer and all three autograd/model/FFM CUDA gates explicitly enabled. Run the module test commands from README; enable public model properties and the CUDA settings documented in backend-llama.md and backend-autograd.md. Scala's runtime dependencies still emit an Unsafe deprecation warning on Java 25; warning-free runtime compatibility is not claimed.
 
 The [NUI migration inventory](nui-migration-audit.md) now pins revision8823aa4 and enumerates47 requests,117 standard plugins,97 parameter fields and135 Python modules. All NUI migration rows remain open; this is static source evidence, not new runtime coverage.
+
+Rotary-position gradients now compose through BackendTape on CPU/CUDA using transpose rotation with the original offset/theta. Tests match existing autograd and finite differences across batched views/extreme positions, propagate gradients through a matrix projection, and verify budget rejection/empty handle lifetime. CUDA keeps gradient tensors resident; coefficient staging matches forward execution. Embedding/attention/loss backward and full GPU LLM training remain open.
 
 [Backend autodiff](backend-autograd.md) now supports scoped CPU/CUDA graphs for basic arithmetic, matrices, layouts and scalar reductions. Real GPU training fits `y=2x+1`, reducing loss9.0→1.2079227e-13 in100steps with stable per-step resident allocation. Reference/finite-difference gradients, repeated accumulation, allocation failure/retry and ownership checks pass. A new gradient layout exposed Numscala TT workspace omission; explicit reservation and a direct regression fix it. GPU transformer backward kernels and backend optimizer/checkpoint integration remain open.
 

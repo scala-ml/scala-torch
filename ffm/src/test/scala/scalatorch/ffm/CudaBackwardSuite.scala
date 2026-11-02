@@ -3,6 +3,28 @@ package scalatorch.ffm
 import scalatorch.*
 
 class CudaBackwardSuite extends munit.FunSuite:
+  test("rotary pullback validates offsets budgets and independently owned empty handles") {
+    assume(sys.env.get("SCALATORCH_CUDA_TESTS").contains("1"),"CUDA gate disabled")
+    CudaSession.withDevice(maxBytes=32) { session =>
+      val x=session.fill(Shape.from(Seq(1L,1L,1L,4L)),1f)
+      val before=session.allocatedBytes
+      intercept[IllegalArgumentException](session.ropeBackward(x))
+      for (start,theta) <- Seq((-1,10000.0),(0,0.0),(0,Double.NaN),(0,Double.PositiveInfinity)) do
+        intercept[IllegalArgumentException](session.ropeBackward(x,start,theta))
+      assertEquals(session.allocatedBytes,before)
+      x.close()
+      val odd=session.fill(Shape.from(Seq(0L,1L,1L,3L)),0f)
+      intercept[IllegalArgumentException](session.ropeBackward(odd))
+      odd.close()
+      val empty=session.fill(Shape.from(Seq(0L,2L,Long.MaxValue,4L)),0f)
+      val result=session.ropeBackward(empty,Int.MaxValue)
+      empty.close()
+      assertEquals(result.toCpu.shape,Shape.from(Seq(0L,2L,Long.MaxValue,4L)))
+      result.close()
+      intercept[IllegalStateException](session.ropeBackward(result))
+      assertEquals(session.allocatedBytes,0L)
+    }
+  }
   test("nonlinear pullbacks validate inputs and release inverse scratch on output failure") {
     assume(sys.env.get("SCALATORCH_CUDA_TESTS").contains("1"),"CUDA gate disabled")
     CudaSession.withDevice(maxBytes=64) { session =>

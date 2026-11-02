@@ -3,14 +3,14 @@ package scalatorch.cpu
 import scalatorch.*
 
 private[cpu] object CpuAttention:
-  def rope(value: Tensor[Float],start: Int,theta: Double): Tensor[Float] =
+  def rope(value: Tensor[Float],start: Int,theta: Double,inverse: Boolean = false): Tensor[Float] =
     val coefficients=RotaryCoefficients.values(value.shape,start,theta)
     if value.shape.numel==0 then return value
     val width=value.shape.dims(3).toInt;val half=width/2;val tokens=value.shape.dims(2).toInt
     val input=value.toFloatArray;val out=new Array[Float](input.length)
     for row <- 0 until input.length/width; d <- 0 until half do
       val offset=(row%tokens)*width+2*d
-      val c=coefficients(offset);val s=coefficients(offset+1)
+      val c=coefficients(offset);val s=coefficients(offset+1)*(if inverse then -1.0 else 1.0)
       val a=input(row*width+d).toDouble;val b=input(row*width+half+d).toDouble
       out(row*width+d)=(a*c-b*s).toFloat
       out(row*width+half+d)=(b*c+a*s).toFloat

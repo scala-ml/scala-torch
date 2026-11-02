@@ -100,11 +100,19 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     }
 
   def rope(value: CudaTensor,positionStart: Int = 0,theta: Double = 10000.0): CudaTensor =
+    rotate(value,positionStart,theta,inverse=false)
+  def ropeBackward(gradient: CudaTensor,positionStart: Int = 0,theta: Double = 10000.0): CudaTensor =
+    rotate(gradient,positionStart,theta,inverse=true)
+  private def rotate(value: CudaTensor,positionStart: Int,theta: Double,inverse: Boolean): CudaTensor =
     validate(value)
     val count=RotaryCoefficients.count(value.shape,positionStart,theta)
     if count==0 then return reshape(value,value.shape)
     require(count*2<=Int.MaxValue && count*8+value.shape.numel*4<=maxBytes-used,"rotary workspace budget exceeded")
     val coefficients=RotaryCoefficients.values(value.shape,positionStart,theta)
+    if inverse then
+      var i=1
+      while i<coefficients.length do
+        coefficients(i) = -coefficients(i);i+=2
     Using.resource(allocate(Shape.from(Seq(count*2)))) { buffer =>
       Using.resource(Arena.ofConfined()) { arena =>
         val host=arena.allocateFrom(JAVA_DOUBLE,coefficients*)
