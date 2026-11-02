@@ -107,6 +107,28 @@ final class Variable private (
         i += 1
       Tensor.fromFloats(upstream, data.shape))))
 
+  /** Contiguous range on one logical axis; backward scatters into the original shape. */
+  def narrow(dim: Int,start: Long,length: Long): Variable =
+    require(dim>=0 && dim<data.shape.rank,"narrow axis out of range")
+    val size=data.shape.dims(dim)
+    require(start>=0 && start<=size && length>=0 && length<=size-start,"invalid narrow bounds")
+    require(data.shape.numel<=Int.MaxValue,"narrow input exceeds Int indexing")
+    val selected=data.slice(dim,start,start+length)
+    Variable.result(selected,Vector(this -> ((g: Tensor[Float]) =>
+      val out=new Array[Float](data.shape.numel.toInt)
+      if selected.shape.numel>0 then
+        val suffix=Shape.from(data.shape.dims.drop(dim+1)).numel
+        val selectedRow=length*suffix
+        val inputRow=size*suffix
+        val offset=start*suffix
+        val seed=g.toFloatArray
+        var i=0
+        while i<seed.length do
+          val target=(i/selectedRow)*inputRow+offset+i%selectedRow
+          out(target.toInt)=seed(i)
+          i+=1
+      Tensor.fromFloats(out,data.shape))))
+
   def transpose(dim0: Int, dim1: Int): Variable =
     Variable.result(data.transpose(dim0, dim1), Vector(this -> ((g: Tensor[Float]) => g.transpose(dim0, dim1))))
   def reshape(shape: Shape): Variable =
