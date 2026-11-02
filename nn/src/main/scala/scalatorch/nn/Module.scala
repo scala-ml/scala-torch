@@ -9,6 +9,8 @@ trait Module[A]:
   def namedParameters(model: A): Vector[(String, Parameter)]
 
 object Module:
+  given Module[Conv2dConfig] with
+    def namedParameters(model: Conv2dConfig) = Vector.empty
   given Module[Double] with
     def namedParameters(model: Double) = Vector.empty
   given Module[Parameter] with

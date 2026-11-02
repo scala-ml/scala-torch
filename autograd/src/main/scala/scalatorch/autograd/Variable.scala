@@ -60,6 +60,13 @@ final class Variable private (
   def crossEntropy(targets: Tensor[Long], reduction: LossReduction = LossReduction.Mean, ignoreIndex: Long = -100): Variable =
     LossOps.crossEntropy(this,targets,reduction,ignoreIndex)
 
+  def conv2d(weight: Variable, config: Conv2dConfig = Conv2dConfig()): Variable =
+    val inputSnapshot=data
+    val weightSnapshot=weight.data
+    Variable.result(Conv2dOps.forward(inputSnapshot,weightSnapshot,config),Vector(
+      this -> ((g: Tensor[Float]) => Conv2dOps.backward(inputSnapshot,weightSnapshot,g,config,true)),
+      weight -> ((g: Tensor[Float]) => Conv2dOps.backward(inputSnapshot,weightSnapshot,g,config,false))))
+
   def embedding(indices: Tensor[Long]): Variable = TransformerOps.embedding(this, indices)
   def rmsNorm(weight: Variable, epsilon: Double = 1e-6): Variable = TransformerOps.rmsNorm(this, weight, epsilon)
   def silu(): Variable = TransformerOps.silu(this)

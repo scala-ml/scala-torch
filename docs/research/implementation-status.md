@@ -4,7 +4,9 @@ Updated 2026-11-02. The design was approved by the user. Subsequent explicit req
 
 ## Verified checkpoint
 
-Full verification: **239 passed, 0 failed, 0 skipped** (core 10, CPU 15, autograd 55, tensorio 17, nn 36, models 71, FFM 35), with public single/sharded tiny-Llama, trained SmolLM2, SmolLM2 tokenizer and all three autograd/model/FFM CUDA gates explicitly enabled. Run the module test commands from README; enable public model properties and the CUDA settings documented in backend-llama.md and backend-autograd.md. Scala's runtime dependencies still emit an Unsafe deprecation warning on Java 25; warning-free runtime compatibility is not claimed.
+Full verification: **244 passed, 0 failed, 0 skipped** (core 13, CPU 15, autograd 55, tensorio 17, nn 38, models 71, FFM 35), with public single/sharded tiny-Llama, trained SmolLM2, SmolLM2 tokenizer and all three autograd/model/FFM CUDA gates explicitly enabled. Run the module test commands from README; enable public model properties and the CUDA settings documented in backend-llama.md and backend-autograd.md. Scala's runtime dependencies still emit an Unsafe deprecation warning on Java 25; warning-free runtime compatibility is not claimed.
+
+[CPU Conv2d](conv2d.md) now provides grouped NCHW/OIHW cross-correlation, pairwise stride/padding/dilation, first-order input/weight gradients and derived nn modules with bias. Analytical outputs and all-parameter finite differences pass, including empty-batch gradients and stale-graph rejection. This is a deterministic direct reference kernel; CUDA convolution, production performance and pretrained diffusion execution remain open. NUI's axis-specific circular tiling padding is explicitly recorded as further compatibility work. Read-only review found no correctness blockers.
 
 The [NUI migration inventory](nui-migration-audit.md) now pins revision8823aa4 and enumerates47 requests,117 standard plugins,97 parameter fields and135 Python modules. All NUI migration rows remain open; this is static source evidence, not new runtime coverage.
 
