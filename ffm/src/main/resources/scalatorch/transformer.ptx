@@ -819,3 +819,17 @@ STORE:
  mul.wide.u32 d5,r7,4; add.u64 d6,d4,d5; st.global.f32 [d6],f;
 DONE: ret;
 }
+
+.visible .entry finite_status(.param .u64 fs_input,.param .u64 fs_status,.param .u32 fs_count) {
+ .reg .pred p;
+ .reg .b32 r<7>;
+ .reg .b64 d<4>;
+ .reg .f32 f;
+ ld.param.u64 d0,[fs_input]; ld.param.u64 d1,[fs_status]; ld.param.u32 r0,[fs_count];
+ mov.u32 r1,%tid.x; mov.u32 r2,%ctaid.x; mov.u32 r3,%ntid.x;
+ mad.lo.u32 r4,r2,r3,r1; setp.ge.u32 p,r4,r0; @p bra DONE;
+ mul.wide.u32 d2,r4,4; add.u64 d3,d0,d2;
+ ld.global.f32 f,[d3]; abs.f32 f,f; setp.gtu.f32 p,f,0f7F7FFFFF;
+ @p atom.global.or.b32 r5,[d1],1;
+DONE: ret;
+}

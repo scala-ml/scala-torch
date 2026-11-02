@@ -179,12 +179,14 @@ Backend embedding and layout operations now gather validated Long token IDs, res
 
 Backend rotary positions and causal grouped-query attention now run on CPU or CUDA, including offset queries and bounded score workspace. CPU forward results match existing autograd; real-GPU tests cover numerical agreement and causal masking. Prepared full-model GPU integration is now verified below.
 
-[Prepared Llama inference](docs/research/backend-llama.md) now runs complete models with resident CPU or CUDA weights, including LoRA factors. The native CUDA CLI generates **The capital of France is Paris.** from pinned SmolLM2 weights, and all196608 independent Candle reference logits pass the existing tolerance. GPU training remains pending; resident KV caching is described below.
+[Prepared Llama inference](docs/research/backend-llama.md) now runs complete models with resident CPU or CUDA weights, including LoRA factors. The native CUDA CLI generates **The capital of France is Paris.** from pinned SmolLM2 weights, and all196608 independent Candle reference logits pass the existing tolerance. Resident training and KV caching are described below.
 
 [Resident backend KV caches](docs/research/backend-kv-cache.md) now make cached CPU/CUDA generation the default. Device K/V buffers stay at fixed capacity, cached SmolLM2 logits match Candle, and rejected decodes leave the committed position unchanged.
 
-[Scoped backend autodiff](docs/research/backend-autograd.md) now differentiates matrix/layout, basic arithmetic, SiLU, RMSNorm, rotary-position, embedding, causal GQA and cross-entropy operations on CPU or CUDA. Resident regression, gated-MLP, tied embedding/projection and rotary-attention training tests match CPU gradients or analytical targets and restore their allocation baseline after every step. Full GPU LLM training and backend optimizer/checkpoint integration remain open. Enable the separate real-GPU autograd gate with:
+[Scoped backend autodiff](docs/research/backend-autograd.md) now differentiates matrix/layout, basic arithmetic, SiLU, RMSNorm, rotary-position, embedding, causal GQA and cross-entropy operations on CPU or CUDA. Resident regression, gated-MLP, tied embedding/projection and rotary-attention training tests match CPU gradients or analytical targets and restore their allocation baseline after every step. Full-model training is described below; backend AdamW/checkpoint integration remains open. Enable the separate real-GPU autograd gate with:
 
 ```sh
 sbt --server -Dsbt.io.virtual=false -Dsbt.server.autostart=false -batch ';set autograd / Test / envVars += "SCALATORCH_CUDA_TESTS" -> "1";autograd / Test / testOnly scalatorch.autograd.*'
 ```
+
+[Resident Llama training](docs/research/backend-llama-training.md) now composes complete CPU/CUDA graphs with tied/frozen weights and LoRA. Scoped steps stage validated SGD updates before publication. A full synthetic model reduces loss **2.1858 → 0.01204**; pretrained SmolLM2 LoRA reduces synthetic-token loss **20.8623 → 10.1143** with CPU-reference gradients and stable resident allocations. Backend AdamW and checkpoint continuation remain open.

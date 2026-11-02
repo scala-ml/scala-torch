@@ -4,6 +4,7 @@ import scalatorch.*
 
 /** Immutable CPU Float32 inference backend; release is a no-op for GC-owned storage. */
 object CpuFloatBackend extends TrainingBackend[Tensor[Float]]:
+  def allFinite(value: Tensor[Float]): Boolean = value.toFloatArray.forall(_.isFinite)
   def crossEntropy(logits: Tensor[Float],targets: Tensor[Long],reduction: LossReduction = LossReduction.Mean,ignoreIndex: Long = -100L): Tensor[Float] =
     CpuCrossEntropy.forward(logits,targets,reduction,ignoreIndex)
   def crossEntropyBackward(logits: Tensor[Float],targets: Tensor[Long],gradient: Tensor[Float],

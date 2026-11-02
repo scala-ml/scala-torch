@@ -45,7 +45,7 @@ class BackendAttentionSuite extends munit.FunSuite:
   }
   test("joint pullback runs once for tied edges and once again for a new seed") {
     class Counting extends TrainingBackend[Tensor[Float]]:
-      export CpuFloatBackend.{crossEntropy,crossEntropyBackward,upload,download,shape,release,reshape,transpose,embedding,matmul,add,multiply,scale,fill,sum,expandScalar,
+      export CpuFloatBackend.{allFinite,crossEntropy,crossEntropyBackward,upload,download,shape,release,reshape,transpose,embedding,matmul,add,multiply,scale,fill,sum,expandScalar,
         silu,rmsNorm,rope,causalAttention,attentionCache,embeddingBackward,ropeBackward,siluBackward,rmsNormInputBackward,rmsNormWeightBackward}
       var calls=0
       def causalAttentionBackward(q: Tensor[Float],k: Tensor[Float],v: Tensor[Float],g: Tensor[Float],start: Int = 0,

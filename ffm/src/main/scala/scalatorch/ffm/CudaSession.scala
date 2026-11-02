@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
+  private val kernels=Seq("finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -97,6 +97,16 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
           driver.copyHostToDevice(buffer.address,host,values.length.toLong*4)
       }
       body(buffer.address)
+    }
+
+  def allFinite(value: CudaTensor): Boolean =
+    validate(value)
+    Using.resource(fill(Shape.from(Seq.empty),0f)) { status =>
+      launch(value.shape.numel,kernels("finite_status")) { arena =>
+        Seq(value.address,status.address).map(x => arena.allocateFrom(JAVA_LONG,x)) :+
+          arena.allocateFrom(JAVA_INT,value.shape.numel.toInt)
+      }
+      download(status).toFloatArray.head==0f
     }
 
   def crossEntropy(logits: CudaTensor,targets: Tensor[Long],reduction: LossReduction = LossReduction.Mean,ignoreIndex: Long = -100L): CudaTensor =

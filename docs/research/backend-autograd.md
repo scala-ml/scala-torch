@@ -1,6 +1,6 @@
 # Scoped backend autodiff
 
-`BackendTape[T]` records a first-order graph over `TrainingBackend[T]`, which extends `FloatBackend[T]` with explicit pullbacks. The same code executes on CPU or CUDA. CUDA forward values, backward intermediates, gradients and explicit SGD arithmetic remain on device. Existing `Variable`, `Parameter` and optimizer APIs remain CPU-based. Forward-only backend implementations can continue to implement `FloatBackend` alone.
+`BackendTape[T]` records a first-order graph over `TrainingBackend[T]`, which extends `FloatBackend[T]` with explicit pullbacks. The same code executes on CPU or CUDA. CUDA forward values, backward intermediates, gradients and explicit SGD arithmetic remain on device. Existing `Variable`, `Parameter` and general optimizer APIs remain CPU-based; [resident Llama training](backend-llama-training.md) now supplies scoped model steps and staged SGD. Forward-only backend implementations can continue to implement `FloatBackend` alone.
 
 ```scala
 import scalatorch.autograd.BackendTape
@@ -56,6 +56,6 @@ CUDA computes per-row Double maxima, log-sum-exp and unrounded losses in budgete
 
 Only target metadata uploads and a four-byte nonfinite-status flag downloads during loss execution. Logits, statistics, losses and gradients stay on device. Forward and backward each recompute statistics and validate logits; the tape currently retains no specialized saved-loss context. Exact workspace/output preflight and cleanup cover ignored/empty rows and rejected operations.
 
-Tests compare all reductions and gradients with the existing CPU loss, including scalar/strided/empty targets, wide class axes, extreme logits and seeds, finite differences, repeated accumulation, frozen leaves, invalid IDs/nonfinite logits, and exact allocation limits. A tied embedding/classifier trains for40CUDA steps with CPU gradient/update parity, reducing loss **1.2666097 → 0.032580208**, with stable allocations after each step and zero after cleanup. Full GPU Llama training remains a separate integration milestone.
+Tests compare all reductions and gradients with the existing CPU loss, including scalar/strided/empty targets, wide class axes, extreme logits and seeds, finite differences, repeated accumulation, frozen leaves, invalid IDs/nonfinite logits, and exact allocation limits. A tied embedding/classifier trains for40CUDA steps with CPU gradient/update parity, reducing loss **1.2666097 → 0.032580208**, with stable allocations after each step and zero after cleanup. Full GPU Llama training is now integrated through [resident model steps](backend-llama-training.md).
 
-GPU tests require `set autograd / Test / envVars += "SCALATORCH_CUDA_TESTS" -> "1"`; this is a third gate in addition to the model and FFM gates. Disabled GPU checks are skips, not passes. Full GPU LLM training, backend parameters/optimizers/checkpoints, broadcasting, higher-order gradients and optimized reductions remain open, along with diffusion and complete NUI migration.
+GPU tests require `set autograd / Test / envVars += "SCALATORCH_CUDA_TESTS" -> "1"`; this is a third gate in addition to the model and FFM gates. Disabled GPU checks are skips, not passes. Backend AdamW/checkpoint integration, broadcasting, higher-order gradients and optimized reductions remain open, along with diffusion and complete NUI migration.
