@@ -11,6 +11,8 @@ trait Module[A]:
 object Module:
   given Module[Conv2dConfig] with
     def namedParameters(model: Conv2dConfig) = Vector.empty
+  given Module[Long] with
+    def namedParameters(model: Long) = Vector.empty
   given Module[Int] with
     def namedParameters(model: Int) = Vector.empty
   given Module[Double] with

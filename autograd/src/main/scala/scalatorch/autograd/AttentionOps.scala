@@ -7,6 +7,12 @@ private[autograd] object AttentionOps:
   private def zeros(shape: Shape): Tensor[Float] = Tensor.fromFloats(new Array[Float](shape.numel.toInt), shape)
 
   def causal(query: Variable, key: Variable, value: Variable, queryStart: Int, maxScores: Long): Variable =
+    attend(query,key,value,queryStart,maxScores,true)
+
+  def dense(query: Variable,key: Variable,value: Variable,maxScores: Long): Variable =
+    attend(query,key,value,0,maxScores,false)
+
+  private def attend(query: Variable,key: Variable,value: Variable,queryStart: Int,maxScores: Long,causal: Boolean): Variable =
     val qs = query.data.shape; val ks = key.data.shape; val vs = value.data.shape
     require(qs.rank == 4 && ks.rank == 4 && vs.rank == 4, "attention expects (batch,heads,tokens,width)")
     require(queryStart >= 0 && maxScores >= 0, "invalid attention offset or workspace limit")
@@ -32,7 +38,7 @@ private[autograd] object AttentionOps:
     val q = query.data.toFloatArray; val k = key.data.toFloatArray; val v = value.data.toFloatArray
     val probabilities = new Array[Double](scoreCount.toInt)
     val output = new Array[Float](outputShape.numel.toInt)
-    def visible(token: Int): Int = math.min(kTokens.toLong, queryStart.toLong + token + 1).toInt
+    def visible(token: Int): Int = if causal then math.min(kTokens.toLong, queryStart.toLong + token + 1).toInt else kTokens
 
     for b <- 0 until batches; h <- 0 until qHeads; t <- 0 until qTokens do
       val row = (b * qHeads + h) * qTokens + t
