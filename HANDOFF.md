@@ -2,6 +2,18 @@
 
 ## Windows continuation (2026-11-03)
 
+Native worker control has begun in `models/worker/NativeJobControl.scala`.
+It serializes admission, owner/target matching, interruption protection revisions,
+queued cancellation, publication admission and shutdown under one monitor. Each
+job exposes a volatile cancellation flag for the generation loop; history belongs
+to that job, not a global flag. Cancelled queued jobs still reach the worker for
+terminal responses; shutdown explicitly returns discarded jobs. Queue size is
+bounded. `NativeJobControlSuite` covers stale owners, duplicate admission,
+protection, publication, queued cancellation and shutdown, plus 32 races between
+publication and interrupt. This is a control primitive, not yet a runnable
+JSON Lines worker or NUI integration. Next connect request envelopes, the reader
+and worker threads, and the native model operations according to the boundary doc.
+
 Full tiny-image parity is now checked against Diffusers 0.33.1 / transformers
 4.49.0 / torch 2.7.1 CPU. With explicit noise, two prompts, CFG 3 and three
 DPM++/Karras steps, Scala's raw 1x3x6x10 decoded output matched all 180 values
