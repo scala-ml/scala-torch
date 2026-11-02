@@ -179,4 +179,6 @@ Backend embedding and layout operations now gather validated Long token IDs, res
 
 Backend rotary positions and causal grouped-query attention now run on CPU or CUDA, including offset queries and bounded score workspace. CPU forward results match existing autograd; real-GPU tests cover numerical agreement and causal masking. Prepared full-model GPU integration is now verified below.
 
-[Prepared Llama inference](docs/research/backend-llama.md) now runs complete models with resident CPU or CUDA weights. The native CUDA CLI generates **The capital of France is Paris.** from pinned SmolLM2 weights, and all196608 independent Candle reference logits pass the existing tolerance. GPU KV cache, adapters and training remain pending.
+[Prepared Llama inference](docs/research/backend-llama.md) now runs complete models with resident CPU or CUDA weights. The native CUDA CLI generates **The capital of France is Paris.** from pinned SmolLM2 weights, and all196608 independent Candle reference logits pass the existing tolerance. GPU adapters and training remain pending; resident KV caching is described below.
+
+[Resident backend KV caches](docs/research/backend-kv-cache.md) now make cached CPU/CUDA generation the default. Device K/V buffers stay at fixed capacity, cached SmolLM2 logits match Candle, and rejected decodes leave the committed position unchanged.

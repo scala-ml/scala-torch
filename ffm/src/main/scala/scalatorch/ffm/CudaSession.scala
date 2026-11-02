@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("binary","silu","rmsnorm","transpose","embedding","rope","attention").map { name =>
+  private val kernels=Seq("binary","silu","rmsnorm","transpose","embedding","rope","attention","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -119,18 +119,61 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   def causalAttention(query: CudaTensor,key: CudaTensor,value: CudaTensor,queryStart: Int = 0,
       maxScoreElements: Long = 16777216L): CudaTensor =
     validate(query);validate(key);validate(value)
-    val (output,scores)=AttentionLayout.validate(query.shape,key.shape,value.shape,queryStart,maxScoreElements)
+    // Preserve rank validation before inspecting the token dimension.
+    AttentionLayout.validate(query.shape,key.shape,value.shape,queryStart,maxScoreElements)
+    attentionFromStorage(query,key,value,queryStart,key.shape.dims(2),key.shape.dims(2),maxScoreElements)
+
+  private def attentionFromStorage(query: CudaTensor,key: CudaTensor,value: CudaTensor,queryStart: Int,
+      tokens: Long,storageTokens: Long,maxScores: Long): CudaTensor =
+    val keyShape=Shape.from(key.shape.dims.updated(2,tokens))
+    val valueShape=Shape.from(value.shape.dims.updated(2,tokens))
+    val (output,scores)=AttentionLayout.validate(query.shape,keyShape,valueShape,queryStart,maxScores)
     if output.numel==0 then return allocate(output)
     require(scores*2<=Int.MaxValue,"attention Double workspace exceeds Int indexing")
-    val q=query.shape.dims;val k=key.shape.dims;val v=value.shape.dims
+    val q=query.shape.dims;val k=keyShape.dims;val v=valueShape.dims
     val rows=output.numel/v(3)
     Using.resource(allocate(Shape.from(Seq(scores*2)))) { scratch =>
       execute(output,rows,kernels("attention")) { (arena,result) =>
         Seq(query.address,key.address,value.address,result.address,scratch.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
-          Seq(rows,q(1),k(1),q(2),k(2),q(3),v(3),queryStart.toLong).map(x => arena.allocateFrom(JAVA_INT,x.toInt)) :+
+          Seq(rows,q(1),k(1),q(2),k(2),q(3),v(3),queryStart.toLong,storageTokens).map(x => arena.allocateFrom(JAVA_INT,x.toInt)) :+
           arena.allocateFrom(JAVA_DOUBLE,1.0/math.sqrt(q(3).toDouble))
       }
     }
+
+  def attentionCache(batchSize: Int,heads: Int,capacity: Int,keyWidth: Int,valueWidth: Int,
+      maxBytes: Long = 268435456L): AttentionCache[CudaTensor] =
+    check()
+    val layout=CacheLayout(batchSize,heads,capacity,keyWidth,valueWidth,maxBytes)
+    require(layout.bytes<=this.maxBytes-used,"CUDA cache allocation budget exceeded")
+    val keys=allocate(layout.keyShape(capacity))
+    try
+      val values=allocate(layout.valueShape(capacity))
+      new AttentionCache[CudaTensor]:
+        private var closed=false
+        private var written=0
+        def attend(query: CudaTensor,key: CudaTensor,value: CudaTensor,position: Int,
+            maxScoreElements: Long = 16777216L): CudaTensor =
+          check()
+          if closed then throw IllegalStateException("attention cache is closed")
+          validate(query);validate(key);validate(value);validate(keys);validate(values)
+          val (_,_,end)=layout.validate(query.shape,key.shape,value.shape,position,written,maxScoreElements)
+          def append(source: CudaTensor,target: CudaTensor,width: Int): Unit =
+            launch(source.shape.numel,kernels("cache_append")) { arena =>
+              Seq(source.address,target.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
+                Seq(source.shape.numel.toInt,width,key.shape.dims(2).toInt,capacity,position).map(x => arena.allocateFrom(JAVA_INT,x))
+            }
+          append(key,keys,keyWidth);append(value,values,valueWidth)
+          val result=attentionFromStorage(query,keys,values,position,end,capacity,maxScoreElements)
+          written=end
+          result
+        def close(): Unit =
+          threadCheck()
+          if !closed then
+            closed=true
+            Using.Manager { use => use(keys);use(values);() }.get
+    catch case error: Throwable =>
+      try keys.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
 
   def transpose(value: CudaTensor,dim0: Int,dim1: Int): CudaTensor =
     validate(value)
@@ -229,8 +272,15 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       (arguments: (Arena,CudaTensor) => Seq[MemorySegment]): CudaTensor =
     val result=allocate(output)
     try
+      launch(count,kernel)(arena => arguments(arena,result))
+      result
+    catch case error: Throwable =>
+      try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
+  private def launch(count: Long,kernel: MemorySegment)(arguments: Arena => Seq[MemorySegment]): Unit =
       if count > 0 then Using.resource(Arena.ofConfined()) { arena =>
-        val args=arguments(arena,result)
+        val args=arguments(arena)
         val params=arena.allocate(ADDRESS,args.size.toLong)
         args.zipWithIndex.foreach((arg,i) => params.setAtIndex(ADDRESS,i.toLong,arg))
         driver.call("cuLaunchKernel",Seq(ADDRESS) ++ Seq.fill(7)(JAVA_INT) ++ Seq.fill(3)(ADDRESS),
@@ -238,10 +288,6 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
           Int.box(64),Int.box(1),Int.box(1),Int.box(0),stream,params,MemorySegment.NULL)
         driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
       }
-      result
-    catch case error: Throwable =>
-      try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
-      throw error
 
   def release(tensor: CudaTensor): Unit =
     threadCheck()

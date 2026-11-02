@@ -4,6 +4,7 @@ import scalatorch.*
 import scalatorch.cpu.CpuFloatBackend
 import scalatorch.ffm.CudaSession
 import scala.concurrent.duration.*
+import scala.util.Using
 
 class BackendLlamaSuite extends munit.FunSuite:
   override val munitTimeout=5.minutes
@@ -134,6 +135,17 @@ class BackendLlamaSuite extends munit.FunSuite:
           maximum=math.max(maximum,compare(result,reference.slice(step*model.config.vocabSize,(step+1)*model.config.vocabSize),2e-4))
           assertEquals(session.allocatedBytes,resident)
         println(s"CUDA SmolLM2 Candle max absolute error: $maximum residentBytes=$resident")
+        Using.resource(prepared.newCache(capacity=prompt.size+12)) { cache =>
+          val cachedBytes=session.allocatedBytes
+          var cachedMaximum=0.0
+          for step <- 0 until 4 do
+            val chunk=if step==0 then prompt else Vector(continuation(step-1))
+            val result=cache.decode(Tensor.fromLongs(chunk.toArray,Shape.from(Seq(1L,chunk.size.toLong)))).toFloatArray.takeRight(model.config.vocabSize)
+            cachedMaximum=math.max(cachedMaximum,compare(result,reference.slice(step*model.config.vocabSize,(step+1)*model.config.vocabSize),2e-4))
+            assertEquals(session.allocatedBytes,cachedBytes)
+          println(s"CUDA cached SmolLM2 Candle max absolute error: $cachedMaximum cacheBytes=${cachedBytes-resident}")
+        }
+        assertEquals(session.allocatedBytes,resident)
         val generated=prepared.generateIds(prompt,12).drop(prompt.size)
         assertEquals(generated,continuation)
         assertEquals(tokenizer.decode(generated.toArray),new String(resource("/llama/smollm2/text.txt"),java.nio.charset.StandardCharsets.UTF_8))

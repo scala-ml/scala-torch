@@ -59,3 +59,38 @@ class CudaAttentionSuite extends munit.FunSuite:
       assertEquals(session.allocatedBytes,occupied)
     }
   }
+
+  test("device KV capacity strides match full GQA and reject gaps") {
+    gpu()
+    CudaSession.withDevice() { session =>
+      val q=tensor(Seq(2,4,3,4),1);val k=tensor(Seq(2,2,3,4),2);val v=tensor(Seq(2,2,3,6),3)
+      val before=session.allocatedBytes
+      val cache=session.attentionCache(2,2,7,4,6)
+      val cacheBytes=session.allocatedBytes
+      for (start,end) <- Seq((0,2),(2,3)) do
+        val dq=session.upload(q.slice(2,start,end));val dk=session.upload(k.slice(2,start,end));val dv=session.upload(v.slice(2,start,end))
+        val result=cache.attend(dq,dk,dv,start)
+        compare(result.toCpu.toFloatArray,CpuFloatBackend.causalAttention(q.slice(2,start,end),k.slice(2,0,end),v.slice(2,0,end),start).toFloatArray)
+        result.close();dq.close();dk.close();dv.close()
+        assertEquals(session.allocatedBytes,cacheBytes)
+      val one=session.upload(q.slice(2,0,1));val key=session.upload(k.slice(2,0,1));val value=session.upload(v.slice(2,0,1))
+      intercept[IllegalArgumentException](cache.attend(one,key,value,4))
+      val repeated=cache.attend(one,key,value,0)
+      compare(repeated.toCpu.toFloatArray,CpuFloatBackend.causalAttention(q.slice(2,0,1),k.slice(2,0,1),v.slice(2,0,1)).toFloatArray)
+      repeated.close();one.close();key.close();value.close();cache.close()
+      assertEquals(session.allocatedBytes,before)
+    }
+    CudaSession.withDevice(maxBytes=32) { session =>
+      val cache=session.attentionCache(1,1,2,1,1)
+      val q=session.upload(Tensor.fromFloats(Array(7f),Shape.from(Seq(1L,1L,1L,1L))))
+      val filler=session.upload(Tensor.fromFloats(Array(0f),Shape.from(Seq(1L))))
+      // Append completes and scratch fits, but output allocation fails.
+      intercept[IllegalArgumentException](cache.attend(q,q,q,0))
+      assertEquals(session.allocatedBytes,24L)
+      filler.close()
+      val retried=cache.attend(q,q,q,0)
+      compare(retried.toCpu.toFloatArray,Array(7f))
+      retried.close();q.close();cache.close()
+      assertEquals(session.allocatedBytes,0L)
+    }
+  }

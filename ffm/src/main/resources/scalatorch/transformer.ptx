@@ -185,7 +185,7 @@ DONE:
 .visible .entry attention(
  .param .u64 query, .param .u64 key, .param .u64 value, .param .u64 out, .param .u64 scores,
  .param .u32 rows, .param .u32 heads, .param .u32 kvheads, .param .u32 qtokens,
- .param .u32 ktokens, .param .u32 width, .param .u32 vwidth, .param .u32 start,
+ .param .u32 ktokens, .param .u32 width, .param .u32 vwidth, .param .u32 start, .param .u32 storageTokens,
  .param .f64 scale
 ) {
  .reg .pred p,pnan,pnew;
@@ -197,14 +197,14 @@ DONE:
  ld.param.u64 d3,[out]; ld.param.u64 d4,[scores];
  ld.param.u32 r0,[rows]; ld.param.u32 r1,[heads]; ld.param.u32 r2,[kvheads];
  ld.param.u32 r3,[qtokens]; ld.param.u32 r4,[ktokens]; ld.param.u32 r5,[width];
- ld.param.u32 r6,[vwidth]; ld.param.u32 r7,[start]; ld.param.f64 g0,[scale];
+ ld.param.u32 r6,[vwidth]; ld.param.u32 r7,[start]; ld.param.u32 r27,[storageTokens]; ld.param.f64 g0,[scale];
  mov.u32 r8,%tid.x; mov.u32 r9,%ctaid.x; mov.u32 r10,%ntid.x;
  mad.lo.u32 r11,r9,r10,r8;
  setp.ge.u32 p,r11,r0; @p bra DONE;
  rem.u32 r12,r11,r3; div.u32 r13,r11,r3;
  rem.u32 r13,r13,r1; mul.lo.u32 r15,r3,r1; div.u32 r14,r11,r15;
  div.u32 r16,r1,r2; div.u32 r13,r13,r16;
- mad.lo.u32 r17,r14,r2,r13; mul.lo.u32 r17,r17,r4;
+ mad.lo.u32 r17,r14,r2,r13; mul.lo.u32 r17,r17,r27;
  add.u32 r18,r7,r12; add.u32 r18,r18,1; min.u32 r18,r18,r4;
  mul.lo.u32 r21,r11,r5; mul.lo.u32 r24,r11,r4;
  mov.u32 r19,0; mov.f64 g1,0dFFF0000000000000; setp.ne.u32 pnan,r0,r0;
@@ -252,6 +252,29 @@ OUTPUT_STORE:
  add.u32 r26,r25,r20; mul.wide.u32 d5,r26,4; add.u64 d10,d3,d5;
  cvt.rn.f32.f64 f0,g7; st.global.f32 [d10],f0;
  add.u32 r20,r20,1; bra OUTPUT;
+DONE:
+ ret;
+}
+
+.visible .entry cache_append(
+ .param .u64 source, .param .u64 target, .param .u32 count,
+ .param .u32 width, .param .u32 chunk, .param .u32 capacity, .param .u32 position
+) {
+ .reg .pred p;
+ .reg .b32 r<14>;
+ .reg .b64 d<6>;
+ .reg .b32 value;
+ ld.param.u64 d0,[source]; ld.param.u64 d1,[target];
+ ld.param.u32 r0,[count]; ld.param.u32 r1,[width]; ld.param.u32 r2,[chunk];
+ ld.param.u32 r3,[capacity]; ld.param.u32 r4,[position];
+ mov.u32 r5,%tid.x; mov.u32 r6,%ctaid.x; mov.u32 r7,%ntid.x;
+ mad.lo.u32 r8,r6,r7,r5; setp.ge.u32 p,r8,r0; @p bra DONE;
+ div.u32 r9,r8,r1; rem.u32 r10,r8,r1;
+ div.u32 r11,r9,r2; rem.u32 r12,r9,r2;
+ add.u32 r12,r12,r4; mad.lo.u32 r13,r11,r3,r12; mad.lo.u32 r13,r13,r1,r10;
+ mul.wide.u32 d2,r8,4; add.u64 d3,d0,d2;
+ mul.wide.u32 d4,r13,4; add.u64 d5,d1,d4;
+ ld.global.b32 value,[d3]; st.global.b32 [d5],value;
 DONE:
  ret;
 }

@@ -4,6 +4,9 @@ import scalatorch.*
 
 /** Immutable CPU Float32 inference backend; release is a no-op for GC-owned storage. */
 object CpuFloatBackend extends FloatBackend[Tensor[Float]]:
+  def attentionCache(batchSize: Int,heads: Int,capacity: Int,keyWidth: Int,valueWidth: Int,
+      maxBytes: Long = 268435456L): AttentionCache[Tensor[Float]] =
+    new CpuAttentionCache(CacheLayout(batchSize,heads,capacity,keyWidth,valueWidth,maxBytes))
   def rope(value: Tensor[Float],positionStart: Int = 0,theta: Double = 10000.0): Tensor[Float] =
     CpuAttention.rope(value,positionStart,theta)
   def causalAttention(query: Tensor[Float],key: Tensor[Float],value: Tensor[Float],queryStart: Int = 0,
