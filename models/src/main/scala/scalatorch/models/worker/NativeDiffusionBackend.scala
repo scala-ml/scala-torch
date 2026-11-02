@@ -218,6 +218,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val allowed=Set("prompt","negative_prompt","width","height","steps","seed","subseed","cfg_scale","sampler_name","scheduler","clip_skip","n_iter","checkpoint","vae","extra","hooks")
         keys(NativeGenerationDefaults.strip(g,defaults),if img2img then allowed+"img2img" else allowed)
         val prediction=NativeGenerationMetadata.prediction(g.get("extra"),config.prediction)
+        val sdxlSize=NativeGenerationMetadata.sdxlSize(g.get("extra"),pipeline.sdxlConditioning.isDefined)
         g.get("checkpoint") match
           case None | Some(Null) => ()
           case Some(Str(name)) =>
@@ -241,7 +242,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val steps=integer(g,"steps",20)
         require(steps>0 && steps<=1000,"steps must be between 1 and 1000")
         val imageRequest=DiffusionImageRequest(str(g,"prompt",""),str(g,"negative_prompt",""),
-          integer(g,"width",512),integer(g,"height",512),seed,number(g,"cfg_scale",7).toFloat,clipSkip=integer(g,"clip_skip",1))
+          integer(g,"width",512),integer(g,"height",512),seed,number(g,"cfg_scale",7).toFloat,clipSkip=integer(g,"clip_skip",1),sdxlSize=sdxlSize)
         val source=if !img2img then None else
           val fields=g.get("img2img") match
             case Some(Obj(fields)) => fields

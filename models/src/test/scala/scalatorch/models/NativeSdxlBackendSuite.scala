@@ -5,6 +5,18 @@ import scalatorch.models.*
 import NativeJson.*
 
 class NativeSdxlBackendSuite extends munit.FunSuite:
+  test("NUI SDXL original size and crop metadata is strict and becomes six time IDs") {
+    val fields=Map("sdfx_sdxl_original_height"->Str("80"),"sdfx_sdxl_original_width"->Str("96"),
+      "sdfx_sdxl_crop_top"->Str("2"),"sdfx_sdxl_crop_left"->Str("4"))
+    val size=NativeGenerationMetadata.sdxlSize(Some(Obj(fields)),true).get
+    assertEquals(size.timeIds(64,72).toFloatArray.toVector,Vector(80f,96f,2f,4f,64f,72f))
+    assertEquals(NativeGenerationMetadata.sdxlSize(None,true),None)
+    intercept[NativeBackendError](NativeGenerationMetadata.sdxlSize(Some(Obj(fields)),false))
+    intercept[IllegalArgumentException](NativeGenerationMetadata.sdxlSize(Some(Obj(fields-"sdfx_sdxl_original_width")),true))
+    intercept[NumberFormatException](NativeGenerationMetadata.sdxlSize(Some(Obj(fields.updated("sdfx_sdxl_original_height",Str("oops")))),true))
+    intercept[IllegalArgumentException](NativeGenerationMetadata.sdxlSize(Some(Obj(fields.updated("sdfx_sdxl_crop_top",Str("-1")))),true))
+  }
+
   test("SDXL worker loads dual encoders, preserves them across VAE replacement and failed load") {
     val directory=sys.props.get("scalatorch.sdxl.dir")
     assume(directory.nonEmpty,"tiny SDXL required")
