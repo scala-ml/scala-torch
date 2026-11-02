@@ -1,3 +1,32 @@
+## Resident U-Net spatial Transformer and GEGLU (2026-11-03)
+
+CudaSession.geglu now executes final-axis split Gaussian-error GELU gating on GPU.
+It preserves the CPU's separate GELU Float32 rounding then Float32 multiplication.
+PTX uses an independently implemented incomplete-gamma series/continued fraction
+and existing Double exp, not tanh GELU. Mathematical sources and tested limits are
+recorded in docs/research/cuda-geglu.md. No runtime Python or new dependencies.
+
+CudaDiffusionRuntime adds layerNorm, feedForward, transformer and spatialTransformer.
+These compose resident Linear/GEGLU, LayerNorm, self/cross attention, GroupNorm,
+1x1 projections, token/image transposes and residuals. Scoped intermediate cleanup
+and snapshot parameter ownership follow the existing VAE executor.
+
+Validation with actual GTX1650 SUPER and pinned tiny U-Net:
+- autograd/testOnly *CudaGegluSuite:2 passed;30,721 gate grid points plus IEEE
+  extremes, two Float32 ULP tolerance, layouts/empty/lifetime/budget checks.
+- ffm/testOnly *:49 passed after the shared PTX module change.
+- models/testOnly *Cuda*:15 passed (all GPU model tests, no skips).
+- Loaded U-Net feed-forward exactly matched CPU in its test; token and image
+  Transformers maxAbsError1.1920928955e-7. Repeat inference frees intermediates;
+  outputs survive model/input closure; bad context rejects without allocation.
+- Existing CUDA VAE, pipeline, cancellation and recovery regressions also passed.
+
+Full U-Net forward composition and sampling-loop integration are next. Dense
+attention still allocates quadratic Double score scratch with explicit limits;
+normal model memory/performance, FP16/offload, CLIP GPU and NUI feature parity
+remain outstanding. No end-to-end GPU denoising claim in this checkpoint.
+NUI server stopped; scala-torch sbt server inherits CUDA tests plus clip/unet/vae
+fixture directory properties. NUI dedicated branch remains unchanged this turn.
 ## CUDA VAE decoding connected through pipeline and NUI worker (2026-11-03)
 
 EulerImagePipeline now takes explicit VaeExecution (default Cpu). Cuda opens a

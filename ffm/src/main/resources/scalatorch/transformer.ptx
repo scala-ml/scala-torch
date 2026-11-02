@@ -766,6 +766,83 @@ RETURN:
  st.param.f64 [ce_result],g4; ret;
 }
 
+// Gaussian-error GELU via regularized incomplete gamma at a=1/2.
+// Mathematical identities: DLMF 7.11.2, 8.7.1 and 8.9.2. Independent implementation.
+// Positive-term series below z=1.5; contracted continued fraction above it.
+// Double arithmetic preserves negative tails; only the final GELU rounds to Float32.
+.func (.param .f32 gg_result) gg_gelu(.param .f32 gg_input) {
+ .reg .pred p;
+ .reg .b32 r;
+ .reg .f32 f<2>;
+ .reg .f64 g<12>;
+ .param .f64 exp_arg;
+ .param .f64 exp_result;
+ ld.param.f32 f0,[gg_input]; mov.f32 f1,f0;
+ setp.nan.f32 p,f0,f0; @p bra RETURN;
+ setp.ge.f32 p,f0,0f41700000; @p bra RETURN;
+ setp.le.f32 p,f0,0fC1700000; @p bra NEG_ZERO;
+ cvt.f64.f32 g0,f0; abs.f64 g1,g0;
+ div.rn.f64 g1,g1,0d3FF6A09E667F3BCD;
+ mul.rn.f64 g2,g1,g1; neg.f64 g3,g2;
+ st.param.f64 [exp_arg],g3; call.uni (exp_result),ce_exp,(exp_arg); ld.param.f64 g3,[exp_result];
+ mul.rn.f64 g3,g3,g1; mul.rn.f64 g3,g3,0d3FE20DD750429B6D;
+ setp.ge.f64 p,g2,0d3FF8000000000000; @p bra FRACTION;
+ mov.f64 g5,0d4000000000000000; mov.f64 g6,g5;
+ mov.f64 g7,0d3FE0000000000000; mov.u32 r,0;
+SERIES:
+ add.rn.f64 g7,g7,0d3FF0000000000000;
+ div.rn.f64 g11,g2,g7; mul.rn.f64 g5,g5,g11; add.rn.f64 g6,g6,g5;
+ add.u32 r,r,1; setp.lt.u32 p,r,40; @p bra SERIES;
+ mul.rn.f64 g4,g3,g6; sub.rn.f64 g4,0d3FF0000000000000,g4; bra CDF;
+FRACTION:
+ add.rn.f64 g7,g2,0d3FE0000000000000;
+ div.rn.f64 g5,0d3FF0000000000000,g7;
+ mov.f64 g6,0d7E37E43C8800759C; mov.f64 g8,g5; mov.u32 r,0;
+CF_LOOP:
+ add.u32 r,r,1; cvt.rn.f64.u32 g9,r;
+ sub.rn.f64 g11,g9,0d3FE0000000000000; mul.rn.f64 g9,g9,g11; neg.f64 g9,g9;
+ add.rn.f64 g7,g7,0d4000000000000000;
+ mul.rn.f64 g5,g9,g5; add.rn.f64 g5,g5,g7; div.rn.f64 g5,0d3FF0000000000000,g5;
+ div.rn.f64 g6,g9,g6; add.rn.f64 g6,g7,g6;
+ mul.rn.f64 g10,g5,g6; mul.rn.f64 g8,g8,g10;
+ sub.rn.f64 g11,g10,0d3FF0000000000000; abs.f64 g11,g11;
+ setp.lt.f64 p,g11,0d3CE203AF9EE75616; @p bra CF_DONE;
+ setp.lt.u32 p,r,128; @p bra CF_LOOP;
+CF_DONE:
+ mul.rn.f64 g4,g3,g8;
+CDF:
+ mul.rn.f64 g4,g4,0d3FE0000000000000;
+ setp.lt.f64 p,g0,0d0000000000000000; @p bra PRODUCT;
+ sub.rn.f64 g4,0d3FF0000000000000,g4;
+PRODUCT:
+ mul.rn.f64 g4,g0,g4; cvt.rn.f32.f64 f1,g4; bra RETURN;
+NEG_ZERO:
+ mov.f32 f1,0f80000000;
+RETURN:
+ st.param.f32 [gg_result],f1; ret;
+}
+
+.visible .entry geglu(.param .u64 input, .param .u64 output, .param .u32 count, .param .u32 width) {
+ .reg .pred p;
+ .reg .b32 r<9>;
+ .reg .b64 d<4>;
+ .reg .f32 f<3>;
+ .param .f32 gate_arg;
+ .param .f32 gate_result;
+ ld.param.u64 d0,[input]; ld.param.u64 d1,[output];
+ ld.param.u32 r0,[count]; ld.param.u32 r1,[width];
+ mov.u32 r2,%ctaid.x; mov.u32 r3,%ntid.x; mov.u32 r4,%tid.x;
+ mad.lo.u32 r2,r2,r3,r4; setp.ge.u32 p,r2,r0; @p bra DONE;
+ div.u32 r3,r2,r1; rem.u32 r4,r2,r1; shl.b32 r5,r1,1;
+ mad.lo.u32 r6,r3,r5,r4; add.u32 r7,r6,r1;
+ mul.wide.u32 d2,r6,4; add.u64 d2,d0,d2; ld.global.f32 f0,[d2];
+ mul.wide.u32 d2,r7,4; add.u64 d2,d0,d2; ld.global.f32 f1,[d2];
+ st.param.f32 [gate_arg],f1; call.uni (gate_result),gg_gelu,(gate_arg); ld.param.f32 f1,[gate_result];
+ mul.rn.f32 f2,f0,f1;
+ mul.wide.u32 d3,r2,4; add.u64 d3,d1,d3; st.global.f32 [d3],f2;
+DONE: ret;
+}
+
 .func (.param .f64 cl_result) ce_log(.param .f64 cl_input) {
  .reg .b64 d<3>;
  .reg .b32 r;

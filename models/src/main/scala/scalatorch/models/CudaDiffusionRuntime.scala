@@ -141,6 +141,69 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       out
     }
 
+  def layerNorm(input: CudaTensor,model: LayerNorm): CudaTensor =
+    check()
+    val shape=session.shape(input)
+    require(shape.rank>0 && shape.dims.last==model.width,"LayerNorm final width mismatch")
+    session.layerNorm(input,model.epsilon,model.weight.map(weights),model.bias.map(weights))
+
+  def feedForward(input: CudaTensor,model: DiffusionFeedForward): CudaTensor =
+    check()
+    val shape=session.shape(input)
+    require(shape.rank>0 && shape.dims.last==model.inputWidth,"GEGLU input width mismatch")
+    scope { use =>
+      val flat=use(session.reshape(input,Shape.from(Seq(shape.numel/model.inputWidth,model.inputWidth))))
+      val projected=use(linear(flat,model.projection));flat.close()
+      val gated=use(session.geglu(projected));projected.close()
+      val output=use(linear(gated,model.output));gated.close()
+      val result=use(session.reshape(output,Shape.from(shape.dims.updated(shape.rank-1,model.outputWidth))))
+      output.close()
+      result
+    }
+
+  def transformer(input: CudaTensor,model: DiffusionTransformerBlock,context: CudaTensor): CudaTensor =
+    check()
+    val shape=session.shape(input);val contextShape=session.shape(context)
+    require(shape.rank==3 && shape.dims(2)==model.norm1.width,"Transformer input must be matching token features")
+    require(contextShape.rank==3 && contextShape.dims(0)==shape.dims(0) &&
+      contextShape.dims(2)==weights(model.attn2.toK.weight).shape.dims(1),"Transformer context batch/width mismatch")
+    scope { use =>
+      val norm1=use(layerNorm(input,model.norm1))
+      val attn1=use(attention(norm1,model.attn1,None));norm1.close()
+      val self=use(session.add(input,attn1));attn1.close()
+      val norm2=use(layerNorm(self,model.norm2))
+      val attn2=use(attention(norm2,model.attn2,Some(context)));norm2.close()
+      val cross=use(session.add(self,attn2));self.close();attn2.close()
+      val norm3=use(layerNorm(cross,model.norm3))
+      val ff=use(feedForward(norm3,model.feedForward));norm3.close()
+      val result=use(session.add(cross,ff));cross.close();ff.close()
+      result
+    }
+
+  def spatialTransformer(input: CudaTensor,model: DiffusionSpatialTransformer,context: CudaTensor): CudaTensor =
+    check()
+    val shape=session.shape(input);val contextShape=session.shape(context)
+    require(shape.rank==4 && shape.dims(1)==model.norm.channels,"spatial Transformer requires matching NCHW input")
+    require(contextShape.rank==3 && contextShape.dims(0)==shape.dims(0) &&
+      contextShape.dims(2)==weights(model.blocks.head.attn2.toK.weight).shape.dims(1),"spatial Transformer context batch/width mismatch")
+    val inner=weights(model.projIn.weight).shape.dims.head
+    val tokens=Shape.from(shape.dims.drop(2)).numel
+    scope { use =>
+      val normalized=use(norm(input,model.norm))
+      val projected=use(conv(normalized,model.projIn));normalized.close()
+      val view=use(session.reshape(projected,Shape.from(Seq(shape.dims(0),inner,tokens))));projected.close()
+      var hidden=use(session.transpose(view,1,2));view.close()
+      model.blocks.foreach { block =>
+        val next=use(transformer(hidden,block,context))
+        hidden.close();hidden=next
+      }
+      val packed=use(session.transpose(hidden,1,2));hidden.close()
+      val image=use(session.reshape(packed,Shape.from(shape.dims.updated(1,inner))));packed.close()
+      val out=use(conv(image,model.projOut));image.close()
+      val result=use(session.add(input,out));out.close()
+      result
+    }
+
   def decode(input: CudaTensor,model: VaeDecoder): CudaTensor =
     check()
     model.preflight(session.shape(input))

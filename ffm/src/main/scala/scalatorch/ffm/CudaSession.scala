@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("broadcast_add","concat_copy","resize_nearest","groupnorm","conv2d","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
+  private val kernels=Seq("geglu","broadcast_add","concat_copy","resize_nearest","groupnorm","conv2d","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -504,6 +504,17 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
         Seq(a.address,b.address,result.address,metadata).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
           Seq(output.numel.toInt,rank).map(v => arena.allocateFrom(JAVA_INT,v))
       }
+    }
+  /** Final-axis split: value half times Gaussian-error GELU of the gate half. */
+  def geglu(input: CudaTensor): CudaTensor =
+    validate(input)
+    require(input.shape.rank>0 && input.shape.dims.last>0 && input.shape.dims.last%2==0 &&
+      input.shape.dims.last<=Int.MaxValue,"GEGLU requires a positive even final width")
+    val width=input.shape.dims.last/2
+    val output=Shape.from(input.shape.dims.updated(input.shape.rank-1,width))
+    execute(output,output.numel,kernels("geglu")) { (arena,result) =>
+      Seq(input.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+        Seq(output.numel.toInt,width.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
     }
   def multiply(a: CudaTensor,b: CudaTensor): CudaTensor = binary(a,b,1)
   def fill(shape: Shape,value: Float): CudaTensor =
