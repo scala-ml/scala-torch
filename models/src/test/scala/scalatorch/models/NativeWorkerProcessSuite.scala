@@ -51,12 +51,22 @@ class NativeWorkerProcessSuite extends munit.FunSuite:
       send("load","load_model",Map("path"->Str(root.toString),"dtype"->Str("fp32"),"vram_mode"->Str("cpu")))
       assertEquals(receive()("type"),Str("result"))
       send("generate","txt2img",Map("output_dir"->Str(temp.toString),"params"->Obj(Map(
-        "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(2),
+        "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(3),
         "seed"->Number(BigDecimal(Long.MaxValue)),"sampler_name"->Str("DPM++ 2M"),"scheduler"->Str("Karras")))))
       for step <- 1 to 2 do
         val event=receive()
         assertEquals(event("event"),Str("progress"))
         assertEquals(event("step"),Number(step))
+      val preview=receive()
+      assertEquals(preview("event"),Str("preview"))
+      assertEquals(preview("step"),Number(2))
+      val previewBytes=java.util.Base64.getDecoder.decode(preview("jpeg_b64").asInstanceOf[Str].value)
+      val previewImage=javax.imageio.ImageIO.read(new java.io.ByteArrayInputStream(previewBytes))
+      assertEquals(previewImage.getWidth,256)
+      assertEquals(previewImage.getHeight,154)
+      val lastProgress=receive()
+      assertEquals(lastProgress("event"),Str("progress"))
+      assertEquals(lastProgress("step"),Number(3))
       val response=receive()
       assertEquals(response("id"),Str("generate"))
       val result=response("result").asInstanceOf[Obj].fields

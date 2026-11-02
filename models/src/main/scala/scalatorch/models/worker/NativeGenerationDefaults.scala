@@ -12,7 +12,6 @@ private[worker] object NativeGenerationDefaults:
     "img2img"->Null,"loras"->Arr(Vector.empty),"controlnet"->Arr(Vector.empty),"hooks"->Obj(Map.empty),
     "styles"->Arr(Vector.empty),"checkpoint"->Null,"vae"->Null,"extra"->Obj(Map.empty))
   val envelope: Map[String,NativeJson]=Map("lora_paths"->Obj(Map.empty),"embedding_paths"->Arr(Vector.empty),
-    "preview_every"->Number(0),"preview_method"->Str("none"),
     "controlnet_paths"->Obj(Map.empty),"upscaler_paths"->Obj(Map.empty),"lbw_presets"->Obj(Map.empty),
     "system_info_fields"->Arr(Vector.empty),"vae_recovery_dir"->Str(""),
     "hardware_info"->Obj(Map("enabled"->Bool(false),"remark"->Str(""))),

@@ -1,3 +1,18 @@
+## Native live preview checkpoint (2026-11-03)
+
+NativePreview implements SD1.x cheap latent-to-RGB projection, float32 channel
+factors and byte rounding from NUI python/sdfx/preview.py. It scales to max side
+256 with bilinear interpolation and encodes JPEG at quality 0.7 using ImageIO.
+Resampling/JPEG bytes are not claimed identical to Pillow. CPU single-image
+four-channel latents only; SDXL/TAESD and batch grids remain future work.
+Native backend now accepts preview_every (default 2), preview_method (default
+approx; none disables), emits preview with jpeg_b64 and step between progress
+events, and skips the final step as NUI does. This supersedes the earlier requirement
+to disable previews. Unit projection/JPEG tests and backend generation passed;
+the subprocess test now runs three steps and verifies the step-2 JPEG (256x154),
+final PNG, typed error, and clean shutdown. Final subprocess test passed separately.
+NUI itself remains unmodified. Next: dedicated NUI branch, actual EngineClient
+integration with full default envelope, catalog operations, broader model support.
 ## NUI generation envelope validation (2026-11-03)
 
 NativeGenerationDefaults validates and strips known inactive options emitted by

@@ -80,7 +80,11 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         Map.empty
       case "txt2img" =>
         val pipeline=loaded.getOrElse(throw new NativeBackendError("no_model","load a model first"))
-        keys(NativeGenerationDefaults.strip(p,NativeGenerationDefaults.envelope),Set("params","output_dir"))
+        keys(NativeGenerationDefaults.strip(p,NativeGenerationDefaults.envelope),Set("params","output_dir","preview_every","preview_method"))
+        val previewEvery=integer(p,"preview_every",2)
+        require(previewEvery>=0,"preview_every must be nonnegative")
+        val previewMethod=str(p,"preview_method","approx")
+        if !Set("none","approx").contains(previewMethod) then unsupported(s"unsupported preview method: $previewMethod")
         val g=p.get("params") match
           case Some(Obj(fields)) => fields
           case _ => throw IllegalArgumentException("params must be an object")
@@ -102,9 +106,13 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         val output=Path.of(outputName).toAbsolutePath.normalize()
         require(Files.isDirectory(output),"output_dir must be an existing directory")
         val started=System.nanoTime()
-        val progress: DiffusionImageProgress => Unit = value => context.event("progress",Map(
-          "step"->Number(value.completedSteps),"total"->Number(value.totalSteps),"pass"->Str("base"),
-          "eta_s"->Number(0),"image"->Number(0),"images"->Number(1),"batch_size"->Number(1)))
+        val progress: DiffusionImageProgress => Unit = value =>
+          context.event("progress",Map(
+            "step"->Number(value.completedSteps),"total"->Number(value.totalSteps),"pass"->Str("base"),
+            "eta_s"->Number(0),"image"->Number(0),"images"->Number(1),"batch_size"->Number(1)))
+          if previewEvery>0 && previewMethod!="none" && value.completedSteps%previewEvery==0 && value.completedSteps<value.totalSteps then
+            context.checkCancelled()
+            context.event("preview",Map("step"->Number(value.completedSteps),"jpeg_b64"->Str(NativePreview.jpegBase64(value.latents))))
         val image=if sampler=="DPM++ 2M" then
           pipeline.generateDpm(imageRequest,DpmSchedule.karras(config.noise,steps),onProgress=progress,
             cancelled=context.cancelled,prediction=config.prediction)
