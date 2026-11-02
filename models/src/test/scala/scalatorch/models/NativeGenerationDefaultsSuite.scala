@@ -13,3 +13,9 @@ class NativeGenerationDefaultsSuite extends munit.FunSuite:
     assertEquals(NativeGenerationDefaults.strip(Map("manual_loras"->Arr(Vector.empty)),NativeGenerationDefaults.envelope),Map.empty)
     intercept[NativeBackendError](NativeGenerationDefaults.strip(Map("manual_loras"->Arr(Vector(Str("x")))),NativeGenerationDefaults.envelope))
   }
+  test("desktop disabled ControlNet slots are inactive but active or malformed slots fail") {
+    val disabled=Obj(Map("enabled"->Bool(false),"model"->Str("None"),"weight"->Number(1)))
+    assertEquals(NativeGenerationDefaults.strip(Map("controlnet"->Arr(Vector(disabled))),NativeGenerationDefaults.generation),Map.empty)
+    for slot <- Vector(Obj(Map("enabled"->Bool(true))),Obj(Map.empty),Obj(Map("enabled"->Str("false"))),Null) do
+      intercept[NativeBackendError](NativeGenerationDefaults.strip(Map("controlnet"->Arr(Vector(disabled,slot))),NativeGenerationDefaults.generation))
+  }

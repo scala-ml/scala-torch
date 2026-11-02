@@ -108,6 +108,26 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       val iterative=run("txt2img",iterativeParams)("images").asInstanceOf[Arr].values
       assertEquals(iterative.map(_.asInstanceOf[Obj].fields("seed")),Vector(Number(100),Number(101)))
       assertEquals(iterative.map(_.asInstanceOf[Obj].fields("subseed")),Vector(Number(7),Number(8)))
+      val custom=output.resolve("custom-mappings.txt")
+      Files.writeString(custom,s"${metadata("hash").asInstanceOf[Str].value},a red|a blue,${root.getFileName}\n")
+      val keywordParams=Map("prompt"->Str("cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(2),
+        "seed"->Number(42),"hooks"->Obj(Map("model_keyword"->Obj(Map("_mapping_dir"->Str(output.toString),"model_choice"->Str("iterate"))))))
+      val keywordRequest=Map("output_dir"->Str(output.toString),"params"->Obj(keywordParams))
+      def imageFields(result: Map[String,NativeJson])=result("images").asInstanceOf[Arr].values.head.asInstanceOf[Obj].fields
+      def pixelsOf(fields: Map[String,NativeJson])=
+        val img=javax.imageio.ImageIO.read(Path.of(fields("path").asInstanceOf[Str].value).toFile)
+        img.getRGB(0,0,10,6,null,0,10).toVector
+      val firstKeyword=imageFields(run("txt2img",keywordRequest))
+      assertEquals(firstKeyword("effective_prompt"),Str("a red cat"))
+      assertEquals(pixelsOf(firstKeyword),image.getRGB(0,0,10,6,null,0,10).toVector)
+      val rejectKeyword=new NativeWorkContext(() => false,() => false,(_,_) => ())
+      intercept[java.util.concurrent.CancellationException](backend.execute(NativeRequest("keyword-reject","txt2img",keywordRequest,None),rejectKeyword))
+      intercept[IllegalArgumentException](run("txt2img",keywordRequest.updated("params",Obj(keywordParams.updated("width",Number(0))))))
+      val secondKeyword=imageFields(run("txt2img",keywordRequest))
+      assertEquals(secondKeyword("effective_prompt"),Str("a blue cat"))
+      assertEquals(secondKeyword("model_keyword_source_prompt"),Str("a blue cat"))
+      val directBlue=imageFields(run("txt2img",keywordRequest.updated("params",Obj(keywordParams.removed("hooks").updated("prompt",Str("a blue cat"))))))
+      assertEquals(pixelsOf(secondKeyword),pixelsOf(directBlue))
       def filesNow()=
         val paths=Files.list(output)
         try

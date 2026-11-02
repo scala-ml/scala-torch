@@ -9,7 +9,7 @@ private[worker] object NativeGenerationDefaults:
     "prompt"->Str(""),"negative_prompt"->Str(""),"cfg_scale"->Null))
   val generation: Map[String,NativeJson]=Map("subseed_strength"->Number(0),
     "batch_size"->Number(1),"eta"->Null,"hires"->hires,
-    "img2img"->Null,"loras"->Arr(Vector.empty),"controlnet"->Arr(Vector.empty),"hooks"->Obj(Map.empty),
+    "img2img"->Null,"loras"->Arr(Vector.empty),"controlnet"->Arr(Vector.empty),
     "styles"->Arr(Vector.empty))
   val envelope: Map[String,NativeJson]=Map("lora_paths"->Obj(Map.empty),"embedding_paths"->Arr(Vector.empty),
     "controlnet_paths"->Obj(Map.empty),"upscaler_paths"->Obj(Map.empty),"lbw_presets"->Obj(Map.empty),
@@ -23,7 +23,13 @@ private[worker] object NativeGenerationDefaults:
     defaults.foreach { (key,value) =>
       fields.get(key).foreach { actual =>
         val emptyLoras=Set("manual_loras","hires_loras","img2img_hires_loras").contains(key) && actual==Arr(Vector.empty)
-        if !emptyLoras && !matches(actual,value) then throw new NativeBackendError("unsupported",s"unsupported non-default option: $key")
+        val disabledControlNet=key=="controlnet" && (actual match
+          case Arr(slots) => slots.forall {
+            case Obj(fields) => fields.get("enabled").contains(Bool(false))
+            case _ => false
+          }
+          case _ => false)
+        if !emptyLoras && !disabledControlNet && !matches(actual,value) then throw new NativeBackendError("unsupported",s"unsupported non-default option: $key")
       }
     }
     fields--defaults.keySet

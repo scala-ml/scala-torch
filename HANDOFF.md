@@ -1,3 +1,39 @@
+## First successful actual NUI desktop generation (2026-11-03)
+
+NativeKeywordHook now accepts model_keyword in generation, reads mapping CSV,
+uses ModelKeyword planner and passes actual per-image prompts into inference.
+Returns effective_prompt/model_keyword_source_prompt. NativeDiffusionBackend
+commits keywordState only after all output moves and staging deletion succeed.
+Explicit unsupported LoRA/embedding selections and extra-network tags still fail.
+Unknown active hooks fail, explicitly disabled hooks do not execute.
+
+Diffusers identity: full 64-character modelSummary hash, directory basename,
+_mapping_dir/model-keyword.txt + custom-mappings.txt. This intentionally extends
+legacy CSV keys to full native directory hashes; do not hash a directory as a
+legacy checkpoint file or truncate to 8 chars. Short-hash upstream catalogs cannot
+automatically identify converted directories. Mapping UI requests not yet wired.
+
+Disabled ControlNet slots (explicit boolean enabled=false) now accepted; active,
+missing enable flag and malformed slots rejected. Native hook/default tests 4
+passed; real tiny-model backend tests 2 passed including pixel-for-pixel equality
+of mapped red/blue prompts with direct generation, metadata and iteration rollback
+on failed generation/denied publication. Asset properties explicitly enabled.
+
+ACTUAL UI SUCCESS: screenshot native-ui-keyword-fixed.png in isolated home
+.superpowers/nui-ui-8389b9ccd0c940b787ecad1783f6d50b shows Done 1 image and gallery.
+PNG outputs/txt2img/2026-11-03/00000-42.png visually inspected: 64x64 colored noise,
+expected tiny-model behavior, NOT cat-quality/full-model acceptance. SHA256
+91c346a97e597f19af3d5d90d6e8a98fca9947021ebfe7886ddc1837b498900e.
+DPM++2M Karras, 3 steps, seed42 CFG7, CPU. Java UI + NativeWorkerMain observed.
+VRAM estimator banner remains unsupported. UI run exited0 after45sec; thin client
+printed InterruptedException on disconnect AFTER successful screenshot, not a
+worker/generation failure. Current sbt server NUI, scala-torch server stopped.
+NUI worktree clean dedicated branch; no NUI edits in this wave.
+
+NEXT: native mapping check/save/delete UI workflow; normal models/GPU inference,
+A1111 weights, LoRA/embeddings/img2img/batching/extensions and packaging remain.
+See docs/research/nui-native-worker-boundary.md for current evidence and limitations.
+Goal remains active, far from entire original Python-removal feature coverage.
 ## Keyword mapping reader and filename matching (2026-11-03)
 
 Added KeywordMappings: CSV skipinitialspace/quoted multiline fields, normalized

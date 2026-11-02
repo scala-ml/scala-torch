@@ -1,6 +1,43 @@
-# Native worker integration boundary (Windows, 2026-11-03)
+# Native desktop generation checkpoint (2026-11-03)
 
-Inspected NUI at d9f13ea, clean main. No NUI product edits or branch creation yet.
+The actual NUI JavaFX app now completes a tiny CPU generation through
+`NativeWorkerMain`, saves the PNG through its normal output workflow and displays
+it in the gallery. This is a runtime integration checkpoint, not normal-model
+quality or GPU diffusion acceptance. The tiny model produces noise-like images.
+The UI's VRAM estimator still reports an unsupported request.
+
+The `model_keyword` generation hook now resolves checkpoint mappings and applies
+the planner's prompt separately for each image. It returns `effective_prompt` and
+`model_keyword_source_prompt`. Iteration counters advance only after output
+publication succeeds; errors and denied publication leave the counters unchanged.
+Tests compare the resulting pixels with direct generation using the resolved
+prompt, as well as checking counter rollback and output metadata.
+
+Diffusers directory identity uses the complete `load_model` response `hash`
+(64-character SHA256 of the named model sources), not the legacy eight-character
+checkpoint-file hash. Native directory catalogs live under `_mapping_dir`:
+`model-keyword.txt` supplies defaults and `custom-mappings.txt` supplies user rows.
+Both use `hash,keywords,filename` CSV; filename is the model directory basename.
+For example, `FULL_SHA256,red|blue,tiny-sd-pipe`. The full hash must replace the
+placeholder. Missing catalogs mean no matching keywords. Legacy short-hash
+catalogs do not automatically identify converted Diffusers directories.
+
+Selected LoRAs, textual inversion embeddings and extra-network tags still fail
+explicitly pending their native inference implementation. Mapping UI commands
+(`model_keyword` check/save/delete), catalog installation and model keyword
+capability advertisement are not yet implemented. Disabled ControlNet slots are
+accepted; active or malformed slots still fail.
+
+Evidence: isolated home
+`.superpowers/nui-ui-8389b9ccd0c940b787ecad1783f6d50b`, screenshot
+`native-ui-keyword-fixed.png`, output `outputs/txt2img/2026-11-03/00000-42.png`.
+The output is 64x64, seed 42, DPM++ 2M Karras, 3 steps, CFG 7. PNG SHA256:
+`91c346a97e597f19af3d5d90d6e8a98fca9947021ebfe7886ddc1837b498900e`.
+The observed app and worker processes were Java; no Python engine was launched.
+
+## Historical worker boundary inspection (Windows, 2026-11-03)
+
+At the original inspection, NUI was at d9f13ea on clean main, before native branch creation.
 The user requires a dedicated branch before any NUI edits. The previous issue
 release instructions are historical; the current objective is Python removal.
 

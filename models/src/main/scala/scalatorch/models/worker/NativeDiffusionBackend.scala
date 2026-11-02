@@ -12,6 +12,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
   private val root=modelRoot.toRealPath()
   private val config=EulerConfig.read(schedulerConfig)
   private var loaded: Option[EulerImagePipeline]=None
+  private var keywordState=ModelKeyword.State()
   @volatile private var modelSummary=Map.empty[String,NativeJson]
   override def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot(modelSummary)
   private def checkpointHash(context: NativeWorkContext): String=
@@ -174,7 +175,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         val g=p.get("params") match
           case Some(Obj(fields)) => fields
           case _ => throw IllegalArgumentException("params must be an object")
-        keys(NativeGenerationDefaults.strip(g,NativeGenerationDefaults.generation),Set("prompt","negative_prompt","width","height","steps","seed","subseed","cfg_scale","sampler_name","scheduler","clip_skip","n_iter","checkpoint","vae","extra"))
+        keys(NativeGenerationDefaults.strip(g,NativeGenerationDefaults.generation),Set("prompt","negative_prompt","width","height","steps","seed","subseed","cfg_scale","sampler_name","scheduler","clip_skip","n_iter","checkpoint","vae","extra","hooks"))
         val prediction=NativeGenerationMetadata.prediction(g.get("extra"),config.prediction)
         g.get("checkpoint") match
           case None | Some(Null) => ()
@@ -211,6 +212,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         require(Files.isDirectory(output),"output_dir must be an existing directory")
         val recoveryName=str(p,"vae_recovery_dir","")
         val recovery=if recoveryName.isEmpty then output else Path.of(recoveryName).toAbsolutePath.normalize()
+        val keywordPlan=NativeKeywordHook.plan(g.get("hooks"),imageRequest.prompt,
+          modelSummary("hash").asInstanceOf[Str].value,root.getFileName.toString,iterations,seed,keywordState,() => context.checkCancelled())
         val started=System.nanoTime()
         val staging=Files.createTempDirectory(output,".native-staging-")
         val staged=scala.collection.mutable.ArrayBuffer.empty[Path]
@@ -218,7 +221,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         try
           val images=Vector.tabulate(iterations) { index =>
             context.checkCancelled()
-            val current=imageRequest.copy(seed=seed+index)
+            val current=imageRequest.copy(seed=seed+index,prompt=keywordPlan.fold(imageRequest.prompt)(_.prompts(index)))
             val progress: DiffusionImageProgress => Unit = value =>
               context.event("progress",Map(
                 "step"->Number(value.completedSteps),"total"->Number(value.totalSteps),"pass"->Str("base"),
@@ -245,7 +248,9 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
             staged+=temporary
             Obj(Map("path"->Str(output.resolve(name).toString),"seed"->Number(BigDecimal(current.seed)),
               "subseed"->Number(if subseed<0 then subseed else subseed+index),
-              "width"->Number(current.width),"height"->Number(current.height)))
+              "width"->Number(current.width),"height"->Number(current.height))++keywordPlan.fold(Map.empty[String,NativeJson]) { _ =>
+                Map("effective_prompt"->Str(current.prompt),"model_keyword_source_prompt"->Str(current.prompt))
+              })
           }
           context.beginPublication()
           staged.foreach { temporary =>
@@ -254,6 +259,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
             published+=destination
           }
           Files.delete(staging)
+          keywordPlan.foreach(plan => keywordState=plan.nextState)
           Map("images"->Arr(images),"timing_s"->Number(BigDecimal((System.nanoTime()-started)/1e9)),
             "model_name"->Str(root.getFileName.toString),"scheduler"->Str(schedule))
         catch
