@@ -68,4 +68,26 @@ class ImageToImageSuite extends munit.FunSuite:
     assertEquals(first.toFloatArray.toVector,replay.toFloatArray.toVector)
     intercept[java.util.concurrent.CancellationException](pipeline.generate(request,schedule.euler(2),
       source=Some(seeded),cancelled=() => true))
+    val mask=Tensor.fromFloats(Array.tabulate(64)(i => if i%8<4 then 0f else 1f),Shape.from(Seq(1L,1L,8L,8L)))
+    val masked=DiffusionImageSource(input,.5,Some(posterior),Some(mask),Some(input))
+    for dpm <- Seq(false,true) do
+      val layout=DpmSchedule.karras(schedule,2)
+      val maskedOutput=if dpm then pipeline.generateDpm(request,layout,Some(noise),source=Some(masked))
+        else pipeline.generate(request,schedule.euler(2),Some(noise),source=Some(masked))
+      val maskedReplay=if dpm then pipeline.generateDpm(request,layout,Some(noise),source=Some(masked))
+        else pipeline.generate(request,schedule.euler(2),Some(noise),source=Some(masked))
+      val actual=maskedOutput.toFloatArray
+      val original=input.toFloatArray
+      for c <- 0 until 3; y <- 0 until 8; x <- 0 until 4 do
+        val i=c*64+y*8+x
+        assertEquals(actual(i),original(i))
+      assert((0 until 3).exists(c => (0 until 8).exists(y => (4 until 8).exists(x =>
+        actual(c*64+y*8+x)!=original(c*64+y*8+x)))))
+      assertEquals(maskedOutput.toFloatArray.toVector,maskedReplay.toFloatArray.toVector)
+    intercept[IllegalArgumentException](DiffusionImageSource(input,.5,Some(posterior),Some(mask),None))
+    intercept[IllegalArgumentException](DiffusionImageSource(input,.5,Some(posterior),None,Some(input)))
+    intercept[IllegalArgumentException](pipeline.generate(request,schedule.euler(2),source=Some(
+      DiffusionImageSource(input,.5,Some(posterior),Some(Tensor.fromFloats(new Array[Float](16),Shape.from(Seq(1L,1L,4L,4L)))),Some(input)))))
+    intercept[IllegalArgumentException](pipeline.generate(request,schedule.euler(2),source=Some(
+      DiffusionImageSource(input,.5,Some(posterior),Some(Tensor.fromFloats(Array.fill(64)(Float.NaN),mask.shape)),Some(input)))))
   }

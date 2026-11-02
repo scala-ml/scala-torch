@@ -12,7 +12,9 @@ final case class SdxlImageSize(originalHeight: Int,originalWidth: Int,cropTop: I
   private[models] def timeIds(height: Int,width: Int): Tensor[Float] =
     Tensor.fromFloats(Array(originalHeight.toFloat,originalWidth.toFloat,cropTop.toFloat,cropLeft.toFloat,height.toFloat,width.toFloat),Shape.from(Seq(1L,6L)))
 /** Single NCHW image in [-1,1]; optional standard-normal posterior noise for replay. */
-final case class DiffusionImageSource(image: Tensor[Float],strength: Double,posteriorNoise: Option[Tensor[Float]]=None)
+final case class DiffusionImageSource(image: Tensor[Float],strength: Double,posteriorNoise: Option[Tensor[Float]]=None,
+    mask: Option[Tensor[Float]]=None,originalImage: Option[Tensor[Float]]=None):
+  require(mask.isDefined==originalImage.isDefined,"inpaint mask and original image must be supplied together")
 final case class DiffusionImageProgress(completedSteps: Int,totalSteps: Int,timestep: Float,latents: Tensor[Float])
 
 /** Single-image Euler/DPM++ sampling with explicit U-Net and VAE placement. */
@@ -31,7 +33,8 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
       Tensor.fromFloats(new Array[Float](text.pooledWidth),Shape.from(Seq(1L,text.pooledWidth.toLong))),SdxlImageSize(1,1).timeIds(1,1))))
   }
   require(unet.convIn.weight.data.shape.dims(1)==vae.config.latentChannels &&
-    unet.convOut.weight.data.shape.dims.head==vae.config.latentChannels,"pipeline latent channel mismatch")
+    unet.convOut.weight.data.shape.dims.head==vae.config.latentChannels,
+    "U-Net input/output channels must match the VAE latent width; nine-channel inpainting U-Nets are unsupported")
   private val factor=1 << (vae.decoder.upBlocks.size-1)
 
   /** Noise is unscaled standard-normal data; supplied noise overrides seed. Guidance is enabled above one. */
@@ -75,6 +78,15 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
       value.posteriorNoise.foreach { n =>
         require(n.shape==latentShape && n.toFloatArray.forall(_.isFinite),"posterior noise shape/value mismatch")
       }
+      value.mask.foreach { mask =>
+        require(mask.device==Device.Cpu && mask.dtype==DType.Float32 &&
+          mask.shape==Shape.from(Seq(1L,1L,request.height.toLong,request.width.toLong)),"inpaint mask shape/device mismatch")
+        require(mask.toFloatArray.forall(x => x.isFinite && x>=0f && x<=1f),"inpaint mask values must be finite in [0,1]")
+      }
+      value.originalImage.foreach { original =>
+        require(original.device==Device.Cpu && original.dtype==DType.Float32 && original.shape==value.image.shape &&
+          original.toFloatArray.forall(x => x.isFinite && x>= -1f && x<=1f),"inpaint original image mismatch")
+      }
       val steps=math.max(1,(fullSchedule.timesteps.size*value.strength).toInt)
       val start=fullSchedule.timesteps.size-steps
       EulerSchedule(fullSchedule.timesteps.drop(start),fullSchedule.sigmas.drop(start),fullSchedule.initialNoiseSigma)
@@ -89,6 +101,15 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
       val latent=vae.toDiffusionLatents(posterior.sample(value.posteriorNoise.getOrElse(randomNoise())))
       require(latent.data.toFloatArray.forall(_.isFinite),"VAE encoder produced nonfinite latents")
       latent
+    }
+    val latentMask=source.flatMap(_.mask).map { mask =>
+      val sourceMask=mask.toFloatArray
+      val width=request.width/factor;val height=request.height/factor
+      val values=Array.tabulate(width*height) { i =>
+        val x=i%width;val y=i/width
+        sourceMask((y*factor)*request.width+x*factor)
+      }
+      Tensor.fromFloats(values,Shape.from(Seq(1L,1L,height.toLong,width.toLong)))
     }
     def encode(text: String): Variable =
       checkCancelled()
@@ -127,6 +148,19 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
             latent=result.previous
             history=Some(result.predictedOriginal)
           case None => latent=scheduler.step(i,predicted,latent).previous
+        latentMask.foreach { mask =>
+          val sigma=schedule.sigmas(i+1)
+          val alpha=if dpm then 1/math.hypot(1,sigma) else 1.0
+          val preserved=clean.get*alpha.toFloat+Variable(initial,requiresGrad=false)*(sigma*alpha).toFloat
+          val original=preserved.data.toFloatArray
+          val generated=latent.data.toFloatArray
+          val repaint=mask.toFloatArray
+          val plane=mask.shape.dims(2).toInt*mask.shape.dims(3).toInt
+          latent=Variable(Tensor.fromFloats(Array.tabulate(generated.length) { j =>
+            val m=repaint((j/plane)%repaint.length)
+            original(j)*(1f-m)+generated(j)*m
+          },latent.data.shape),requiresGrad=false)
+        }
         require(latent.data.toFloatArray.forall(_.isFinite),"denoising produced nonfinite latents")
         checkCancelled()
         onProgress(DiffusionImageProgress(i+1,schedule.timesteps.size,schedule.timesteps(i),latent.data))
@@ -141,5 +175,13 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
       case e: CancellationException => throw e
       case scala.util.control.NonFatal(e) => throw new VaeDecodeFailure(decoderInput.data,e)
     checkCancelled()
-    image
+    source.flatMap(s => s.mask.map(mask =>
+      val generated=image.toFloatArray
+      val original=s.originalImage.get.toFloatArray
+      val repaint=mask.toFloatArray
+      Tensor.fromFloats(Array.tabulate(generated.length) { i =>
+        val pixel=i%(request.width*request.height)
+        original(i)*(1f-repaint(pixel))+generated(i)*repaint(pixel)
+      },image.shape)
+    )).getOrElse(image)
   }
