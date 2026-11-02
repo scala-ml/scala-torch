@@ -1,3 +1,23 @@
+## Native diffusion adapter checkpoint (2026-11-03)
+
+NativeDiffusionBackend now implements load_model/unload/txt2img with the real
+CPU Float32 pipeline, explicit Euler checkpoint config, Euler Uniform/Karras and
+DPM++ 2M Karras. NativeWorkerMain provides a UTF-8 stdin/stdout entry point.
+Typed backend errors preserve no_model/unsupported codes. Load stages new weights
+before atomic publication, computes a SHA-256 fingerprint of model/tokenizer files,
+and preserves existing state on unsupported settings or cancellation. Generation
+emits progress and writes a unique create-new PNG after publication admission.
+11 native worker/control/protocol/backend tests passed, including gated real tiny
+checkpoint load, 10x6 DPM output, unload, unsupported settings and cancellation.
+Run: models/testOnly scalatorch.models.worker.NativeDiffusionBackendSuite
+scalatorch.models.NativeWorkerSuite scalatorch.models.NativeProtocolSuite
+scalatorch.models.NativeJobControlSuite, with scalatorch.clip.dir set to tiny text_encoder.
+
+Still incomplete: full NUI default parameter envelope (currently strict subset),
+list_models/list_samplers, standalone subprocess verification, actual EngineProcess
+integration, normal model/CUDA inference and remaining NUI operations. No claim of
+full NUI compatibility. NUI remains clean on main; CREATE A DEDICATED BRANCH before
+any NUI edits. The older paragraph below describing no adapter is superseded here.
 # Handoff — 2026-11-03
 
 ## Windows continuation (2026-11-03)

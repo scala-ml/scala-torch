@@ -1,0 +1,127 @@
+package scalatorch.models.worker
+
+import scalatorch.models.*
+import java.nio.file.{Files,Path}
+import java.util.UUID
+
+final class NativeBackendError(val code: String,message: String) extends RuntimeException(message)
+
+/** Explicit CPU Float32 checkpoint adapter. Unsupported settings fail before inference. */
+final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extends NativeWorkerBackend:
+  import NativeJson.*
+  private val root=modelRoot.toRealPath()
+  private val config=EulerConfig.read(schedulerConfig)
+  private var loaded: Option[EulerImagePipeline]=None
+  private def checkpointHash(context: NativeWorkContext): String=
+    val digest=java.security.MessageDigest.getInstance("SHA-256")
+    val names=Vector("text_encoder/config.json","text_encoder/model.safetensors","unet/config.json",
+      "unet/diffusion_pytorch_model.safetensors","vae/config.json","vae/diffusion_pytorch_model.safetensors",
+      "tokenizer/vocab.json","tokenizer/merges.txt")
+    names.foreach { name =>
+      digest.update(name.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+      digest.update(0.toByte)
+      val input=Files.newInputStream(root.resolve(name))
+      try
+        val buffer=new Array[Byte](65536)
+        var count=input.read(buffer)
+        while count != -1 do
+          context.checkCancelled()
+          digest.update(buffer,0,count)
+          count=input.read(buffer)
+      finally input.close()
+    }
+    java.util.HexFormat.of().formatHex(digest.digest())
+  val supported=Set("load_model","unload","txt2img")
+  private def unsupported(message: String): Nothing=throw new NativeBackendError("unsupported",message)
+  private def keys(p: Map[String,NativeJson],allowed: Set[String]): Unit=
+    val unknown=p.keySet--allowed
+    if unknown.nonEmpty then unsupported(s"unsupported parameters: ${unknown.toVector.sorted.mkString(", ")}")
+  private def str(p: Map[String,NativeJson],key: String,default: String): String=p.get(key) match
+    case None => default
+    case Some(Str(s)) => s
+    case _ => throw IllegalArgumentException(s"$key must be a string")
+  private def number(p: Map[String,NativeJson],key: String,default: BigDecimal): BigDecimal=p.get(key) match
+    case None => default
+    case Some(Number(n)) => n
+    case _ => throw IllegalArgumentException(s"$key must be numeric")
+  private def integer(p: Map[String,NativeJson],key: String,default: Int): Int=
+    val n=number(p,key,BigDecimal(default))
+    require(n.isValidInt,s"$key must be an integer")
+    n.toInt
+
+  def execute(request: NativeRequest,context: NativeWorkContext): Map[String,NativeJson]=
+    val p=request.params
+    context.checkCancelled()
+    request.kind match
+      case "load_model" =>
+        keys(p,Set("path","dtype","vram_mode","vae_path","vae_tiling"))
+        require(Path.of(str(p,"path",root.toString)).toRealPath()==root,"model path differs from configured checkpoint")
+        if str(p,"dtype","fp32")!="fp32" || str(p,"vram_mode","cpu")!="cpu" then
+          unsupported("native adapter currently requires fp32 and cpu")
+        if p.get("vae_path").exists(_!=Null) || p.get("vae_tiling").exists(_!=Bool(false)) then
+          unsupported("external VAE and tiling are not implemented")
+        val tokenizer=ClipFastTokenizer.load(root.resolve("tokenizer/vocab.json"),root.resolve("tokenizer/merges.txt"))
+        context.checkCancelled()
+        val clip=PretrainedClip.load(root.resolve("text_encoder"))
+        context.checkCancelled()
+        val unet=PretrainedUNet.load(root.resolve("unet"))
+        context.checkCancelled()
+        val vae=PretrainedVae.load(root.resolve("vae"))
+        val pipeline=new EulerImagePipeline(tokenizer,clip,unet,vae)
+        val hash=checkpointHash(context)
+        context.beginPublication()
+        loaded=Some(pipeline)
+        Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),"kind"->Str("diffusers"),
+          "hash"->Str(hash),"model_token"->Str(UUID.randomUUID().toString))
+      case "unload" =>
+        keys(p,Set.empty)
+        context.beginPublication()
+        loaded=None
+        Map.empty
+      case "txt2img" =>
+        val pipeline=loaded.getOrElse(throw new NativeBackendError("no_model","load a model first"))
+        keys(p,Set("params","output_dir"))
+        val g=p.get("params") match
+          case Some(Obj(fields)) => fields
+          case _ => throw IllegalArgumentException("params must be an object")
+        keys(g,Set("prompt","negative_prompt","width","height","steps","seed","cfg_scale","sampler_name","scheduler"))
+        val seedNumber=number(g,"seed",42)
+        require(seedNumber.isValidLong,"seed must be a signed 64-bit integer")
+        val seed=if seedNumber.toLong == -1 then new java.security.SecureRandom().nextLong() & Long.MaxValue else seedNumber.toLong
+        val steps=integer(g,"steps",20)
+        require(steps>0 && steps<=1000,"steps must be between 1 and 1000")
+        val imageRequest=DiffusionImageRequest(str(g,"prompt",""),str(g,"negative_prompt",""),
+          integer(g,"width",512),integer(g,"height",512),seed,number(g,"cfg_scale",7).toFloat)
+        val sampler=str(g,"sampler_name","DPM++ 2M")
+        val schedule=str(g,"scheduler","Karras")
+        if !(sampler=="Euler" && Set("Uniform","Karras").contains(schedule)) &&
+            !(sampler=="DPM++ 2M" && schedule=="Karras") then unsupported(s"unsupported sampler/schedule: $sampler/$schedule")
+        val outputName=str(p,"output_dir","")
+        require(outputName.nonEmpty,"output_dir is required")
+        val output=Path.of(outputName).toAbsolutePath.normalize()
+        require(Files.isDirectory(output),"output_dir must be an existing directory")
+        val started=System.nanoTime()
+        val progress: DiffusionImageProgress => Unit = value => context.event("progress",Map(
+          "step"->Number(value.completedSteps),"total"->Number(value.totalSteps),"pass"->Str("base"),
+          "eta_s"->Number(0),"image"->Number(0),"images"->Number(1),"batch_size"->Number(1)))
+        val image=if sampler=="DPM++ 2M" then
+          pipeline.generateDpm(imageRequest,DpmSchedule.karras(config.noise,steps),onProgress=progress,
+            cancelled=context.cancelled,prediction=config.prediction)
+        else
+          val layout=if schedule=="Karras" then config.noise.karrasEuler(steps) else config.noise.euler(steps,config.spacing,config.stepsOffset)
+          pipeline.generate(imageRequest,layout,onProgress=progress,cancelled=context.cancelled,prediction=config.prediction)
+        context.beginPublication()
+        val path=output.resolve(s"native-${UUID.randomUUID()}.png")
+        DiffusionImageIO.writePng(image,path)
+        Map("images"->Arr(Vector(Obj(Map("path"->Str(path.toString),"seed"->Number(BigDecimal(seed)),
+          "width"->Number(imageRequest.width),"height"->Number(imageRequest.height))))),
+          "timing_s"->Number(BigDecimal((System.nanoTime()-started)/1e9)),"model_name"->Str(root.getFileName.toString),
+          "scheduler"->Str(schedule))
+      case _ => unsupported(s"unsupported request: ${request.kind}")
+
+object NativeWorkerMain:
+  def main(args: Array[String]): Unit=
+    require(args.length==2,"usage: NativeWorkerMain <diffusers-root> <explicit-euler-config.json>")
+    val backend=new NativeDiffusionBackend(Path.of(args(0)),Path.of(args(1)))
+    val worker=new NativeWorker(System.out,backend)
+    worker.serve(new java.io.InputStreamReader(System.in,java.nio.charset.StandardCharsets.UTF_8))
