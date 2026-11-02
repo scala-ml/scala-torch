@@ -2,7 +2,7 @@ package scalatorch.models
 
 import scalatorch.*
 import scalatorch.autograd.Variable
-import scalatorch.io.SafeTensors
+import scalatorch.io.SafeTensorSet
 import scalatorch.nn.*
 import java.nio.file.Path
 import scala.collection.mutable
@@ -34,7 +34,7 @@ object PretrainedVae:
       maxFeatureElements: Long=134217728L,maxScoreElements: Long=16777216L): VaeModel =
     require(maxParameters>=0 && maxFeatureElements>=0 && maxScoreElements>=0,"negative VAE allocation limit")
     val c=VaeConfig.read(directory.resolve("config.json"))
-    Using.resource(SafeTensors.open(directory.resolve("diffusion_pytorch_model.safetensors"))) { archive =>
+    Using.resource(SafeTensorSet.open(directory,filename="diffusion_pytorch_model.safetensors")) { archive =>
       val total=archive.tensors.values.foldLeft(BigInt(0))((n,t) => n+t.shape.numel)
       require(total<=maxParameters,"VAE weights exceed parameter budget")
       val used=mutable.Set.empty[String]

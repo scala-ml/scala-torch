@@ -1,3 +1,20 @@
+## Indexed Diffusers weights (2026-11-03)
+
+SafeTensorSet.open now accepts a validated basename (default model.safetensors)
+and exposes sourceFiles including index and shards. U-Net/VAE use this reader
+with diffusion_pytorch_model.safetensors, enabling indexed weights while retaining
+existing assignment/count/byte-budget checks and ambiguous single+index rejection.
+Native worker fingerprints actual source inventory rather than hardcoded weight
+files, including indexed CLIP weights which PretrainedClip already supported.
+
+Verification: ShardSuite 6 passed / 1 Linux-only descriptor test skipped on Windows;
+22 U-Net/VAE/backend tests passed including pinned model numerical references.
+Then backend suite 2 passed with an additional indexed-all-components fixture:
+CLIP/U-Net/VAE copied to one-shard indexes, hashed, loaded and generated a PNG.
+Multi-shard routing is tested separately in ShardSuite. This does not establish
+normal SD model or GPU inference; it removes a file-layout restriction only.
+Current sbt server is scala-torch with all three pinned tiny model props enabled.
+NUI unchanged this turn. Both dedicated branches remain in use; goal incomplete.
 ## Native CLIP skip integration (2026-11-03)
 
 DiffusionImageRequest adds clipSkip=1; pipeline validates against encoder depth and

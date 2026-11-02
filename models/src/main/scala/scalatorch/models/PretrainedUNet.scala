@@ -1,18 +1,18 @@
 package scalatorch.models
 
 import scalatorch.*
-import scalatorch.io.SafeTensors
+import scalatorch.io.SafeTensorSet
 import scalatorch.nn.*
 import java.nio.file.Path
 import scala.collection.mutable
 import scala.util.Using
 
-/** Diffusers single-file safetensors loader. All parameters are frozen unless trainable is requested. */
+/** Diffusers single or indexed safetensors loader. Parameters are frozen unless requested. */
 object PretrainedUNet:
   def load(directory: Path,trainable: Boolean=false,maxParameters: Long=1000000000L): ConditionalUNet2d =
     require(maxParameters>=0,"negative U-Net parameter budget")
     val c=UNetConfig.read(directory.resolve("config.json"))
-    Using.resource(SafeTensors.open(directory.resolve("diffusion_pytorch_model.safetensors"))) { archive =>
+    Using.resource(SafeTensorSet.open(directory,filename="diffusion_pytorch_model.safetensors")) { archive =>
       val total=archive.tensors.values.foldLeft(BigInt(0))((sum,t) => sum+t.shape.numel)
       require(total<=maxParameters,"U-Net weights exceed parameter budget")
       val used=mutable.Set.empty[String]

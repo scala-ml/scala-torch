@@ -3,6 +3,40 @@ package scalatorch.models.worker
 import java.nio.file.{Files,Path}
 
 class NativeDiffusionBackendSuite extends munit.FunSuite:
+  test("public worker loads indexed CLIP UNet and VAE archives and hashes their source files") {
+    val configured=sys.props.get("scalatorch.clip.dir")
+    assume(configured.nonEmpty,"public tiny model required")
+    val source=Path.of(configured.get).getParent
+    val temp=Files.createTempDirectory("native-indexed")
+    import NativeJson.*
+    try
+      for (part,filename) <- Vector("text_encoder"->"model.safetensors","unet"->"diffusion_pytorch_model.safetensors",
+          "vae"->"diffusion_pytorch_model.safetensors") do
+        val target=Files.createDirectory(temp.resolve(part))
+        Files.copy(source.resolve(part).resolve("config.json"),target.resolve("config.json"))
+        val shard="weights-00001-of-00001.safetensors"
+        Files.copy(source.resolve(part).resolve(filename),target.resolve(shard))
+        val names=scala.util.Using.resource(scalatorch.io.SafeTensors.open(target.resolve(shard)))(_.tensors.keys.toVector)
+        Files.writeString(target.resolve(filename+".index.json"),NativeJson.render(Obj(Map(
+          "weight_map"->Obj(names.map(_->Str(shard)).toMap)))))
+      val tokenizer=Files.createDirectory(temp.resolve("tokenizer"))
+      for name <- Vector("vocab.json","merges.txt") do Files.copy(source.resolve("tokenizer").resolve(name),tokenizer.resolve(name))
+      val config=temp.resolve("scheduler.json")
+      Files.writeString(config,"""{"num_train_timesteps":1000,"beta_start":0.00085,"beta_end":0.012,"beta_schedule":"scaled_linear"}""")
+      val backend=new NativeDiffusionBackend(temp,config)
+      val context=new NativeWorkContext(() => false,() => true,(_,_) => ())
+      val result=backend.execute(NativeRequest("load","load_model",Map("path"->Str(temp.toString)),None),context)
+      assert(result("hash").asInstanceOf[Str].value.matches("[0-9a-f]{64}"))
+      val image=backend.execute(NativeRequest("image","txt2img",Map("output_dir"->Str(temp.toString),
+        "params"->Obj(Map("width"->Number(10),"height"->Number(6),"steps"->Number(1)))),None),context)
+      assertEquals(image("images").asInstanceOf[Arr].values.size,1)
+    finally
+      val paths=Files.walk(temp)
+      try
+        import scala.jdk.CollectionConverters.*
+        paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.delete(_))
+      finally paths.close()
+  }
   test("public native backend loads generates PNG and unloads without Python") {
     val configured=sys.props.get("scalatorch.clip.dir")
     assume(configured.nonEmpty,"public tiny model required")

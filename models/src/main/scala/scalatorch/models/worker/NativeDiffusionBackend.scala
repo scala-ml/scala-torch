@@ -14,9 +14,13 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
   private var loaded: Option[EulerImagePipeline]=None
   private def checkpointHash(context: NativeWorkContext): String=
     val digest=java.security.MessageDigest.getInstance("SHA-256")
-    val names=Vector("text_encoder/config.json","text_encoder/model.safetensors","unet/config.json",
-      "unet/diffusion_pytorch_model.safetensors","vae/config.json","vae/diffusion_pytorch_model.safetensors",
-      "tokenizer/vocab.json","tokenizer/merges.txt")
+    val weights=Vector("text_encoder"->"model.safetensors","unet"->"diffusion_pytorch_model.safetensors",
+      "vae"->"diffusion_pytorch_model.safetensors").flatMap { (part,name) =>
+      scala.util.Using.resource(scalatorch.io.SafeTensorSet.open(root.resolve(part),filename=name)) { set =>
+        Vector(s"$part/config.json")++set.sourceFiles.map(p => root.relativize(p).toString.replace('\\','/'))
+      }
+    }
+    val names=weights++Vector("tokenizer/vocab.json","tokenizer/merges.txt")
     names.foreach { name =>
       digest.update(name.getBytes(java.nio.charset.StandardCharsets.UTF_8))
       digest.update(0.toByte)
