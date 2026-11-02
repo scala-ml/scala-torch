@@ -10,9 +10,11 @@ import scala.util.Using
 
 /** Full resident AdamW checkpoint: architecture binding around the existing checked state format. */
 private[models] object BackendLlamaCheckpoint:
-  private val magic="STBADM01".getBytes(UTF_8)
-  private val headerBytes=48L
-  private def binding(model: LlamaModel): Array[Byte] =
+  private val magic="STBADM02".getBytes(UTF_8)
+  private val legacyMagic="STBADM01".getBytes(UTF_8)
+  private val headerBytes=52L
+  private def binding(model: LlamaModel,context: String): Array[Byte] =
+    require(context.length<=4096 && TokenizerJson.validUnicode(context),"invalid checkpoint context")
     val hash=MessageDigest.getInstance("SHA-256")
     Using.resource(new DataOutputStream(new DigestOutputStream(OutputStream.nullOutputStream(),hash))) { out =>
       val c=model.config
@@ -30,35 +32,53 @@ private[models] object BackendLlamaCheckpoint:
           layer.mlp.gateProj,layer.mlp.upProj,layer.mlp.downProj).foreach(projection)
       }
       out.writeDouble(model.norm.epsilon);projection(model.lmHead)
+      // Empty context preserves the original architecture fingerprint byte-for-byte.
+      if context.nonEmpty then
+        val bytes=context.getBytes(UTF_8)
+        out.writeInt(bytes.length);out.write(bytes)
     }
     hash.digest()
   def save(model: LlamaModel,weights: Map[String,Tensor[Float]],moments: Map[String,AdamWMoments],
-      config: AdamWConfig,path: Path,step: Long,maxBytes: Long): Unit =
+      config: AdamWConfig,path: Path,step: Long,maxBytes: Long,context: String): Unit =
     require(maxBytes>=headerBytes,"invalid checkpoint byte budget")
+    val fingerprint=binding(model,context)
+    val contextBytes=context.getBytes(UTF_8)
+    require(maxBytes>=headerBytes+contextBytes.length,"checkpoint byte budget exceeded")
     val destination=path.toAbsolutePath.normalize()
     Files.createDirectories(destination.getParent)
     val state=Files.createTempFile(destination.getParent,".backend-adam-state-",".tmp")
     try
       BackendAdamCheckpoint.save(model,weights,moments,config,state,step)
       val length=Files.size(state)
-      require(length<=maxBytes-headerBytes,"checkpoint byte budget exceeded")
+      require(length<=maxBytes-headerBytes-contextBytes.length,"checkpoint byte budget exceeded")
       val temporary=Files.createTempFile(destination.getParent,".backend-adam-bundle-",".tmp")
       try
         Using.resource(new DataOutputStream(new BufferedOutputStream(Files.newOutputStream(temporary)))) { out =>
-          out.write(magic);out.write(binding(model));out.writeLong(length);Files.copy(state,out)
+          out.write(magic);out.write(fingerprint);out.writeInt(contextBytes.length);out.write(contextBytes)
+          out.writeLong(length);Files.copy(state,out)
         }
         Files.move(temporary,destination,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING)
       finally Files.deleteIfExists(temporary)
     finally Files.deleteIfExists(state)
-  def load(model: LlamaModel,config: AdamWConfig,path: Path,maxBytes: Long): BackendAdamCheckpoint.Saved =
-    require(maxBytes>=headerBytes,"invalid checkpoint byte budget")
+  def load(model: LlamaModel,config: AdamWConfig,path: Path,maxBytes: Long,context: Option[String]): BackendAdamCheckpoint.Saved =
+    require(maxBytes>=48L,"invalid checkpoint byte budget")
     val state=Files.createTempFile("backend-adam-load-",".tmp")
     try
       try Using.resource(new DataInputStream(new BufferedInputStream(Files.newInputStream(path)))) { in =>
-        require(in.readNBytes(8).sameElements(magic),"unsupported backend checkpoint format")
-        require(MessageDigest.isEqual(in.readNBytes(32),binding(model)),"checkpoint model configuration mismatch")
+        val version=in.readNBytes(8)
+        val legacy=version.sameElements(legacyMagic)
+        require(legacy || version.sameElements(magic),"unsupported backend checkpoint format")
+        val fingerprint=in.readNBytes(32)
+        val contextSize=if legacy then 0 else in.readInt()
+        require(contextSize>=0 && contextSize<=16384,"invalid checkpoint context size")
+        val bytes=in.readNBytes(contextSize)
+        require(bytes.length==contextSize,"truncated checkpoint context")
+        val storedContext=UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes)).toString
+        context.foreach(expected => require(expected==storedContext,"checkpoint training context mismatch"))
+        require(MessageDigest.isEqual(fingerprint,binding(model,storedContext)),"checkpoint model configuration/context mismatch")
         val length=in.readLong()
-        require(length>=0 && length<=maxBytes-headerBytes,"checkpoint byte budget exceeded")
+        val header=(if legacy then 48L else headerBytes)+contextSize
+        require(length>=0 && length<=maxBytes-header,"checkpoint byte budget exceeded")
         Using.resource(new BufferedOutputStream(Files.newOutputStream(state))) { out =>
           val buffer=new Array[Byte](65536)
           var remaining=length

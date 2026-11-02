@@ -37,17 +37,17 @@ final class BackendLlamaTraining[T] private (model: LlamaModel,val backend: Trai
     val saved=moments.iterator.map((p,state) => p -> state.snapshot()).toMap
     named.flatMap((name,p) => saved.get(p).map(name -> _)).toMap
   /** Explicit full-model transfer to an atomic, architecture-bound AdamW checkpoint. */
-  def saveCheckpoint(path: java.nio.file.Path,step: Long,maxBytes: Long = 4294967296L): Unit =
+  def saveCheckpoint(path: java.nio.file.Path,step: Long,maxBytes: Long = 4294967296L,context: String = ""): Unit =
     check()
     val (_,config)=adam.getOrElse(throw IllegalArgumentException("checkpoint requires AdamW training"))
     require(step>=0,"negative training step")
-    BackendLlamaCheckpoint.save(model,stateDict(),optimizerState(),config,path,step,maxBytes)
+    BackendLlamaCheckpoint.save(model,stateDict(),optimizerState(),config,path,step,maxBytes,context)
   /** Validates on the host, stages all device allocations, then publishes one new generation. */
-  def loadCheckpoint(path: java.nio.file.Path,maxBytes: Long = 4294967296L): Long =
+  def loadCheckpoint(path: java.nio.file.Path,maxBytes: Long = 4294967296L,context: Option[String] = None): Long =
     check()
     require(generation<Long.MaxValue,"training generation overflow")
     val (engine,config)=adam.getOrElse(throw IllegalArgumentException("checkpoint requires AdamW training"))
-    val saved=BackendLlamaCheckpoint.load(model,config,path,maxBytes)
+    val saved=BackendLlamaCheckpoint.load(model,config,path,maxBytes,context)
     require(saved.weights.values.forall(_.toFloatArray.forall(_.isFinite)),"nonfinite checkpoint weights")
     val aliases=named.groupMap(_._2)(_._1)
     Using.Manager { use =>

@@ -113,3 +113,37 @@ class BackendAdamCheckpointSuite extends munit.FunSuite:
       assertEquals(Files.readAllBytes(path).toVector,saved)
     finally Files.deleteIfExists(path)
   }
+  test("optional checkpoint context binds the training run without changing default checkpoints") {
+    val path=Files.createTempFile("backend-adam-context-",".stb")
+    try Using.resource(BackendLlamaTraining.prepareAdamW(model(17),CpuFloatBackend,config)) { prepared =>
+      run(prepared,1)
+      prepared.saveCheckpoint(path,1,context="corpus=abc;batch=2;sequence=8")
+      val before=weights(prepared)
+      // Model state remains loadable without the original corpus; training callers can demand a match.
+      assertEquals(prepared.loadCheckpoint(path),1L)
+      intercept[IllegalArgumentException](prepared.loadCheckpoint(path,context=Some("")))
+      intercept[IllegalArgumentException](prepared.loadCheckpoint(path,context=Some("corpus=xyz;batch=2;sequence=8")))
+      assertEquals(weights(prepared),before)
+      assertEquals(prepared.loadCheckpoint(path,context=Some("corpus=abc;batch=2;sequence=8")),1L)
+    } finally Files.deleteIfExists(path)
+  }
+  test("legacy version-one checkpoints load and version-two metadata corruption rejects") {
+    val path=Files.createTempFile("backend-adam-versions-",".stb")
+    try Using.resource(BackendLlamaTraining.prepareAdamW(model(17),CpuFloatBackend,config)) { prepared =>
+      run(prepared,1);prepared.saveCheckpoint(path,1)
+      val v2=Files.readAllBytes(path)
+      assertEquals(new String(v2.take(8),java.nio.charset.StandardCharsets.UTF_8),"STBADM02")
+      val legacy="STBADM01".getBytes(java.nio.charset.StandardCharsets.UTF_8)++v2.slice(8,40)++v2.drop(44)
+      Files.write(path,legacy)
+      assertEquals(prepared.loadCheckpoint(path),1L)
+      prepared.saveCheckpoint(path,1,context="corpus=abc")
+      val contextual=Files.readAllBytes(path)
+      val changed=contextual.clone();changed(44)='x'.toByte
+      Files.write(path,changed)
+      intercept[IllegalArgumentException](prepared.loadCheckpoint(path))
+      val oversized=contextual.clone()
+      java.nio.ByteBuffer.wrap(oversized).putInt(40,16385)
+      Files.write(path,oversized)
+      intercept[IllegalArgumentException](prepared.loadCheckpoint(path))
+    } finally Files.deleteIfExists(path)
+  }
