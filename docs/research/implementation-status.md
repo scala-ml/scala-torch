@@ -4,7 +4,7 @@ Updated 2026-11-02. The design was approved by the user. Subsequent explicit req
 
 ## Verified checkpoint
 
-Full verification: **18 passed, 0 failed, 0 skipped** (core 10, CPU 5, FFM 3), with the CUDA test explicitly enabled. Run the three test commands from README; enable CUDA with the documented `Test / envVars` command. Scala's runtime dependencies still emit an `Unsafe::objectFieldOffset` deprecation warning on Java 25; tests pass, but warning-free runtime compatibility is not claimed.
+Full verification: **20 passed, 0 failed, 0 skipped** (core 10, CPU 5, FFM 5), with CUDA tests explicitly enabled. Run the three test commands from README; enable CUDA with the documented `Test / envVars` command. Scala's runtime dependencies still emit an `Unsafe::objectFieldOffset` deprecation warning on Java 25; tests pass, but warning-free runtime compatibility is not claimed.
 
 - Java 25.0.1, Scala 3.3.8, sbt 2.0.10 compile the core, CPU, and FFM modules.
 - Storage tests cover defensive copies, scalar and empty shapes, negative dimensions, checked Long size overflow, and primitive Float32/Float64/Int64/Bool preservation.
@@ -12,7 +12,7 @@ Full verification: **18 passed, 0 failed, 0 skipped** (core 10, CPU 5, FFM 3), w
 - Read-only review identified unused stride overflow for enormous empty dimensions. A regression test reproduced it; empty layouts now use safe zero strides and the full suite passes. No other review findings remain for this checkpoint.
 - CPU tests cover broadcast add, reductions (including empty inputs), rank-2 GEMM against known results, numscala GEMM on transpose/slice inputs, NaN propagation, and oversized empty reduction rejection.
 - Native host scope tests cover memory lifetime, idempotent close, and exception cleanup.
-- Real CUDA copy test passed on the GTX 1650 SUPER using `libcuda.so.1` and Java FFM: allocate, host-to-device copy, device-to-host copy, and release. No Python, JNI shim, or CUDA Toolkit is needed for this particular driver-only probe. This does **not** prove GPU GEMM or a CUDA Tensor backend.
+- Real CUDA copy and GEMM tests passed on the GTX 1650 SUPER using `libcuda.so.1` and Java FFM. GEMM loads bundled PTX, launches on an owned stream, records and waits for an event, copies results, and releases resources after draining work. No Python, JNI shim, or CUDA Toolkit is needed for these driver-only probes. This does **not** prove a production CUDA Tensor backend or cuBLAS performance. See [native backend evidence](native-backends.md).
 
 Each feature suite was first run before its API existed and failed compilation, then passed after implementation. The oversized-empty reduction regression specifically failed with NegativeArraySizeException before the guard was added.
 
@@ -26,6 +26,6 @@ Each feature suite was first run before its API existed and failed compilation, 
 
 ## Remaining gates
 
-M0: full source audit and feature ledger. M1: allocation/performance measurements, broader numerical fixtures, and all planned native probes. M2–M6: autograd, modules/optimizers, safetensors/tokenizers, LLM inference and tuning, CUDA GEMM/streams/events, diffusion models, and complete NUI replacement. Native BLAS/cuBLAS were not found in the inspected library locations; driver access alone is insufficient for those gates.
+M0: full source audit and feature ledger. M1: allocation/performance measurements, broader numerical fixtures, CPU BLAS probe and complete native failure-path verification. M2–M6: autograd, modules/optimizers, safetensors/tokenizers, LLM inference and tuning, persistent CUDA backend/cuBLAS, diffusion models, and complete NUI replacement. Native BLAS/cuBLAS were not found in the inspected library locations; the simple PTX probe does not substitute for the production performance backend.
 
 The full project goal remains active and unachieved.

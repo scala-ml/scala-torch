@@ -14,7 +14,7 @@
 
 ## Current progress
 
-See [verification evidence](../../research/implementation-status.md). Task 1 is partial (full source/feature audit remains). Tasks 2 and 3 are implemented and tested. Task 4 is partial (reference operations and numscala GEMM verified; benchmarks remain). Task 5 is partial (host lifetime and actual GPU copy verified; native GEMM and async ownership remain). This is not M0/M1 or overall project completion.
+See [verification evidence](../../research/implementation-status.md). Task 1 is partial (full source/feature audit remains). Tasks 2 and 3 are implemented and tested. Task 4 is partial (reference operations and numscala GEMM verified; benchmarks remain). Task 5 is partial (host lifetime, actual GPU copy, and PTX GEMM with stream/event completion verified; CPU BLAS and exhaustive failure cleanup remain). This is not M0/M1 or overall project completion.
 
 ## Global Constraints
 

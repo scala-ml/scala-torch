@@ -4,9 +4,9 @@ Deep learning in Scala 3, targeting Java 25 and Python-free LLMs, training, and 
 
 Requires **Java 25, Scala 3.3.8 LTS, sbt 2.0.10**. Versions are pinned in the build.
 
-Implemented: CPU tensors (Float32/Float64/Int64/Bool), checked shapes and views, slicing, broadcasting, Float32 add/reduction/matrix multiplication, and a numscala GEMM adapter. The FFM module includes host memory scopes and a real CUDA driver memory-copy probe.
+Implemented: CPU tensors (Float32/Float64/Int64/Bool), checked shapes and views, slicing, broadcasting, Float32 add/reduction/matrix multiplication, and a numscala GEMM adapter. The FFM module includes host memory scopes, a real CUDA memory-copy probe, and a driver-level Float32 GEMM probe with owned stream/event completion.
 
-Not implemented yet: autograd, GPU tensor operations/GEMM, model loading, LLM generation, or diffusion/NUI migration.
+Not implemented yet: autograd, a persistent GPU Tensor backend, cuBLAS acceleration, model loading, LLM generation, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
 
 ```sh
 sbt 'core / Test / testOnly scalatorch.*'
