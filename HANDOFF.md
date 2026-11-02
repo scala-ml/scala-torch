@@ -1,3 +1,28 @@
+## Model Keyword planner primitives (2026-11-03)
+
+Added ModelKeyword pure prompt planner with joined/explicit/random/iterative
+selection, all 4 placements, ordering, optional embedding and LoRA tag rendering,
+preview-first random consumption, and immutable BigInt iteration counters. Caller
+receives nextState and must commit only when its transaction succeeds. This is
+selection/rendering, NOT actual LoRA/embedding loading or worker hook integration.
+KeywordRandom implements integer-seeded CPython choice behavior (MT19937); it is
+NOT Torch latent noise. Upstream MT copyright/license bundled in model resources.
+
+Eight Scala tests passed: includes 144 static cases generated from existing NUI
+plan_with_preview and IterationState.reserve, signed seed limits, and SHA256 of
+2,000 bounded random draws crossing MT refresh boundaries. Python used only to
+produce committed fixtures; test execution has no Python dependency. Regenerator
+and provenance in models/src/test/resources/model-keyword/. Cases revealed/fixed
+weight string formatting (1e-05, 0.0001, -0.0). No broad floating-format claim beyond
+verified values; Java/Python shortest-double representations can differ at extremes.
+
+NEXT: mapping CSV reading/lookup with filename similarity and custom precedence,
+checkpoint identity for Diffusers directories (existing Python legacy_hash opens a
+file, cannot hash directories); then native worker model_keyword hook and mapping
+commands. Current worker still rejects the hook, so no new desktop success claim.
+Actual LoRA and textual inversion remain future dependencies, not silently ignored.
+No NUI files modified; dedicated branch stays clean. Current scala-torch sbt server
+active without tiny-model props (planner tests do not need models).
 ## Generation metadata and desktop hook boundary (2026-11-03)
 
 Confirmed prior commit 250fc2f. New NativeGenerationMetadata accepts the NUI string
