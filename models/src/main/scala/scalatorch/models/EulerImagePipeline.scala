@@ -6,6 +6,8 @@ import java.util.concurrent.CancellationException
 
 final case class DiffusionImageRequest(prompt: String,negativePrompt: String,width: Int,height: Int,seed: Long,
     guidanceScale: Float=7.5f,truncatePrompt: Boolean=false,clipSkip: Int=1)
+/** Single NCHW image in [-1,1]; optional standard-normal posterior noise for replay. */
+final case class DiffusionImageSource(image: Tensor[Float],strength: Double,posteriorNoise: Option[Tensor[Float]]=None)
 final case class DiffusionImageProgress(completedSteps: Int,totalSteps: Int,timestep: Float,latents: Tensor[Float])
 
 /** Single-image Euler/DPM++ sampling with explicit U-Net and VAE placement. */
@@ -25,19 +27,19 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
   def generate(request: DiffusionImageRequest,schedule: EulerSchedule,
       noise: Option[Tensor[Float]]=None,onProgress: DiffusionImageProgress => Unit=_ => (),
       cancelled: () => Boolean=() => false,
-      prediction: DiffusionPrediction=DiffusionPrediction.Epsilon): Tensor[Float] =
-    generateImpl(request,schedule,noise,onProgress,cancelled,prediction,false)
+      prediction: DiffusionPrediction=DiffusionPrediction.Epsilon,source: Option[DiffusionImageSource]=None): Tensor[Float] =
+    generateImpl(request,schedule,noise,onProgress,cancelled,prediction,false,source)
 
   /** VP DPM++ 2M: unit initial noise and no Euler model-input scaling. History is local to each call. */
   def generateDpm(request: DiffusionImageRequest,schedule: DpmSchedule,
       noise: Option[Tensor[Float]]=None,onProgress: DiffusionImageProgress => Unit=_ => (),
       cancelled: () => Boolean=() => false,
-      prediction: DiffusionPrediction=DiffusionPrediction.Epsilon): Tensor[Float] =
-    generateImpl(request,schedule.layout,noise,onProgress,cancelled,prediction,true)
+      prediction: DiffusionPrediction=DiffusionPrediction.Epsilon,source: Option[DiffusionImageSource]=None): Tensor[Float] =
+    generateImpl(request,schedule.layout,noise,onProgress,cancelled,prediction,true,source)
 
-  private def generateImpl(request: DiffusionImageRequest,schedule: EulerSchedule,
+  private def generateImpl(request: DiffusionImageRequest,fullSchedule: EulerSchedule,
       noise: Option[Tensor[Float]],onProgress: DiffusionImageProgress => Unit,
-      cancelled: () => Boolean,prediction: DiffusionPrediction,dpm: Boolean): Tensor[Float] = Autograd.noGrad {
+      cancelled: () => Boolean,prediction: DiffusionPrediction,dpm: Boolean,source: Option[DiffusionImageSource]): Tensor[Float] = Autograd.noGrad {
     def checkCancelled(): Unit =
       if cancelled() || Thread.currentThread().isInterrupted then throw new CancellationException("image generation cancelled")
     checkCancelled()
@@ -53,6 +55,28 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
       require(value.shape==latentShape && value.device==Device.Cpu && value.dtype==DType.Float32,"initial noise shape/device mismatch")
       require(value.toFloatArray.forall(_.isFinite),"initial noise has nonfinite values")
     }
+    val schedule=source.fold(fullSchedule) { value =>
+      require(value.strength.isFinite && value.strength>=0 && value.strength<=1,"image strength must be in 0..1")
+      require(value.image.shape==Shape.from(Seq(1L,vae.config.inChannels.toLong,request.height.toLong,request.width.toLong)),
+        "source image shape mismatch")
+      require(value.image.toFloatArray.forall(x => x.isFinite && x>= -1f && x<=1f),"source image must be finite and in [-1,1]")
+      value.posteriorNoise.foreach { n =>
+        require(n.shape==latentShape && n.toFloatArray.forall(_.isFinite),"posterior noise shape/value mismatch")
+      }
+      val steps=math.max(1,(fullSchedule.timesteps.size*value.strength).toInt)
+      val start=fullSchedule.timesteps.size-steps
+      EulerSchedule(fullSchedule.timesteps.drop(start),fullSchedule.sigmas.drop(start),fullSchedule.initialNoiseSigma)
+    }
+    val random=new java.util.Random(request.seed)
+    def randomNoise(): Tensor[Float]=Tensor.fromFloats(Array.fill(latentShape.numel.toInt)(random.nextGaussian().toFloat),latentShape)
+    val clean=source.map { value =>
+      checkCancelled()
+      val posterior=vae.encode(Variable(value.image,requiresGrad=false))
+      checkCancelled()
+      val latent=vae.toDiffusionLatents(posterior.sample(value.posteriorNoise.getOrElse(randomNoise())))
+      require(latent.data.toFloatArray.forall(_.isFinite),"VAE encoder produced nonfinite latents")
+      latent
+    }
     def encode(text: String): Variable =
       checkCancelled()
       val ids=tokenizer.batch(Vector(text),truncate=request.truncatePrompt).ids
@@ -61,11 +85,12 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
     val conditional=encode(request.prompt)
     val unconditional=if request.guidanceScale>1 then Some(encode(request.negativePrompt)) else None
     checkCancelled()
-    val initial=noise.getOrElse {
-      val random=new java.util.Random(request.seed)
-      Tensor.fromFloats(Array.fill(latentShape.numel.toInt)(random.nextGaussian().toFloat),latentShape)
+    val initial=noise.getOrElse(randomNoise())
+    var latent=clean.fold(Variable(initial,requiresGrad=false)*schedule.initialNoiseSigma.toFloat) { encoded =>
+      val sigma=schedule.sigmas.head
+      val alpha=if dpm then 1/math.hypot(1,sigma) else 1.0
+      encoded*alpha.toFloat+Variable(initial,requiresGrad=false)*(sigma*alpha).toFloat
     }
-    var latent=Variable(initial,requiresGrad=false)*schedule.initialNoiseSigma.toFloat
     val scheduler=EulerScheduler(schedule,prediction,maxElements=maxLatentElements)
     val dpmSolver=if dpm then Some(DpmPlusPlus2M(schedule.sigmas,prediction,maxLatentElements)) else None
     var history: Option[Variable]=None

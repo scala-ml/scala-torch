@@ -1,3 +1,29 @@
+## Img2img pipeline foundation (2026-11-03)
+
+EulerImagePipeline generate/generateDpm now accept optional DiffusionImageSource
+(NCHW image in[-1,1],strength,optional posterior noise). CPU VAE encode/sample
+then diffusion scaling initializes the active schedule suffix. NUI semantics from
+img2img_steps: max(1,floor(steps*strength)), including strength0 minimum1step.
+Euler initialization clean+sigma*noise; VP DPM alpha*clean+sigmaVP*noise, local
+solver history. Seeded JVM random draws posterior then diffusion; no Torch RNG
+parity claim. Explicit noises allow replay. CUDA U-Net/VAE decode paths work.
+See docs/research/native-img2img.md for inspected local behavior references.
+
+Tests: missing API compile failure first; final ImageToImageSuite,
+DiffusionImageSuite,CudaImagePipelineSuite passed9 (no skips). New test compares
+Euler/DPM output exactly against explicit encode/noise/suffix-step/decode reference;
+CUDA offload output agrees within2e-5. Covers minimum1step, bad strength/shape,
+seed replay,cancellation. Existing txt2img and exact decoder recovery tests pass.
+This is not NUI img2img support yet: worker routing,image file preprocessing,
+metadata/replay,CUDA encoder and real-model acceptance remain. Next connect the
+worker using NUI's full image parameter/resize contract, without hiding missing
+modes; preserve inpainting as remaining work.
+
+Old standard512px/20step run still active in session11471 (actual Java33796).
+Step5/20 last received. Output .superpowers/sd15-512-20/protocol.jsonl; no final
+image yet. Keep polling that handle; no restart due to elapsed observation time.
+Short regression GPU runs contend with it, so timing isn't uncontended baseline.
+NUI unchanged; original goal remains active.
 ## Parallel query/key score generation (2026-11-03)
 
 Noncausal CUDA attention now has three stages: parallel per(query,key) ordered
