@@ -1,3 +1,32 @@
+## First standard SD1.5 native load and small-image smoke (2026-11-03)
+
+Provisioned original FP32 Diffusers SD1.5 from public mirror, pinned revision
+451f4fe16113bff5a5d2269ed5ad43b0592e9a14. Three safetensor files total~4.27GB;
+all upstream SHA256 values verified. Details/hashes in
+[SD1.5 acceptance work](docs/research/sd15-native-acceptance.md). Local ignored
+model .superpowers/models/sd15, source-metadata.json contains upstream manifest.
+Machine has64GiB host RAM/~42GiB available at start and ample disk space.
+
+Discovered legacy CLIP position_ids buffer in real weights. PretrainedClip now
+validates I64,shape(1,maxPositions),canonical0..N-1 and marks it consumed without
+adding a parameter. Single/sharded fixtures plus bad shape/value tests: red before
+fix,8 PretrainedClipSuite tests passed after fix, independent Candle parity intact.
+
+Ran .superpowers/run-sd15.ps1 with64px,2steps through Java-Xmx12g, both CUDA
+weight-offload settings,1GiB allocation budgets,134217728 attention work limit.
+No Python runtime. load_model succeeded;DPM++2M Karras generation and PNG saved
+in77.9136696s. Inspected image is coarse colored blobs, not quality acceptance.
+Protocol/stderr and PNG under .superpowers/sd15-64-2; worker exited normally.
+The checkpoint originally uses PNDM; harness uses explicit compatible beta noise
+settings for implemented DPM sampling, not silently passing PNDM config through.
+
+Next: optimize expensive host logicalArray copies seen in jcmd during weight
+upload (Layout.index for every contiguous element), verify storage/stride
+semantics, then512px standard-model generation with adequate steps and image
+inspection. No standard-resolution/performance acceptance yet; full NUI feature
+parity/SDXL/checkpoint formats/packaging remain open. NUI unchanged this turn.
+scala-torch sbt retains tiny fixture properties/CUDA test flag; no inference or
+download process intentionally left running. Only explicit scripts use full SD1.5.
 ## Attention work limit for larger spatial inputs (2026-11-03)
 
 PretrainedUNet.load appends maxScoreElements=16777216 and propagates it to every

@@ -17,6 +17,13 @@ object PretrainedClip:
       val total=archive.tensors.values.foldLeft(BigInt(0))((n,t) => n+t.shape.numel)
       require(total<=maxParameters,"CLIP weights exceed parameter budget")
       val used=mutable.Set.empty[String]
+      val positionIds="text_model.embeddings.position_ids"
+      archive.tensors.get(positionIds).foreach { info =>
+        require(info.shape==Shape.from(Seq(1L,c.maxPositions.toLong)),"CLIP position_ids shape mismatch")
+        val ids=archive.readLong(positionIds).toLongArray
+        require(ids.indices.forall(i => ids(i)==i.toLong),"CLIP position_ids must be canonical consecutive positions")
+        used+=positionIds
+      }
       def parameter(name: String,dims: Int*): Parameter =
         val info=archive.tensors.getOrElse(name,throw IllegalArgumentException(s"missing CLIP weight: $name"))
         require(info.shape==Shape.from(dims.map(_.toLong)),s"CLIP weight shape mismatch: $name")

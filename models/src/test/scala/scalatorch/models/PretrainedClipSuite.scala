@@ -107,7 +107,7 @@ class PretrainedClipSuite extends munit.FunSuite:
     val parts=line.split("\t")
     parts(0)->parts(1).split(",").map(_.toInt).toVector
   }.toVector
-  private def fixture(entries: Vector[(String,Vector[Int])]=shapes,dtype: String="F32",sharded: Boolean=false)(f: Path => Unit): Unit =
+  private def fixture(entries: Vector[(String,Vector[Int])]=shapes,dtype: String="F32",sharded: Boolean=false,positionOffset: Long=0)(f: Path => Unit): Unit =
     val dir=Files.createTempDirectory("scala-torch-clip")
     try
       Files.write(dir.resolve("config.json"),resource("config.json"))
@@ -115,14 +115,16 @@ class PretrainedClipSuite extends munit.FunSuite:
         val elementBytes=if dtype=="BOOL" then 1 else if dtype=="F32" then 4 else 2
         var offset=0
         val header=subset.map { (key,dims) =>
-          val begin=offset;offset+=dims.product*elementBytes
-          s"\"$key\":{\"dtype\":\"$dtype\",\"shape\":[${dims.mkString(",")}],\"data_offsets\":[$begin,$offset]}"
+          val kind=if key=="text_model.embeddings.position_ids" then "I64" else dtype
+          val begin=offset;offset+=dims.product*(if kind=="I64" then 8 else elementBytes)
+          s"\"$key\":{\"dtype\":\"$kind\",\"shape\":[${dims.mkString(",")}],\"data_offsets\":[$begin,$offset]}"
         }.mkString("{",",","}").getBytes(UTF_8)
         val data=ByteBuffer.allocate(offset).order(ByteOrder.LITTLE_ENDIAN)
         subset.foreach { (key,dims) =>
           for i <- 0 until dims.product do
             val v=if key=="text_model.final_layer_norm.bias" then 1f else 0f
-            dtype match
+            (if key=="text_model.embeddings.position_ids" then "I64" else dtype) match
+              case "I64" => data.putLong(i.toLong+positionOffset)
               case "F32" => data.putFloat(v)
               case "F16" => data.putShort(java.lang.Float.floatToFloat16(v))
               case "BF16" => data.putShort((java.lang.Float.floatToRawIntBits(v) >>> 16).toShort)
@@ -172,5 +174,21 @@ class PretrainedClipSuite extends munit.FunSuite:
     fixture() { dir =>
       intercept[IllegalArgumentException](PretrainedClip.load(dir,maxParameters=1))
       intercept[IllegalArgumentException](PretrainedClip.load(dir,maxScoreElements= -1))
+    }
+  }
+  test("legacy CLIP position_ids buffers must match implicit canonical positions") {
+    val key="text_model.embeddings.position_ids"
+    for sharded <- Seq(false,true) do
+      fixture(shapes :+ (key->Vector(1,77)),sharded=sharded) { dir =>
+        val model=PretrainedClip.load(dir)
+        assertEquals(Module.parameters(model).size,84)
+        val ids=Tensor.fromLongs(Array(1L,2L),Shape.from(Seq(1L,2L)))
+        assert(model(ids).data.toFloatArray.forall(_==1f))
+      }
+    fixture(shapes :+ (key->Vector(1,77)),positionOffset=1) { dir =>
+      intercept[IllegalArgumentException](PretrainedClip.load(dir))
+    }
+    fixture(shapes :+ (key->Vector(77))) { dir =>
+      intercept[IllegalArgumentException](PretrainedClip.load(dir))
     }
   }
