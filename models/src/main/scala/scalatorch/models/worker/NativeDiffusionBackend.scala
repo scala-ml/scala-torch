@@ -118,14 +118,14 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         val g=p.get("params") match
           case Some(Obj(fields)) => fields
           case _ => throw IllegalArgumentException("params must be an object")
-        keys(NativeGenerationDefaults.strip(g,NativeGenerationDefaults.generation),Set("prompt","negative_prompt","width","height","steps","seed","cfg_scale","sampler_name","scheduler"))
+        keys(NativeGenerationDefaults.strip(g,NativeGenerationDefaults.generation),Set("prompt","negative_prompt","width","height","steps","seed","cfg_scale","sampler_name","scheduler","clip_skip"))
         val seedNumber=number(g,"seed",42)
         require(seedNumber.isValidLong,"seed must be a signed 64-bit integer")
         val seed=if seedNumber.toLong == -1 then new java.security.SecureRandom().nextLong() & Long.MaxValue else seedNumber.toLong
         val steps=integer(g,"steps",20)
         require(steps>0 && steps<=1000,"steps must be between 1 and 1000")
         val imageRequest=DiffusionImageRequest(str(g,"prompt",""),str(g,"negative_prompt",""),
-          integer(g,"width",512),integer(g,"height",512),seed,number(g,"cfg_scale",7).toFloat)
+          integer(g,"width",512),integer(g,"height",512),seed,number(g,"cfg_scale",7).toFloat,clipSkip=integer(g,"clip_skip",1))
         val sampler=str(g,"sampler_name","DPM++ 2M")
         val requestedSchedule=str(g,"scheduler","Automatic")
         val schedule=if requestedSchedule=="Automatic" then (if sampler=="DPM++ 2M" then "Karras" else "Uniform") else requestedSchedule

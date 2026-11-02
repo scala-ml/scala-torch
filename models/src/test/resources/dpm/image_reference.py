@@ -12,7 +12,8 @@ assert diffusers.__version__ == "0.33.1"
 assert transformers.__version__ == "4.49.0"
 assert torch.__version__.split("+")[0] == "2.7.1"
 torch.set_num_threads(1)
-root, output = map(Path, sys.argv[1:])
+root, output = map(Path, sys.argv[1:3])
+clip_skip = int(sys.argv[3]) if len(sys.argv) > 3 else 1
 tokenizer = CLIPTokenizerFast(vocab_file=str(root / "tokenizer/vocab.json"),
                             merges_file=str(root / "tokenizer/merges.txt"), model_max_length=77)
 clip = CLIPTextModel.from_pretrained(root / "text_encoder", local_files_only=True,
@@ -27,7 +28,9 @@ scheduler = DPMSolverMultistepScheduler(num_train_timesteps=1000, beta_start=0.0
 scheduler.set_timesteps(3)
 with torch.no_grad():
     ids = tokenizer(["a red cat", "a blue boat"], padding="max_length", return_tensors="pt").input_ids
-    positive, negative = clip(ids).last_hidden_state.split(1)
+    encoded = clip(ids, output_hidden_states=True)
+    conditioning = encoded.last_hidden_state if clip_skip == 1 else clip.text_model.final_layer_norm(encoded.hidden_states[-clip_skip])
+    positive, negative = conditioning.split(1)
     latent = torch.tensor([(i % 7 - 3) * 0.125 for i in range(60)]).reshape(1, 4, 3, 5)
     for t in scheduler.timesteps:
         pos = unet(latent, t, encoder_hidden_states=positive).sample

@@ -36,7 +36,7 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       assertEquals(events.toVector,Vector("progress","progress"))
       val uniform=run("txt2img",Map("output_dir"->Str(output.toString),"params"->Obj(Map(
         "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(2),
-        "seed"->Number(42),"sampler_name"->Str("DPM++ 2M"),"scheduler"->Str("Uniform")))))
+        "seed"->Number(42),"clip_skip"->Number(2),"sampler_name"->Str("DPM++ 2M"),"scheduler"->Str("Uniform")))))
       assertEquals(uniform("scheduler"),Str("Uniform"))
       val uniformPath=Path.of(uniform("images").asInstanceOf[Arr].values.head.asInstanceOf[Obj].fields("path").asInstanceOf[Str].value)
       assertEquals(javax.imageio.ImageIO.read(uniformPath.toFile).getWidth,10)

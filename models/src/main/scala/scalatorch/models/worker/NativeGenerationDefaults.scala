@@ -8,7 +8,7 @@ private[worker] object NativeGenerationDefaults:
     "denoising_strength"->Number(BigDecimal("0.55")),"sampler_name"->Null,"scheduler"->Null,
     "prompt"->Str(""),"negative_prompt"->Str(""),"cfg_scale"->Null))
   val generation: Map[String,NativeJson]=Map("subseed"->Number(-1),"subseed_strength"->Number(0),
-    "batch_size"->Number(1),"n_iter"->Number(1),"clip_skip"->Number(1),"eta"->Null,"hires"->hires,
+    "batch_size"->Number(1),"n_iter"->Number(1),"eta"->Null,"hires"->hires,
     "img2img"->Null,"loras"->Arr(Vector.empty),"controlnet"->Arr(Vector.empty),"hooks"->Obj(Map.empty),
     "styles"->Arr(Vector.empty),"checkpoint"->Null,"vae"->Null,"extra"->Obj(Map.empty))
   val envelope: Map[String,NativeJson]=Map("lora_paths"->Obj(Map.empty),"embedding_paths"->Arr(Vector.empty),

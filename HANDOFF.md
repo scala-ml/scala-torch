@@ -1,3 +1,20 @@
+## Native CLIP skip integration (2026-11-03)
+
+DiffusionImageRequest adds clipSkip=1; pipeline validates against encoder depth and
+uses skipLastLayers=clipSkip-1 for positive and negative conditioning. Existing
+ClipTextModel already applies final LayerNorm to earlier-layer outputs, matching
+NUI SD1.x hidden_states[-clip_skip]. Native worker now parses clip_skip rather than
+rejecting non-default values. SD2/SDXL layer-selection semantics remain unimplemented.
+
+Added pinned full-image clip-skip2 reference (optional argument to offline image
+reference generator). Maximum error 2.6375055e-6 against Diffusers/Transformers.
+16 tests passed (VAE, generation, inactive options, backend); then backend test
+passed with clip_skip=2 via the native request map and Uniform DPM generation.
+Bounds tests reject zero/excess skip. Existing default full-image reference still
+matches at 3.7252903e-6. NUI cross-process test not rerun in this turn.
+Current scala-torch sbt server has all three tiny model directory properties enabled.
+Full migration remains incomplete; native UI launch, normal models/GPU, SDXL,
+batching, LoRA/img2img/Hires/extensions and packaging are still outstanding.
 ## DPM++ Uniform support (2026-11-03)
 
 DpmSchedule.uniform implements Diffusers DPM linspace: steps+1 evenly spaced

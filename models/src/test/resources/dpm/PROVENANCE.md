@@ -2,6 +2,12 @@
 
 ## Full tiny-image reference
 
+`image-clip-skip2-f32.bin` repeats the image case below with NUI SD1.x CLIP skip 2:
+select `hidden_states[-2]` and apply the final CLIP LayerNorm for both prompts.
+Generate with `python image_reference.py <root> image-clip-skip2-f32.bin 2`.
+SHA256: `7bcc17a2d2a1321816f913ad65a564e5fd0dae4e5dbf59522e299d40085e75ee`.
+Scala maximum absolute error was `2.6375055e-6` (threshold `1e-4`).
+
 `image_reference.py` adds transformers 4.49.0 to the environment below and loads
 the local `hf-internal-testing/tiny-sd-pipe` checkpoint at revision
 `39f7e1819d772fbb8dd7f2aa3da8e2fc5a9bd917`. It uses eager CLIP/attention,

@@ -5,7 +5,7 @@ import scalatorch.autograd.{Autograd,Variable}
 import java.util.concurrent.CancellationException
 
 final case class DiffusionImageRequest(prompt: String,negativePrompt: String,width: Int,height: Int,seed: Long,
-    guidanceScale: Float=7.5f,truncatePrompt: Boolean=false)
+    guidanceScale: Float=7.5f,truncatePrompt: Boolean=false,clipSkip: Int=1)
 final case class DiffusionImageProgress(completedSteps: Int,totalSteps: Int,timestep: Float,latents: Tensor[Float])
 
 /** Single-image CPU inference composition with explicit Euler or DPM++ schedules. */
@@ -40,6 +40,7 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
     def checkCancelled(): Unit =
       if cancelled() || Thread.currentThread().isInterrupted then throw new CancellationException("image generation cancelled")
     checkCancelled()
+    require(request.clipSkip>=1 && request.clipSkip<=textEncoder.layers.size+1,"CLIP skip exceeds text encoder layer count")
     require(request.guidanceScale.isFinite && request.guidanceScale>=0,"invalid image guidance scale")
     require(request.width>0 && request.height>0 && request.width%factor==0 && request.height%factor==0,
       "image dimensions must be positive multiples of the VAE scale")
@@ -55,7 +56,7 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
       checkCancelled()
       val ids=tokenizer.batch(Vector(text),truncate=request.truncatePrompt).ids
       checkCancelled()
-      textEncoder(ids)
+      textEncoder(ids,skipLastLayers=request.clipSkip-1)
     val conditional=encode(request.prompt)
     val unconditional=if request.guidanceScale>1 then Some(encode(request.negativePrompt)) else None
     checkCancelled()
