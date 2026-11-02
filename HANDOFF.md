@@ -1,3 +1,27 @@
+## Per-operation CUDA weight offload (2026-11-03)
+
+CudaUNet.upload and CudaVaeDecoder.upload accept offloadWeights=false by default.
+True retains immutable host Tensor snapshots and uploads only weights needed by
+each operation, scoped with Using.Manager. Activations remain on CUDA. Linear
+projections upload a transposed host view directly, avoiding two GPU weight copies.
+Shape checks use snapshot metadata without uploading weights. Close drops host
+snapshot references; failure/cancellation releases temporary GPU weights/output.
+This trades transfer throughput for VRAM; no FP16, prefetch, pinned host memory,
+or activation offload. Parameter.load after construction cannot change snapshots.
+
+New CudaOffloadSuite exercises complete public tiny VAE/U-Net at a session budget
+of largest parameter bytes +1MiB, less than total model weight bytes. Resident VAE
+upload fails at that budget while offloaded decoding matches resident exactly.
+U-Net repeats exact outputs after a source Parameter.load mutation. VAE cancellation
+then reuse, insufficient inference memory and closed-runtime rejection check cleanup.
+
+Verification: models/testOnly *Cuda* passed22, zero failures/errors/skips on the
+real GPU after final source edits. Existing resident pipeline tests also passed.
+
+Pipeline/worker still use resident defaults: next wire this option through
+UNetExecution/VaeExecution, environment and status, and verify native NUI generation.
+Then test standard models and resolve remaining attention work limits/performance.
+Normal model acceptance and full Python-free NUI parity remain incomplete.
 ## Bounded CUDA diffusion attention workspace (2026-11-03)
 
 Noncausal scaledDotProductAttention now slices query rows and reuses Double

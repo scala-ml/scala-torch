@@ -7,7 +7,7 @@ import scala.util.Using
 
 /** Shared inference executor for a snapshot of a diffusion parameter tree. */
 private[models] final class CudaDiffusionRuntime private (session: CudaSession,
-    weights: Map[Parameter,CudaTensor],cancelled: () => Boolean) extends AutoCloseable:
+    weights: Map[Parameter,CudaTensor],private var host: Map[Parameter,Tensor[Float]],cancelled: () => Boolean) extends AutoCloseable:
   private var closed=false
   private def check(): Unit =
     if closed then throw IllegalStateException("CUDA diffusion runtime is closed")
@@ -21,15 +21,23 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       session.reshape(result,result.shape)
     }.get
 
-  def norm(x: CudaTensor,n: GroupNorm): CudaTensor =
+  private def weightShape(p: Parameter): Shape =
+    host.get(p).fold(weights(p).shape)(_.shape)
+
+  private def weight(p: Parameter,use: Using.Manager): CudaTensor =
+    check()
+    host.get(p).fold(weights(p))(t => use(session.upload(t)))
+
+  def norm(x: CudaTensor,n: GroupNorm): CudaTensor = scope { use =>
     check()
     require(session.shape(x).rank>=2 && x.shape.dims(1)==n.channels,"GroupNorm input channel mismatch")
-    session.groupNorm(x,n.groups,n.epsilon,n.weight.map(weights),n.bias.map(weights))
+    use(session.groupNorm(x,n.groups,n.epsilon,n.weight.map(p => weight(p,use)),n.bias.map(p => weight(p,use))))
+  }
 
   def conv(x: CudaTensor,c: Conv2d): CudaTensor = scope { use =>
-    val out=use(session.conv2d(x,weights(c.weight),c.config))
+    val out=use(session.conv2d(x,weight(c.weight,use),c.config))
     c.bias.fold(out) { p =>
-      val bias=use(session.reshape(weights(p),Shape.from(Seq(1L,weights(p).shape.numel,1L,1L))))
+      val bias=use(session.reshape(weight(p,use),Shape.from(Seq(1L,weightShape(p).numel,1L,1L))))
       val result=use(session.addBroadcast(out,bias))
       bias.close();out.close()
       result
@@ -37,7 +45,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
   }
 
   private def project(x: CudaTensor,p: Parameter): CudaTensor = scope { use =>
-    val transposed=use(session.transpose(weights(p),0,1))
+    val transposed=use(host.get(p).fold(session.transpose(weights(p),0,1))(t => session.upload(t.transpose(0,1))))
     val out=use(session.matmul(x,transposed))
     transposed.close()
     out
@@ -48,14 +56,14 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     val adapted=l.lora.fold(base) { a =>
       val first=use(project(x,a.a));val second=use(project(first,a.b))
       first.close()
-      val scaled=use(session.scale(second,(a.alpha/weights(a.a).shape.dims.head).toFloat))
+      val scaled=use(session.scale(second,(a.alpha/weightShape(a.a).dims.head).toFloat))
       second.close()
       val sum=use(session.add(base,scaled))
       base.close();scaled.close()
       sum
     }
     l.bias.fold(adapted) { p =>
-      val out=use(session.addBroadcast(adapted,weights(p)))
+      val out=use(session.addBroadcast(adapted,weight(p,use)))
       adapted.close()
       out
     }
@@ -67,7 +75,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     require(shape.rank==4 && shape.dims(1)==model.norm1.channels,"residual input must be NCHW with matching channels")
     require(timeEmbedding.isDefined==model.timeEmbProj.isDefined,"timestep embedding presence mismatch")
     timeEmbedding.foreach { t =>
-      require(session.shape(t)==Shape.from(Seq(shape.dims.head,weights(model.timeEmbProj.get.weight).shape.dims(1))),
+      require(session.shape(t)==Shape.from(Seq(shape.dims.head,weightShape(model.timeEmbProj.get.weight).dims(1))),
         "timestep embedding batch/width mismatch")
     }
     scope { use =>
@@ -97,9 +105,9 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     check()
     val source=context.getOrElse(input)
     val x=session.shape(input);val c=session.shape(source)
-    val inner=weights(model.toQ.weight).shape.dims.head
-    val queryWidth=weights(model.toQ.weight).shape.dims(1)
-    val contextWidth=weights(model.toK.weight).shape.dims(1)
+    val inner=weightShape(model.toQ.weight).dims.head
+    val queryWidth=weightShape(model.toQ.weight).dims(1)
+    val contextWidth=weightShape(model.toK.weight).dims(1)
     require(x.rank==3 && x.dims(2)==queryWidth,"query must have matching (batch,tokens,channels)")
     require(c.rank==3 && c.dims(0)==x.dims(0) && c.dims(2)==contextWidth,"context batch/channel mismatch")
     val batch=x.dims(0);val queries=x.dims(1);val keys=c.dims(1)
@@ -141,11 +149,12 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       out
     }
 
-  def layerNorm(input: CudaTensor,model: LayerNorm): CudaTensor =
+  def layerNorm(input: CudaTensor,model: LayerNorm): CudaTensor = scope { use =>
     check()
     val shape=session.shape(input)
     require(shape.rank>0 && shape.dims.last==model.width,"LayerNorm final width mismatch")
-    session.layerNorm(input,model.epsilon,model.weight.map(weights),model.bias.map(weights))
+    use(session.layerNorm(input,model.epsilon,model.weight.map(p => weight(p,use)),model.bias.map(p => weight(p,use))))
+  }
 
   def feedForward(input: CudaTensor,model: DiffusionFeedForward): CudaTensor =
     check()
@@ -166,7 +175,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     val shape=session.shape(input);val contextShape=session.shape(context)
     require(shape.rank==3 && shape.dims(2)==model.norm1.width,"Transformer input must be matching token features")
     require(contextShape.rank==3 && contextShape.dims(0)==shape.dims(0) &&
-      contextShape.dims(2)==weights(model.attn2.toK.weight).shape.dims(1),"Transformer context batch/width mismatch")
+      contextShape.dims(2)==weightShape(model.attn2.toK.weight).dims(1),"Transformer context batch/width mismatch")
     scope { use =>
       val norm1=use(layerNorm(input,model.norm1))
       val attn1=use(attention(norm1,model.attn1,None));norm1.close()
@@ -185,8 +194,8 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     val shape=session.shape(input);val contextShape=session.shape(context)
     require(shape.rank==4 && shape.dims(1)==model.norm.channels,"spatial Transformer requires matching NCHW input")
     require(contextShape.rank==3 && contextShape.dims(0)==shape.dims(0) &&
-      contextShape.dims(2)==weights(model.blocks.head.attn2.toK.weight).shape.dims(1),"spatial Transformer context batch/width mismatch")
-    val inner=weights(model.projIn.weight).shape.dims.head
+      contextShape.dims(2)==weightShape(model.blocks.head.attn2.toK.weight).dims(1),"spatial Transformer context batch/width mismatch")
+    val inner=weightShape(model.projIn.weight).dims.head
     val tokens=Shape.from(shape.dims.drop(2)).numel
     scope { use =>
       val normalized=use(norm(input,model.norm))
@@ -297,18 +306,21 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     if !closed then
       session.allocatedBytes
       weights.values.foreach(_.close())
+      host=Map.empty
       closed=true
 
 private[models] object CudaDiffusionRuntime:
-  def upload[A: Module](session: CudaSession,model: A,cancelled: () => Boolean=() => false): CudaDiffusionRuntime =
+  def upload[A: Module](session: CudaSession,model: A,cancelled: () => Boolean=() => false,offloadWeights: Boolean=false): CudaDiffusionRuntime =
+    session.allocatedBytes
+    val host=scala.collection.mutable.LinkedHashMap.empty[Parameter,Tensor[Float]]
     val uploaded=scala.collection.mutable.LinkedHashMap.empty[Parameter,CudaTensor]
     try
       Module.parameters(model).foreach { p =>
         VaeExecution.checkCancelled(cancelled)
-        uploaded(p)=session.upload(p.data)
+        if offloadWeights then host(p)=p.data else uploaded(p)=session.upload(p.data)
       }
       VaeExecution.checkCancelled(cancelled)
-      new CudaDiffusionRuntime(session,uploaded.toMap,cancelled)
+      new CudaDiffusionRuntime(session,uploaded.toMap,host.toMap,cancelled)
     catch case error: Throwable =>
       uploaded.values.toVector.reverse.foreach { t =>
         try t.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
