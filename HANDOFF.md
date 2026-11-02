@@ -1,3 +1,29 @@
+## Bounded CUDA diffusion attention workspace (2026-11-03)
+
+Noncausal scaledDotProductAttention now slices query rows and reuses Double
+score scratch, capped by maxWorkspaceBytes (default16MiB) and the session budget
+after reserving the output. At least one complete key row must fit. PTX indexes
+scratch by local row and inputs/output by global row, preserving arithmetic order.
+Causal/cache paths retain their existing full-workspace budget behavior.
+
+maxScoreElements remains the total-work guard (default16777216); this change does
+not remove normal-resolution work limits, reduce FLOPs, implement FlashAttention,
+or solve full FP32 model residency. No cancellation callback runs between slices.
+
+Verification after LF normalization: sbt "ffm/testOnly *; models/testOnly *Cuda*"
+passed52 FFM tests and20 CUDA model tests, zero failures/errors/skips on the real
+GPU with pinned public tiny CLIP/U-Net/VAE fixtures. New tests compare raw output
+bits across slice boundaries, batches, GQA, unequal widths and NaN/Infinity;
+check allocation cleanup and empty shapes; and run an otherwise8MiB score matrix
+with64KiB scratch under a139264-byte session budget. Existing causal/cache and
+backward tests pass. CPU versus GPU image pipeline max error remains7.45e-7.
+
+Next: real-model weight residency/offload and attention work-limit configuration,
+then normal-model acceptance and remaining NUI feature parity. The full goal is
+still open. Current scala-torch sbt server has CUDA tests enabled plus the three
+pinned model directory properties; NUI server is stopped. Older server-state
+notes below are historical. No NUI code changed in this checkpoint; its dedicated
+feat/scala-torch-native-engine branch is preserved.
 ## CUDA U-Net denoising connected to pipeline, worker and desktop (2026-11-03)
 
 UNetExecution (default Cpu) provides a predictor scoped to the entire sampling

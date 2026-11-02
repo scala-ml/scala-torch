@@ -252,29 +252,51 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     AttentionLayout.validate(query.shape,key.shape,value.shape,queryStart,maxScoreElements)
     attentionFromStorage(query,key,value,queryStart,key.shape.dims(2),key.shape.dims(2),maxScoreElements)
 
-  /** Noncausal self/cross-attention, including grouped query heads and unequal token counts. */
+  /** Noncausal attention with query slices sharing bounded Double score scratch.
+    * maxScoreElements still limits total work; maxWorkspaceBytes limits resident scratch.
+    */
   def scaledDotProductAttention(query: CudaTensor,key: CudaTensor,value: CudaTensor,
-      maxScoreElements: Long=16777216L): CudaTensor =
+      maxScoreElements: Long=16777216L,maxWorkspaceBytes: Long=16777216L): CudaTensor =
     validate(query);validate(key);validate(value)
+    require(maxWorkspaceBytes>=0,"negative attention workspace budget")
     AttentionLayout.validate(query.shape,key.shape,value.shape,0,maxScoreElements)
-    attentionFromStorage(query,key,value,0,key.shape.dims(2),key.shape.dims(2),maxScoreElements,causal=false)
+    attentionFromStorage(query,key,value,0,key.shape.dims(2),key.shape.dims(2),maxScoreElements,
+      causal=false,maxWorkspaceBytes=maxWorkspaceBytes)
 
   private def attentionFromStorage(query: CudaTensor,key: CudaTensor,value: CudaTensor,queryStart: Int,
-      tokens: Long,storageTokens: Long,maxScores: Long,causal: Boolean=true): CudaTensor =
+      tokens: Long,storageTokens: Long,maxScores: Long,causal: Boolean=true,
+      maxWorkspaceBytes: Long=Long.MaxValue): CudaTensor =
     val keyShape=Shape.from(key.shape.dims.updated(2,tokens))
     val valueShape=Shape.from(value.shape.dims.updated(2,tokens))
     val (output,scores)=AttentionLayout.validate(query.shape,keyShape,valueShape,queryStart,maxScores)
     if output.numel==0 then return allocate(output)
-    require(scores*2<=Int.MaxValue,"attention Double workspace exceeds Int indexing")
+    if causal then require(scores*2<=Int.MaxValue,"attention Double workspace exceeds Int indexing")
     val q=query.shape.dims;val k=keyShape.dims;val v=valueShape.dims
     val rows=output.numel/v(3)
-    Using.resource(allocate(Shape.from(Seq(scores*2)))) { scratch =>
-      execute(output,rows,kernels("attention")) { (arena,result) =>
-        Seq(query.address,key.address,value.address,result.address,scratch.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
-          Seq(rows,q(1),k(1),q(2),k(2),q(3),v(3),queryStart.toLong,storageTokens).map(x => arena.allocateFrom(JAVA_INT,x.toInt)) :+
-          arena.allocateFrom(JAVA_DOUBLE,1.0/math.sqrt(q(3).toDouble)) :+
-          arena.allocateFrom(JAVA_INT,if causal then 1 else 0)
-      }
+    val sliceRows=if causal then rows else
+      val available=maxBytes-used-output.numel*4
+      val budget=math.min(maxWorkspaceBytes,available)
+      require(budget>=k(2)*8,"attention workspace cannot hold one query row and output")
+      math.min(rows,math.min(budget/(k(2)*8),Int.MaxValue.toLong/(k(2)*2)))
+    require(sliceRows>0,"attention workspace exceeds Int indexing")
+    Using.resource(allocate(Shape.from(Seq(sliceRows*k(2)*2)))) { scratch =>
+      val result=allocate(output)
+      try
+        var rowOffset=0L
+        while rowOffset<rows do
+          val count=math.min(sliceRows,rows-rowOffset)
+          launch(count,kernels("attention")) { arena =>
+            Seq(query.address,key.address,value.address,result.address,scratch.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
+              Seq(count,q(1),k(1),q(2),k(2),q(3),v(3),queryStart.toLong,storageTokens).map(x => arena.allocateFrom(JAVA_INT,x.toInt)) :+
+              arena.allocateFrom(JAVA_DOUBLE,1.0/math.sqrt(q(3).toDouble)) :+
+              arena.allocateFrom(JAVA_INT,if causal then 1 else 0) :+
+              arena.allocateFrom(JAVA_INT,rowOffset.toInt)
+          }
+          rowOffset+=count
+        result
+      catch case error: Throwable =>
+        try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+        throw error
     }
 
   def causalAttentionBackward(query: CudaTensor,key: CudaTensor,value: CudaTensor,gradient: CudaTensor,
