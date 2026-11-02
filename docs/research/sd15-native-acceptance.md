@@ -153,3 +153,18 @@ One observed comparison was278.9792ms serial versus32.5511ms parallel, but the
 original512px image job was concurrently using the GPU. Treat these as diagnostic
 samples, not an isolated benchmark or full-pipeline speed claim. The image job
 reached step3/20; it remains on the old loaded CudaSession/attention path.
+## Completed512px img2img (2026-11-03)
+
+Native Java/CUDA worker session62925 completed with exit0 and empty stderr.
+20 scheduled DPM++2M/Karras steps,10 active steps,strength0.5,seed42,CFG7.5.
+Input: successful native redapple512px output recorded below. Prompt:
+`a photograph of a green apple on a wooden table`. Timing669.8015785s.
+Output `.superpowers/sd15-img2img-512-20/native-f36f021a-36d1-47d0-b63a-46d939eed3a5.png`.
+SHA256 `d98545a527ad2a83798edc93871727b275f3b9ba7860d5456a455f499aa28fed`.
+Visually inspected512x512: coherent wooden planks and recognizable red apple.
+The requested green color was not achieved; do not treat this as color-edit
+fidelity acceptance. Real image-input/VAE encoder/U-Net/decoder/output path
+completed without Python. Runtime14 jars were copied and hashed before launch.
+No active acceptance worker remains. Historical active-process notes below are
+superseded by terminal results, not instructions to restart old runs.
+

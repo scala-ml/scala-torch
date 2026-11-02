@@ -1,3 +1,13 @@
+## Full512 SD1.5 img2img completed (2026-11-03)
+
+Session62925 now TERMINAL exit0, empty stderr, timing669.8015785s. Output
+.superpowers/sd15-img2img-512-20/native-f36f021a-36d1-47d0-b63a-46d939eed3a5.png
+SHA256d98545a527ad2a83798edc93871727b275f3b9ba7860d5456a455f499aa28fed.
+Inspected512x512 PNG: recognizable red apple on wooden table; greenapple prompt
+did NOT achieve color change at strength0.5. This proves native image path,
+not reliable prompt fidelity. No live acceptance jobs remain. Do not poll62925.
+Dual text conditioning committed b00481f; next shared sampler/worker SDXL Task3.
+
 ## SDXL dual text conditioning verified (2026-11-03)
 
 SdxlTextConditioning now executes dual CLIP, NUI attention emphasis, raw selected
