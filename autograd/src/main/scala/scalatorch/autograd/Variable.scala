@@ -98,6 +98,30 @@ final class Variable private (
       maxScoreElements: Long = 16777216L): Variable = AttentionOps.causal(this, key, value, queryStart, maxScoreElements)
   def rope(positionStart: Int = 0, theta: Double = 10000.0): Variable = AttentionOps.rope(this, positionStart, theta)
 
+  /** Elementwise exponential with CPU Float32 output and first-order gradient. */
+  def exp(): Variable =
+    val output=data.toFloatArray.map(x => math.exp(x.toDouble).toFloat)
+    Variable.result(Tensor.fromFloats(output,data.shape),Vector(this -> ((g: Tensor[Float]) =>
+      val upstream=g.toFloatArray
+      var i=0
+      while i<upstream.length do
+        upstream(i)*=output(i)
+        i+=1
+      Tensor.fromFloats(upstream,data.shape))))
+
+  /** Inclusive bounds pass gradients; values outside the interval have zero gradient. */
+  def clamp(min: Float,max: Float): Variable =
+    require(!min.isNaN && !max.isNaN && min<=max,"invalid clamp bounds")
+    val source=data.toFloatArray
+    val output=source.map(x => math.max(min,math.min(max,x)))
+    Variable.result(Tensor.fromFloats(output,data.shape),Vector(this -> ((g: Tensor[Float]) =>
+      val upstream=g.toFloatArray
+      var i=0
+      while i<upstream.length do
+        if !(source(i)>=min && source(i)<=max) then upstream(i)=0f
+        i+=1
+      Tensor.fromFloats(upstream,data.shape))))
+
   def relu(): Variable =
     val source = data.toFloatArray
     val value = Tensor.fromFloats(source.map(x => math.max(0f, x)), data.shape)

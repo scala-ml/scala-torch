@@ -216,3 +216,34 @@ class PretrainedVaeSuite extends munit.FunSuite:
       assert(intercept[IllegalArgumentException](PretrainedVae.load(dir)).getMessage.contains("unused VAE weights"))
     }
   }
+
+  test("posterior API and diffusion scaling preserve gradients and explicit raw semantics") {
+    fixture() { dir =>
+      val model=PretrainedVae.load(dir)
+      val image=Variable(Tensor.fromFloats(Array.fill(3*4*6)(.1f),Shape.from(Seq(1,3,4,6))),false)
+      val posterior=model.encode(image)
+      assertEquals(posterior.mean.data.shape,Shape.from(Seq(1,4,2,3)))
+      assertEquals(posterior.kl().data.toFloatArray.toVector,Vector(0f))
+      val latent=Variable(Tensor.fromFloats(Array.fill(24)(1f),posterior.mean.data.shape))
+      val scaled=model.toDiffusionLatents(latent)
+      assertEquals(scaled.data.toFloatArray.toVector,Vector.fill(24)(model.config.scalingFactor.toFloat))
+      scaled.sum().backward()
+      assertEquals(latent.grad.get.toFloatArray.toVector,Vector.fill(24)(model.config.scalingFactor.toFloat))
+      val imageOut=model.decodeDiffusionLatents(scaled)
+      assertEquals(imageOut.data.toFloatArray.toVector,Vector(.25f,.5f,-.75f).flatMap(v => Vector.fill(24)(v)))
+      val wrong=Variable(Tensor.fromFloats(Array(1f),Shape.from(Seq(1))))
+      intercept[IllegalArgumentException](model.toDiffusionLatents(wrong))
+      intercept[IllegalArgumentException](model.decodeDiffusionLatents(wrong))
+    }
+  }
+  test("public diffusion decode divides by configured scale exactly once") {
+    val dir=sys.props.get("scalatorch.vae.dir").map(Path.of(_))
+    assume(dir.nonEmpty,"set scalatorch.vae.dir to pinned tiny-sd-pipe/vae")
+    pinned(dir.get)
+    val original=PretrainedVae.load(dir.get)
+    val model=original.copy(config=original.config.copy(scalingFactor=2))
+    val latent=Variable(Tensor.fromFloats(Array.tabulate(4*3*5)(i => math.cos(i*.17).toFloat),Shape.from(Seq(1,4,3,5))),false)
+    val actual=model.decodeDiffusionLatents(model.toDiffusionLatents(latent))
+    assertEquals(actual.data.toFloatArray.toVector,model.decode(latent).data.toFloatArray.toVector)
+    assert(!actual.requiresGrad)
+  }

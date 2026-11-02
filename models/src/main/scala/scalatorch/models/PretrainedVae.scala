@@ -14,6 +14,19 @@ final case class VaeModel(config: VaeConfig,encoder: VaeEncoder,decoder: VaeDeco
     "VAE model input/latent/output channel mismatch")
   def encodeMoments(image: Variable): Variable=encoder(image)
   def decode(latent: Variable): Variable=decoder(latent)
+  def encode(image: Variable): VaePosterior=VaePosterior(encodeMoments(image))
+  private def validateLatents(latent: Variable): Unit =
+    val dims=latent.data.shape.dims
+    require(dims.size==4 && dims(1)==config.latentChannels && dims(2)>0 && dims(3)>0,
+      "VAE diffusion latents require matching NCHW channels and positive spatial dimensions")
+  /** Explicitly convert raw posterior samples or means to diffusion-space latents. */
+  def toDiffusionLatents(latent: Variable): Variable =
+    validateLatents(latent)
+    latent*config.scalingFactor.toFloat
+  /** Inverse scaling before decoding; raw decode remains unscaled. */
+  def decodeDiffusionLatents(latent: Variable): Variable =
+    validateLatents(latent)
+    decode(latent*(1/config.scalingFactor).toFloat)
 
 /** All encoder/decoder weights, materialized as CPU Float32; no posterior sampling or pipeline scaling. */
 object PretrainedVae:
