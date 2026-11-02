@@ -48,6 +48,12 @@ class NativeWorkerSuite extends munit.FunSuite:
       assert(entered.await(5,TimeUnit.SECONDS))
       worker.handle("""{"id":"p","type":"ping"}""")
       assert(next().contains("\"id\":\"p\""))
+      worker.handle("""{"id":"status","type":"system_status"}""")
+      val status=NativeJson.parse(next()).asInstanceOf[NativeJson.Obj].fields
+      assertEquals(status("id"),NativeJson.Str("status"))
+      val result=status("result").asInstanceOf[NativeJson.Obj].fields
+      assertEquals(result("device").asInstanceOf[NativeJson.Obj].fields("active"),NativeJson.Str("cpu"))
+      assert(result("memory").asInstanceOf[NativeJson.Obj].fields.contains("jvm_heap_used_mb"))
       worker.handle("""{"id":"i","type":"interrupt","params":{"target_id":"a","owner_id":"job-a"}}""")
       val responses=Vector(next(),next())
       assert(responses.exists(_.contains("interrupted")))

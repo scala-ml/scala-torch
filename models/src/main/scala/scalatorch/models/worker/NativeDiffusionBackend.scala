@@ -12,6 +12,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
   private val root=modelRoot.toRealPath()
   private val config=EulerConfig.read(schedulerConfig)
   private var loaded: Option[EulerImagePipeline]=None
+  @volatile private var modelSummary=Map.empty[String,NativeJson]
+  override def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot(modelSummary)
   private def checkpointHash(context: NativeWorkContext): String=
     val digest=java.security.MessageDigest.getInstance("SHA-256")
     val weights=Vector("text_encoder"->"model.safetensors","unet"->"diffusion_pytorch_model.safetensors",
@@ -105,12 +107,14 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         val hash=checkpointHash(context)
         context.beginPublication()
         loaded=Some(pipeline)
+        modelSummary=Map("name"->Str(root.getFileName.toString),"kind"->Str("diffusers"),"hash"->Str(hash))
         Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),"kind"->Str("diffusers"),
           "hash"->Str(hash),"model_token"->Str(UUID.randomUUID().toString))
       case "unload" =>
         keys(p,Set.empty)
         context.beginPublication()
         loaded=None
+        modelSummary=Map.empty
         Map.empty
       case "txt2img" =>
         val pipeline=loaded.getOrElse(throw new NativeBackendError("no_model","load a model first"))

@@ -7,6 +7,8 @@ import scala.util.control.NonFatal
 trait NativeWorkerBackend:
   def supported: Set[String]
   def features: Vector[String]=Vector.empty
+  /** Called on the reader thread; implementations must only read published snapshots. */
+  def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot()
   def execute(request: NativeRequest,context: NativeWorkContext): Map[String,NativeJson]
 
 final class NativeWorkContext private[worker] (val cancelled: () => Boolean,
@@ -78,6 +80,9 @@ final class NativeWorker(out: OutputStream,backend: NativeWorkerBackend) extends
         case _ => throw IllegalArgumentException(s"invalid $key")
       request.kind match
         case "ping" => emitter.result(request.id,hello)
+        case "system_status" =>
+          require(request.params.isEmpty,"system_status takes no parameters")
+          emitter.result(request.id,backend.systemStatus)
         case "interruption_protection" =>
           val state=request.params.get("enabled") match
             case None => control.protectionState

@@ -58,6 +58,7 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       assertEquals(samplers.map(_.asInstanceOf[Obj].fields("name")),Vector(Str("Euler"),Str("DPM++ 2M")))
       val metadata=run("load_model",Map("path"->Str(root.toString),"dtype"->Str("fp32"),"vram_mode"->Str("cpu")))
       assert(metadata("hash").asInstanceOf[Str].value.matches("[0-9a-f]{64}"))
+      assertEquals(backend.systemStatus("model").asInstanceOf[Obj].fields("hash"),metadata("hash"))
       intercept[NativeBackendError](run("load_model",Map("dtype"->Str("fp16"))))
       val result=run("txt2img",NativeGenerationDefaults.envelope++Map("output_dir"->Str(output.toString),"params"->Obj(NativeGenerationDefaults.generation++Map(
         "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(2),
@@ -102,6 +103,7 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       val invalid=intercept[NativeBackendError](run("txt2img",Map("unknown"->Bool(true))))
       assertEquals(invalid.code,"unsupported")
       run("unload",Map.empty)
+      assertEquals(backend.systemStatus("model"),Obj(Map.empty))
       intercept[NativeBackendError](run("txt2img",Map.empty))
     finally
       val files=Files.list(output)

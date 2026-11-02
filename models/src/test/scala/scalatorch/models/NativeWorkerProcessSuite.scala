@@ -50,6 +50,9 @@ class NativeWorkerProcessSuite extends munit.FunSuite:
       assertEquals(hello("python"),Str(""))
       send("load","load_model",Map("path"->Str(root.toString),"dtype"->Str("fp32"),"vram_mode"->Str("cpu")))
       assertEquals(receive()("type"),Str("result"))
+      send("status","system_status")
+      val status=receive()("result").asInstanceOf[Obj].fields
+      assertEquals(status("model").asInstanceOf[Obj].fields("name"),Str(root.getFileName.toString))
       send("generate","txt2img",Map("output_dir"->Str(temp.toString),"params"->Obj(Map(
         "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(3),
         "seed"->Number(BigDecimal(Long.MaxValue)),"sampler_name"->Str("DPM++ 2M"),"scheduler"->Str("Karras")))))

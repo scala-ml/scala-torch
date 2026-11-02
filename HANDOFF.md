@@ -1,3 +1,19 @@
+## Native system status (2026-11-03)
+
+system_status is now an immediate reader-thread control in NativeWorker. Backend
+systemStatus must only read published snapshots; NativeDiffusionBackend publishes
+immutable volatile model name/kind/hash metadata on successful load/unload.
+NativeSystemStatus reports timestamps, JVM uptime, CPU Float32 runtime/device,
+OS/platform, JVM heap used/committed, and OS physical RAM when MXBean supports it.
+Heap is not mislabeled process RSS; unavailable RSS/CUDA are explicit status strings.
+Parameters currently must be empty, matching EngineClient.systemStatus.
+
+Tests prove status answers while an injected generation is blocked, model hash
+appears after load and disappears after unload, and a separate real worker JVM
+returns metadata before image generation. Final focused run: 5 passed, no skips.
+Current sbt server is scala-torch with only scalatorch.clip.dir set (backend gate
+uses sibling model folders); VAE full-suite gates need all three props restored.
+NUI remains on its native branch, unchanged this turn. Full migration incomplete.
 ## NUI native application launch route (2026-11-03)
 
 On NUI dedicated feat/scala-torch-native-engine branch, ScalaTorchLaunch now reads
