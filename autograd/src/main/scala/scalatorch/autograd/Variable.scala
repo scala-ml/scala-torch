@@ -8,12 +8,23 @@ import java.util.IdentityHashMap
 /** First-order CPU Float32 differentiable value. Leaf gradients accumulate until zeroGrad. */
 final class Variable private (
     val data: Tensor[Float], val requiresGrad: Boolean,
-    private[autograd] val edges: Vector[(Variable, Tensor[Float] => Tensor[Float])]
+    private[autograd] val edges: Vector[(Variable, Tensor[Float] => Tensor[Float])],
+    private val dependencies: Vector[Variable]
 ):
   private var accumulated: Option[Tensor[Float]] = None
+  private var current = true
   def grad: Option[Tensor[Float]] = accumulated
   def zeroGrad(): Unit = accumulated = None
   def detach: Variable = Variable(data, requiresGrad = false)
+
+  /** Parameter updates replace immutable leaves and invalidate graphs saving the old value. */
+  private[scalatorch] def replaced(next: Tensor[Float]): Variable =
+    require(edges.isEmpty && dependencies.isEmpty, "only leaves can be replaced")
+    require(next.shape == data.shape, "parameter replacement shape mismatch")
+    val replacement = Variable(next, requiresGrad)
+    replacement.accumulated = accumulated
+    current = false
+    replacement
 
   def +(other: Variable): Variable =
     Variable.result(Ops.add(data, other.data), Vector(
@@ -79,9 +90,10 @@ final class Variable private (
       val (node, expanded) = stack.removeLast()
       if expanded then order += node
       else if !seen.containsKey(node) then
+        require(node.current, "a parameter saved by this graph has changed; run forward again")
         seen.put(node, true)
         stack.append((node, true))
-        node.edges.foreach((parent, _) => stack.append((parent, false)))
+        node.dependencies.foreach(parent => stack.append((parent, false)))
     val adjoints = new IdentityHashMap[Variable, Tensor[Float]]()
     adjoints.put(this, seed)
     order.reverseIterator.foreach { node =>
@@ -93,7 +105,7 @@ final class Variable private (
       }
     }
     // Publish after all pullbacks succeed so a rejected backward does not partially update leaves.
-    order.iterator.filter(_.edges.isEmpty).foreach { leaf =>
+    order.iterator.filter(leaf => leaf.requiresGrad && leaf.edges.isEmpty).foreach { leaf =>
       val gradient = adjoints.get(leaf)
       if gradient != null then
         leaf.accumulated = Some(leaf.accumulated.fold(gradient)(Ops.add(_, gradient)))
@@ -102,14 +114,15 @@ final class Variable private (
 object Variable:
   def apply(data: Tensor[Float], requiresGrad: Boolean = true): Variable =
     require(data.device == Device.Cpu && data.dtype == DType.Float32, "autograd requires CPU Float32")
-    new Variable(data, requiresGrad, Vector.empty)
+    new Variable(data, requiresGrad, Vector.empty, Vector.empty)
 
   private def scalar(value: Float): Variable =
     Variable(Tensor.fromFloats(Array(value), Shape.from(Seq.empty)), requiresGrad = false)
 
   private def result(data: Tensor[Float], edges: Vector[(Variable, Tensor[Float] => Tensor[Float])]): Variable =
     val tracked = if Autograd.recording then edges.filter(_._1.requiresGrad) else Vector.empty
-    new Variable(data, tracked.nonEmpty, tracked)
+    // Frozen transforms still save parameter lineage for version checks. Explicit noGrad/detach are snapshots.
+    new Variable(data, tracked.nonEmpty, tracked, if Autograd.recording then edges.map(_._1) else Vector.empty)
 
   private def unbroadcast(gradient: Tensor[Float], target: Shape): Tensor[Float] =
     val padding = gradient.shape.rank - target.rank

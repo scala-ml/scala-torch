@@ -8,13 +8,16 @@ Implemented: CPU tensors (Float32/Float64/Int64/Bool), checked shapes and views,
 
 First-order CPU Float32 autograd is available through `scalatorch.autograd.Variable`: shared graph gradients, broadcast reductions, GEMM, ReLU, reshape/transpose, detach and thread-local noGrad. A Python-free linear regression training test verifies loss reduction using automatic gradients.
 
-Not implemented yet: trainable module/optimizer APIs, checkpointing, a persistent GPU Tensor backend, cuBLAS acceleration, model loading, LLM generation, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
+Trainable `Parameter`, `Linear`, SGD and AdamW are available in `scalatorch.nn`. Case-class models use `derives Module` for nested parameter discovery, including Option/Vector fields and tied-weight deduplication. In-memory state dictionaries support strict, atomic loading.
+
+Not implemented yet: persistent training checkpoints, Embedding/norm layers, a persistent GPU Tensor backend, cuBLAS acceleration, model loading, LLM generation, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
 
 ```sh
 sbt 'core / Test / testOnly scalatorch.*'
 sbt 'cpu / Test / testOnly scalatorch.cpu.*'
 sbt 'ffm / Test / testOnly scalatorch.ffm.*'
 sbt 'autograd / Test / testOnly scalatorch.autograd.*'
+sbt 'nn / Test / testOnly *'
 # Requires a Linux 64-bit CUDA driver and GPU; fails if unavailable:
 sbt 'ffm / Compile / runMain scalatorch.ffm.CudaProbe'
 # Force the actual GPU test, including when using an existing sbt server:
@@ -42,6 +45,21 @@ assert(x.grad.get.toFloatArray.toSeq == Seq(7f))
 ```
 
 Raw Tensor operations do not record gradients; use Variable operations for differentiation. `backward` retains the immutable graph for reuse, accumulates gradients on leaves only, and requires `.zeroGrad()` to clear them. Use an explicit Tensor seed for nonscalar outputs. Gradients are first-order; parallel backward on shared leaves is unsupported. Variable reshape may copy a strided input, unlike strict raw Tensor reshape.
+
+```scala
+import scalatorch.nn.*
+
+case class MLP(first: Linear, second: Linear) derives Module:
+  def apply(x: Variable): Variable = second(first(x).relu())
+
+val model = MLP(Linear.init(2, 8, seed = 41), Linear.init(8, 1, seed = 42))
+val optimizer = AdamW(Module.parameters(model), learningRate = 0.03, weightDecay = 0.0)
+// Per training batch: optimizer.zeroGrad(); loss.backward(); optimizer.step()
+val snapshot = Module.stateDict(model)
+Module.loadStateDict(model, snapshot)
+```
+
+Optimizer steps preserve gradients and reject nonfinite inputs before changing weights or Adam moments. Parameters keep their identity while replacing immutable values; backward rejects an older graph after a saved parameter changes. Explicit detach/noGrad results remain independent snapshots. The integration suite trains this MLP on XOR to MSE below `0.001`.
 
 - [Design and roadmap](docs/superpowers/specs/2026-11-02-scala-torch-design.md)
 - [Initial implementation plan](docs/superpowers/plans/2026-11-02-tensor-foundation.md)
