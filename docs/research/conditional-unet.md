@@ -1,0 +1,11 @@
+# Conditional U-Net graph
+
+`ConditionalUNet2d` connects input convolution, sinusoidal timestep features/learned MLP, typed down blocks, a residual-attention-residual middle block, typed up blocks, final GroupNorm/SiLU and output convolution. Down/up layers pair a time-conditioned residual with optional spatial cross-attention, allowing mixed attention resolutions.
+
+Skip tensors include the initial convolution output, every down residual/attention result and every downsample output. Up residuals concatenate the latest skip with the current state and consume it exactly once. Upsampling explicitly targets the next remaining skip's spatial dimensions, preserving odd rectangular image shapes.
+
+Construction validates channel transitions, timestep projection widths, shared context width, paired resolution stages, sampling placement and exact skip accounting including resolution levels. A regression demonstrated that counts/channels alone could accept a skip from the wrong resolution; the level-aware validation now rejects that graph before execution. Timestep input accepts one value broadcast across the batch or one value per sample. Feature frequency/order/phase/budget settings are explicit and excluded from parameter traversal.
+
+Four new tests cover the graph. They execute a genuine two-resolution3x5 model with both attended and plain stages. All parameters receive finite gradients, context influences the result, and three central-difference directional checks perturb every parameter plus all image/context entries. Additional tests cover scalar/per-batch timestep equivalence, changed timestep output, zero final convolution and malformed topology. The complete diffusion component suite passes21 tests. A review finding exposed unwanted graph tracking from constant timestep features in fully frozen models; a failing regression now passes with those constants explicitly untracked.
+
+This is a CPU graph assembled from explicitly supplied modules. It is not a pretrained model loader or proof of image generation quality. Config/safetensors mapping and an independent public-checkpoint reference are the next gates. Unsupported model variants, CUDA execution, VAE/CLIP/scheduler assembly and all NUI application features remain required.
