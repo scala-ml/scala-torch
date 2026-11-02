@@ -30,8 +30,14 @@ private[ffm] final class CudaDriver private (
     val address = allocateDevice(values.length.toLong * 4)
     if values.nonEmpty then
       val host = arena.allocateFrom(JAVA_FLOAT, values*)
-      call("cuMemcpyHtoD_v2", Seq(JAVA_LONG, ADDRESS, JAVA_LONG), Long.box(address), host, Long.box(values.length.toLong * 4))
+      copyHostToDevice(address,host,values.length.toLong*4)
     address
+  /** Pageable synchronous HtoD may return before DMA completes on the default stream.
+    * Complete that transfer before a nonblocking compute stream can consume it.
+    */
+  def copyHostToDevice(address: Long,host: MemorySegment,bytes: Long): Unit =
+    call("cuMemcpyHtoD_v2",Seq(JAVA_LONG,ADDRESS,JAVA_LONG),Long.box(address),host,Long.box(bytes))
+    call("cuStreamSynchronize",Seq(ADDRESS),MemorySegment.NULL)
   def download(address: Long, count: Int): Array[Float] =
     val out = arena.allocate(count.toLong * 4, 4)
     if count > 0 then call("cuMemcpyDtoH_v2", Seq(ADDRESS, JAVA_LONG, JAVA_LONG), out, Long.box(address), Long.box(count.toLong * 4))

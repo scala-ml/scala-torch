@@ -94,7 +94,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       Using.resource(Arena.ofConfined()) { arena =>
         if values.nonEmpty then
           val host=arena.allocateFrom(JAVA_INT,values*)
-          driver.call("cuMemcpyHtoD_v2",Seq(JAVA_LONG,ADDRESS,JAVA_LONG),Long.box(buffer.address),host,Long.box(values.length.toLong*4))
+          driver.copyHostToDevice(buffer.address,host,values.length.toLong*4)
       }
       body(buffer.address)
     }
@@ -108,7 +108,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     Using.resource(allocate(Shape.from(Seq(count*2)))) { buffer =>
       Using.resource(Arena.ofConfined()) { arena =>
         val host=arena.allocateFrom(JAVA_DOUBLE,coefficients*)
-        driver.call("cuMemcpyHtoD_v2",Seq(JAVA_LONG,ADDRESS,JAVA_LONG),Long.box(buffer.address),host,Long.box(count*8))
+        driver.copyHostToDevice(buffer.address,host,count*8)
       }
       execute(value.shape,value.shape.numel/2,kernels("rope")) { (arena,result) =>
         Seq(value.address,result.address,buffer.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
@@ -170,7 +170,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     try
       if source.shape.numel > 0 then Using.resource(Arena.ofConfined()) { arena =>
         val host=arena.allocateFrom(JAVA_FLOAT,source.toFloatArray*)
-        driver.call("cuMemcpyHtoD_v2",Seq(JAVA_LONG,ADDRESS,JAVA_LONG),Long.box(result.address),host,Long.box(source.shape.numel*4))
+        driver.copyHostToDevice(result.address,host,source.shape.numel*4)
       }
       result
     catch case error: Throwable =>

@@ -24,8 +24,10 @@ lazy val tensorio = (project in file("io")).dependsOn(core).settings(common).set
 lazy val nn = project.dependsOn(autograd, tensorio).settings(common).settings(
   Test / unmanagedResourceDirectories += baseDirectory.value.getParentFile / "io" / "src" / "test" / "resources"
 )
-lazy val models = project.dependsOn(nn).settings(common).settings(
-  Compile / run / fork := true
+lazy val models = project.dependsOn(nn, ffm).settings(common).settings(
+  Compile / run / fork := true,
+  Compile / run / javaOptions += "--enable-native-access=ALL-UNNAMED",
+  Test / javaOptions += "--enable-native-access=ALL-UNNAMED"
 )
 lazy val root = (project in file(".")).aggregate(core, cpu, ffm, autograd, nn, tensorio, models).settings(
   name := "scala-torch",

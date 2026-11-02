@@ -4,6 +4,8 @@ import scalatorch.*
 import scalatorch.nn.*
 
 class LlamaLoRASuite extends munit.FunSuite:
+  // Public pretrained CPU training can share the fork with GPU/model reference tests.
+  override val munitTimeout=scala.concurrent.duration.Duration(2,"minutes")
   private def base = LlamaModel.init(LlamaConfig(8,8,16,1,2,1,maxPositions=16,initializerRange=.1,tieWordEmbeddings=true),7)
   private val input = Tensor.fromLongs(Array(1L,2L,3L,4L),Shape.from(Seq(1L,4L)))
   private val targets = Tensor.fromLongs(Array(2L,3L,4L,1L),Shape.from(Seq(1L,4L)))
