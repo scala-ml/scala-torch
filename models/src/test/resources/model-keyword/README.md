@@ -23,3 +23,21 @@ an adapter. `KeywordRandom` is for keyword choice, not Torch latent noise.
 
 MT19937 provenance and redistribution notice ship in
 `models/src/main/resources/META-INF/licenses/keyword-random.txt`.
+
+## Mapping references
+
+`mapping_reference.py <NUI-checkout>` generates `similarity.jsonl` (160 cases)
+and `csv.jsonl` (10 cases). These use Python 3.12.12 `difflib.SequenceMatcher`
+and the same NUI source revision listed above. They cover asymmetric matching,
+autojunk's 200-character threshold, repeated characters, non-BMP Unicode,
+multiline/escaped/empty CSV fields, and Unicode whitespace stripping.
+Python's redistribution terms ship as `META-INF/licenses/python.txt`.
+
+`KeywordMappings` rereads files on each lookup; it does not edit them or create
+lock files. Reads compare size, modification time and file identity before/after
+reading and fail if a concurrent replacement is observed. This is not a lock
+across both the default and user files. Limits are 64MiB per file, one million
+entries, 256 columns per record, 128KiB UTF-16 field units and 4096 filename
+codepoints. Explicit callbacks allow worker cancellation during reading/parsing
+and similarity computation. Tests also exercise fresh lookup after edits/deletion,
+invalid UTF-8, cancellation, changed-source rejection and legacy file hashing.

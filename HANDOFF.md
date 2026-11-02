@@ -1,3 +1,30 @@
+## Keyword mapping reader and filename matching (2026-11-03)
+
+Added KeywordMappings: CSV skipinitialspace/quoted multiline fields, normalized
+hash keys, default/custom source identity, filename SequenceMatcher similarity
+and later-row tie-breaking. Custom rows do NOT always win: a closer default
+filename wins over an unrelated custom filename. Matching uses Unicode codepoints
+and Python autojunk behavior above 199 chars. Fresh reads observe edits/deletion;
+no caching and no file creation. Before/after identity/mtime/size checks reject
+observed source replacement, but there is no lock across both mapping files.
+Legacy file hash reads 64KiB at offset 1MiB and takes first 8 SHA256 hex chars;
+directories deliberately rejected by this API (native Diffusers identity pending).
+
+Validation: ModelKeywordSuite 8 + KeywordMappingsSuite 7 = 15 passed. Includes
+160 static difflib oracles + 10 static CSV oracles, existing 144 planner cases,
+Unicode/non-BMP and repeated-name matching, lookup refresh, UTF8 errors, resource
+limits, cancellation and deterministic concurrent-edit rejection. Python was only
+used to generate static fixtures. Regenerator, docs and PSF notice bundled.
+
+NEXT: connect native worker model_keyword hook to planner and mappings, decide
+and document full-SHA identity for Diffusers directories (modelSummary hash is
+available), preserve per-image effective_prompt/model_keyword_source_prompt,
+commit iteration state only after successful publication. Current worker STILL
+rejects hooks; no desktop success yet. Native selected LoRA/textual inversion
+inference and mapping save/delete/check endpoints are not implemented. Disabled
+ControlNet entries in desktop requests also need handling without dropping active
+units. NUI tree has not been changed this wave. Current scala-torch sbt server
+has no tiny-model properties; all 15 tests in this wave are asset-independent.
 ## Model Keyword planner primitives (2026-11-03)
 
 Added ModelKeyword pure prompt planner with joined/explicit/random/iterative

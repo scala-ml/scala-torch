@@ -1,0 +1,10 @@
+{"text": "# comment\nAB, \"red, blue|green\",model.safetensors\n", "entries": [{"model_hash": "ab", "keywords": "red, blue|green", "filename": "model.safetensors", "source": 1}]}
+{"text": "a,\"line1\r\nline2\",file\r\nb,\"a \"\"quote\"\"\",file\r", "entries": [{"model_hash": "a", "keywords": "line1\r\nline2", "filename": "file", "source": 1}, {"model_hash": "b", "keywords": "a \"quote\"", "filename": "file", "source": 1}]}
+{"text": "a,,\nshort,words\none\n", "entries": [{"model_hash": "a", "keywords": "", "filename": "", "source": 1}, {"model_hash": "short", "keywords": "words", "filename": "default", "source": 1}]}
+{"text": "a,\"unterminated", "entries": [{"model_hash": "a", "keywords": "unterminated", "filename": "default", "source": 1}]}
+{"text": "a,\"b\"c,name", "entries": [{"model_hash": "a", "keywords": "bc", "filename": "name", "source": 1}]}
+{"text": "  \n\r\n a, spaced , name \n", "entries": [{"model_hash": "a", "keywords": "spaced", "filename": "name", "source": 1}]}
+{"text": " AB, words ,name", "entries": [{"model_hash": "ab", "keywords": "words", "filename": "name", "source": 1}]}
+{"text": "\"#quoted comment\",ignored\na,\"\",\n", "entries": [{"model_hash": "a", "keywords": "", "filename": "", "source": 1}]}
+{"text": "a,words,name,extra", "entries": [{"model_hash": "a", "keywords": "words", "filename": "name", "source": 1}]}
+{"text": "a,\"b\"\"c\",name", "entries": [{"model_hash": "a", "keywords": "b\"c", "filename": "name", "source": 1}]}
