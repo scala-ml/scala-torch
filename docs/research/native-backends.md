@@ -20,7 +20,7 @@ Official references used for ABI and execution semantics:
 
 This is a correctness/ownership spike, not the production CUDA Tensor backend. Every probe invocation loads/allocates again; bindings are not yet cached. The one-output-per-thread GEMM is deliberately simple and does not replace cuBLAS, tiling, mixed precision, or performance measurements. Native CPU BLAS and cuBLAS loading remain unverified. Windows support is also unimplemented.
 
-The public Tensor is still CPU-only. Persistent device storage, backend dispatch, asynchronous API lifetime rules, capability detection, failure injection, and leak accounting require their own implementation and tests. Real successful resource release is observed through successful probe completion; exhaustive cleanup under driver failure has not been proven.
+The public Tensor is still CPU-only. Persistent device storage is now implemented as described below. Backend dispatch, asynchronous API lifetime rules, capability detection, failure injection, and leak accounting remain open. Real successful resource release is observed through successful probe completion; exhaustive cleanup under driver failure has not been proven.
 
 ## Reproduction
 
@@ -32,3 +32,27 @@ sbt 'ffm / Compile / runMain scalatorch.ffm.CudaProbe'
 ```
 
 Tests compare (M,N,K)=(2,2,3), (5,17,7), and (3,4,0) to the CPU reference; the second case spans multiple blocks. The CLI verifies exact known values `[58,64,139,154]`. Both commands fail rather than silently fall back if the GPU probe cannot run.
+
+## Persistent device storage
+
+`CudaSession.withDevice` now owns a primary-context scope, one PTX module and one nonblocking stream across multiple operations. `CudaTensor` is an explicit packed Float32 device allocation. This is the resource layer for future general tensor/backend dispatch; the array-backed `Tensor[A]` and model autograd still execute on CPU.
+
+```scala
+import scalatorch.ffm.CudaSession
+CudaSession.withDevice(maxBytes=256L*1024*1024) { gpu =>
+  val x = gpu.upload(cpuInput)
+  val w1 = gpu.upload(cpuWeight1)
+  val w2 = gpu.upload(cpuWeight2)
+  val hidden = x.matmul(w1)
+  val output = hidden.matmul(w2)
+  hidden.close()
+  val cpuOutput = output.toCpu
+  // Remaining tensors release automatically at scope exit.
+}
+```
+
+GEMM does not download either operand or its result. Each operation synchronizes its stream before returning; asynchronous scheduling is not yet exposed. Uploads pack CPU logical views, downloads return independent CPU tensors, and host staging arenas close after each operation. The default 1GiB budget counts live device allocations (one byte for an empty allocation), not module/context overhead or transient host memory. Explicit tensor close frees budget for reuse and is idempotent on the owning thread.
+
+All operations reject wrong-thread, closed or foreign-session handles before submitting native work. A scope may return a handle, but subsequent tensor operations reject it. Nested scopes retain independent ownership even on the same primary context. A changed current context rejects normal operations; cleanup rebinds the owned context before draining/freeing resources, then the driver scope restores the caller's prior context. See NVIDIA's [current-context semantics](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__CTX.html).
+
+Five real-GPU tests cover chained GEMM, strided upload, budget rejection/reuse, individual/scope/exception release, nested-session rejection, wrong-thread rejection, zero-inner GEMM, empty tensors and external context changes. The context-change regression first failed at shutdown and then passed after rebinding was added. Ordinary success and Scala exception cleanup are exercised; injected CUDA driver failures and exhaustive native leak accounting remain open. Bindings still resolve per call, and the existing simple PTX GEMM has no performance claim.
