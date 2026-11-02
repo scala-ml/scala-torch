@@ -5,6 +5,20 @@ import scalatorch.autograd.Variable
 
 class EulerSchedulerSuite extends munit.FunSuite:
   private def v(xs: Float*)=Variable(Tensor.fromFloats(xs.toArray,Shape.from(Seq(xs.size))))
+  test("Karras sigmas use rho interpolation and logarithmic model timesteps") {
+    val noise=DiffusionNoiseSchedule.fromBetas(Vector(.2,.375,.6))
+    val schedule=noise.karrasEuler(3,rho=1)
+    schedule.sigmas.zip(Vector(2.0,1.25,.5,0.0)).foreach((a,b) => assertEqualsDouble(a,b,1e-14))
+    assertEqualsFloat(schedule.timesteps(0),2f,1e-6f)
+    assertEqualsFloat(schedule.timesteps(1),(1+math.log(1.25)/math.log(2)).toFloat,1e-6f)
+    assertEqualsFloat(schedule.timesteps(2),0f,1e-6f)
+    assertEqualsDouble(noise.karrasEuler(1).sigmas.head,2.0,1e-14)
+    assertEqualsDouble(noise.karrasEuler(3,rho=2).sigmas(1),1.125,1e-14)
+    assertEquals(DiffusionNoiseSchedule.fromBetas(Vector(.2)).karrasEuler(1).timesteps,Vector(0f))
+    for rho <- Vector(0.0,-1.0,Double.NaN,Double.PositiveInfinity) do
+      intercept[IllegalArgumentException](noise.karrasEuler(3,rho))
+    intercept[IllegalArgumentException](noise.karrasEuler(0))
+  }
   test("checkpoint steps offset applies only to leading spacing") {
     val noise=DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true)
     for spacing <- Vector(DiffusionTimestepSpacing.Linspace,DiffusionTimestepSpacing.Trailing) do

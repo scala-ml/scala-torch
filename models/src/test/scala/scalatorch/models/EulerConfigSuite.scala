@@ -26,8 +26,13 @@ class EulerConfigSuite extends munit.FunSuite:
     val c=EulerConfig.fromJson("""{"num_train_timesteps":2,"trained_betas":[0.2,0.25]}""")
     assertEquals(c.scheduler(2).schedule,DiffusionNoiseSchedule.fromBetas(Vector(.2,.25)).euler(2))
   }
+  test("Karras config selects sigma interpolation while retaining leading noise scaling") {
+    val c=EulerConfig.fromJson("""{"use_karras_sigmas":true,"timestep_spacing":"leading"}""")
+    val expected=c.noise.karrasEuler(4)
+    assertEquals(c.scheduler(4).schedule,expected.copy(initialNoiseSigma=math.hypot(expected.initialNoiseSigma,1)))
+  }
   test("unsupported semantics and malformed JSON fail instead of silently using defaults") {
-    for json <- Vector("""{"use_karras_sigmas":true}""", """{"prediction_type":"unknown"}""",
+    for json <- Vector("""{"use_exponential_sigmas":true}""", """{"prediction_type":"unknown"}""",
       """{"_class_name":"DDIMScheduler"}""", """{"num_train_timesteps":2.5}""",
       """{"trained_betas":[0,0.2]}""", """{"beta_start":0.1,"beta_start":0.2}""",
       """{"unknown_option":false}""", "{} {}", """{"rescale_betas_zero_snr":true}""") do

@@ -2,6 +2,16 @@
 
 ## Windows continuation (2026-11-03)
 
+Karras follow-up: `DiffusionNoiseSchedule.karrasEuler(steps, rho=7)` creates
+descending Karras sigmas, a terminal zero, and fractional model timesteps using
+log-linear inversion of training sigmas. The formulas were checked against local
+NUI `python/sdfx/sigmas.py` (`karras`, `DiscreteModel.sigma_to_t`). Analytical tests
+use training sigmas 0.5/1/2 and rho 1/2, plus endpoints, single-step schedules and
+invalid rho values. EulerConfig now accepts `use_karras_sigmas=true` and retains
+leading-spacing initial-noise scaling. Euler/config suites: **11 passed, 0 failed,
+0 skipped**. This adds the schedule, not the DPM++ solver. Full NUI sampler parity
+and external float32 reference comparisons remain open.
+
 `TinyDiffusionRun` now accepts optional trailing `[seed [euler-config.json [steps]]]`
 arguments. It validates the explicit Euler config before loading weights and
 forwards both schedule and prediction to the image pipeline. With no config,

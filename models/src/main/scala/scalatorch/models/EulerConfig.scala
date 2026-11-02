@@ -10,9 +10,15 @@ import scala.util.Using
 
 /** Validated Euler checkpoint settings. Other scheduler families require explicit conversion. */
 final class EulerConfig private (val noise: DiffusionNoiseSchedule,val prediction: DiffusionPrediction,
-    val spacing: DiffusionTimestepSpacing,val stepsOffset: Int):
+    val spacing: DiffusionTimestepSpacing,val stepsOffset: Int,val useKarrasSigmas: Boolean):
   def scheduler(steps: Int,maxElements: Long=134217728L): EulerScheduler =
-    EulerScheduler(noise.euler(steps,spacing,stepsOffset),prediction,maxElements)
+    val schedule=if useKarrasSigmas then
+      val karras=noise.karrasEuler(steps)
+      if spacing==DiffusionTimestepSpacing.Leading then
+        karras.copy(initialNoiseSigma=math.hypot(karras.initialNoiseSigma,1))
+      else karras
+    else noise.euler(steps,spacing,stepsOffset)
+    EulerScheduler(schedule,prediction,maxElements)
 
 object EulerConfig:
   private enum Value:
@@ -71,7 +77,10 @@ object EulerConfig:
         case Null => ()
         case Array(values) => require(values.forall { case Text(_) => true; case _ => false },"invalid default metadata")
         case _ => throw IllegalArgumentException("invalid default metadata")
-      for key <- Vector("use_karras_sigmas","use_exponential_sigmas","use_beta_sigmas","rescale_betas_zero_snr") do
+      val karras=take("use_karras_sigmas",Bool(false)) match
+        case Bool(b) => b
+        case _ => throw IllegalArgumentException("invalid Karras flag")
+      for key <- Vector("use_exponential_sigmas","use_beta_sigmas","rescale_betas_zero_snr") do
         exact(key,Bool(false))
       exact("interpolation_type",Text("linear"));exact("timestep_type",Text("discrete"))
       exact("final_sigmas_type",Text("zero"));exact("sigma_min",Null);exact("sigma_max",Null)
@@ -100,6 +109,6 @@ object EulerConfig:
           DiffusionNoiseSchedule.linear(count,start,end,betaSchedule==Text("scaled_linear"))
         case _ => throw IllegalArgumentException("invalid trained betas")
       require(fields.isEmpty,s"unknown Euler config fields: ${fields.keys.toVector.sorted.mkString(", ")}")
-      new EulerConfig(noise,prediction,spacing,offset)
+      new EulerConfig(noise,prediction,spacing,offset,karras)
     }
     catch case e: IOException => throw IllegalArgumentException("invalid Euler config JSON",e)

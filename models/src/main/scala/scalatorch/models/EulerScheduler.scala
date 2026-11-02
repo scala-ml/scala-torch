@@ -10,6 +10,34 @@ enum DiffusionTimestepSpacing:
 
 /** Immutable training coefficients, accumulated in Double independently of tensor precision. */
 final class DiffusionNoiseSchedule private (val betas: Vector[Double],val sigmas: Vector[Double]):
+  /** Karras noise levels with log-linear inversion of the training sigma table. */
+  def karrasEuler(steps: Int,rho: Double=7.0): EulerSchedule =
+    require(steps>0 && steps<=betas.size,"invalid Karras inference step count")
+    require(rho.isFinite && rho>0,"Karras rho must be finite and positive")
+    val low=math.pow(sigmas.head,1/rho)
+    val high=math.pow(sigmas.last,1/rho)
+    require(low.isFinite && high.isFinite && low>0 && high>0,"unrepresentable Karras powers")
+    val levels=Vector.tabulate(steps) { i =>
+      if i==0 then sigmas.last
+      else if i==steps-1 then sigmas.head
+      else math.pow(high+(low-high)*i/(steps-1),rho)
+    }
+    val logs=sigmas.map(math.log)
+    val times=levels.map { sigma =>
+      require(sigma.isFinite && sigma>0,"invalid Karras sigma")
+      val target=math.log(sigma)
+      if target<=logs.head then 0f
+      else if target>=logs.last then (logs.size-1).toFloat
+      else
+        var lo=0
+        var hi=logs.size-1
+        while hi-lo>1 do
+          val mid=lo+(hi-lo)/2
+          if logs(mid)<=target then lo=mid else hi=mid
+        (lo+(target-logs(lo))/(logs(hi)-logs(lo))).toFloat
+    }
+    EulerSchedule(times,levels :+ 0.0,levels.head)
+
   def euler(steps: Int,spacing: DiffusionTimestepSpacing=DiffusionTimestepSpacing.Linspace,
       stepsOffset: Int=0): EulerSchedule =
     require(steps>0 && steps<=betas.size,"invalid Euler inference step count")
