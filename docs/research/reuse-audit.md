@@ -31,3 +31,5 @@ cancelには単純なinterruptだけでなく`interruption_protection`と`restar
 ## 次の監査
 
 NDArray storageの公開境界、Workspace実装、EngineClient/Supervisor/Generator/PythonEnv、Python server dispatch、全pluginと設定を読む。全request/feature台帳を埋めるまではM0監査完了にしない。今回の知見はadapter設計とNUI結合試験の要件として扱う。
+
+A subsequent [NUI source inventory](nui-migration-audit.md) pins revision8823aa413a3b3a1db682456357b15ee681387554 and enumerates the dispatch table, standard plugins, parameter fields and Python modules. This earlier revision remains historical evidence; neither audit claims complete behavioral verification.

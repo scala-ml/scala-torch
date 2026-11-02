@@ -6,6 +6,8 @@ Updated 2026-11-02. The design was approved by the user. Subsequent explicit req
 
 Full verification: **116 passed, 0 failed, 0 skipped** (core 10, CPU 5, autograd 20, tensorio 17, nn 30, models 29, FFM 5), with public single/sharded tiny-Llama, trained SmolLM2, SmolLM2 tokenizer and CUDA tests explicitly enabled. Run the module test commands from README; enable the public model gate with the documented models Test/javaOptions property and CUDA with the documented Test/envVars command. Scala's runtime dependencies still emit an Unsafe deprecation warning on Java 25; warning-free runtime compatibility is not claimed.
 
+The [NUI migration inventory](nui-migration-audit.md) now pins revision8823aa4 and enumerates47 requests,117 standard plugins,97 parameter fields and135 Python modules. All NUI migration rows remain open; this is static source evidence, not new runtime coverage.
+
 - Java 25.0.1, Scala 3.3.8, sbt 2.0.10 compile the core, CPU, and FFM modules.
 - Storage tests cover defensive copies, scalar and empty shapes, negative dimensions, checked Long size overflow, and primitive Float32/Float64/Int64/Bool preservation.
 - View tests cover transpose aliasing, contiguous conversion, reshape validation, scalar/singleton/empty broadcasting, stepped and reversed slices, and layout bounds/overflow.
@@ -40,6 +42,6 @@ Each feature suite was first run before its API existed and failed compilation, 
 
 ## Remaining gates
 
-M0: full source audit and feature ledger. M1: allocation/performance measurements, broader numerical fixtures, CPU BLAS probe and complete native failure-path verification. Initial M2 CPU training components now have implementation evidence (autograd, derived modules, Linear/Embedding/RMSNorm/activations, SGD/AdamW, MLP learning and deterministic checkpoint restart); this is not full PyTorch training coverage. Stochastic or mid-gradient-accumulation resume needs additional state. M3–M6: broader safetensors/config/tokenizer variants, broader cached decode comparisons, broader trained-model generation and tuning, broader public references, persistent CUDA backend/cuBLAS, diffusion models, and complete NUI replacement. Native BLAS/cuBLAS were not found in the inspected library locations; the simple PTX probe does not substitute for the production performance backend.
+M0: detailed behavioral source audit and fixture mapping beyond the new NUI static inventory, plus remaining numscala ownership/workspace audit. M1: allocation/performance measurements, broader numerical fixtures, CPU BLAS probe and complete native failure-path verification. Initial M2 CPU training components now have implementation evidence (autograd, derived modules, Linear/Embedding/RMSNorm/activations, SGD/AdamW, MLP learning and deterministic checkpoint restart); this is not full PyTorch training coverage. Stochastic or mid-gradient-accumulation resume needs additional state. M3–M6: broader safetensors/config/tokenizer variants, broader cached decode comparisons, broader trained-model generation and tuning, broader public references, persistent CUDA backend/cuBLAS, diffusion models, and complete NUI replacement. Native BLAS/cuBLAS were not found in the inspected library locations; the simple PTX probe does not substitute for the production performance backend.
 
 The full project goal remains active and unachieved.

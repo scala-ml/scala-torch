@@ -1,0 +1,20 @@
+{
+  "revision": "8823aa413a3b3a1db682456357b15ee681387554",
+  "queued": 41,
+  "reader": 6,
+  "requests": 47,
+  "scala_constants_missing": 19,
+  "plugins": 117,
+  "groups": {
+    "scripts": 33,
+    "extras": 16,
+    "alwaysOn": 68
+  },
+  "parameter_fields": 97,
+  "python_modules": 135,
+  "python_source_lines": 34628,
+  "scala_request_references": 254,
+  "missing_handlers": [],
+  "missing_plugin_classes": [],
+  "missing_plugin_ids": []
+}

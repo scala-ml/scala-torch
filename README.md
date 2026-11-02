@@ -164,3 +164,5 @@ val generated = model.generateIds(promptIds,32,sampling=policy)
 Temperature0 keeps the default greedy behavior. [Sampling semantics and tests](docs/research/token-sampling.md) cover temperature, top-k/top-p ordering, numerical boundaries and seed replay.
 
 `LlamaModel.load(directory)` also accepts `model.safetensors.index.json` and its referenced shards. All shard headers and index assignments validate before model weights materialize. A directory containing both single-file and indexed weights is rejected as ambiguous. See [sharded-checkpoint validation and independent reference](docs/research/sharded-safetensors.md).
+
+The [NUI migration ledger](docs/research/nui-migration-audit.md) tracks the remaining Python removal work against47 worker requests and117 standard plugins at a pinned source revision. These features are inventoried, not yet migrated.
