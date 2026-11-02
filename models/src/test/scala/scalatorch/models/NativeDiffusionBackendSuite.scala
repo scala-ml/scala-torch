@@ -20,9 +20,10 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       val metadata=run("load_model",Map("path"->Str(root.toString),"dtype"->Str("fp32"),"vram_mode"->Str("cpu")))
       assert(metadata("hash").asInstanceOf[Str].value.matches("[0-9a-f]{64}"))
       intercept[NativeBackendError](run("load_model",Map("dtype"->Str("fp16"))))
-      val result=run("txt2img",Map("output_dir"->Str(output.toString),"params"->Obj(Map(
+      val result=run("txt2img",NativeGenerationDefaults.envelope++Map("output_dir"->Str(output.toString),"params"->Obj(NativeGenerationDefaults.generation++Map(
         "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(2),
-        "seed"->Number(42),"sampler_name"->Str("DPM++ 2M"),"scheduler"->Str("Karras")))))
+        "seed"->Number(42),"sampler_name"->Str("DPM++ 2M"),"scheduler"->Str("Automatic")))))
+      assertEquals(result("scheduler"),Str("Karras"))
       val images=result("images").asInstanceOf[Arr].values
       val path=Path.of(images.head.asInstanceOf[Obj].fields("path").asInstanceOf[Str].value)
       val image=javax.imageio.ImageIO.read(path.toFile)

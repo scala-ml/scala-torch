@@ -80,11 +80,11 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         Map.empty
       case "txt2img" =>
         val pipeline=loaded.getOrElse(throw new NativeBackendError("no_model","load a model first"))
-        keys(p,Set("params","output_dir"))
+        keys(NativeGenerationDefaults.strip(p,NativeGenerationDefaults.envelope),Set("params","output_dir"))
         val g=p.get("params") match
           case Some(Obj(fields)) => fields
           case _ => throw IllegalArgumentException("params must be an object")
-        keys(g,Set("prompt","negative_prompt","width","height","steps","seed","cfg_scale","sampler_name","scheduler"))
+        keys(NativeGenerationDefaults.strip(g,NativeGenerationDefaults.generation),Set("prompt","negative_prompt","width","height","steps","seed","cfg_scale","sampler_name","scheduler"))
         val seedNumber=number(g,"seed",42)
         require(seedNumber.isValidLong,"seed must be a signed 64-bit integer")
         val seed=if seedNumber.toLong == -1 then new java.security.SecureRandom().nextLong() & Long.MaxValue else seedNumber.toLong
@@ -93,7 +93,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         val imageRequest=DiffusionImageRequest(str(g,"prompt",""),str(g,"negative_prompt",""),
           integer(g,"width",512),integer(g,"height",512),seed,number(g,"cfg_scale",7).toFloat)
         val sampler=str(g,"sampler_name","DPM++ 2M")
-        val schedule=str(g,"scheduler","Karras")
+        val requestedSchedule=str(g,"scheduler","Automatic")
+        val schedule=if requestedSchedule=="Automatic" then (if sampler=="DPM++ 2M" then "Karras" else "Uniform") else requestedSchedule
         if !(sampler=="Euler" && Set("Uniform","Karras").contains(schedule)) &&
             !(sampler=="DPM++ 2M" && schedule=="Karras") then unsupported(s"unsupported sampler/schedule: $sampler/$schedule")
         val outputName=str(p,"output_dir","")

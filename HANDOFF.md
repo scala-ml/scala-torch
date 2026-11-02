@@ -1,3 +1,18 @@
+## NUI generation envelope validation (2026-11-03)
+
+NativeGenerationDefaults validates and strips known inactive options emitted by
+NUI GenerationParams/GenerationRequest. Active unsupported options (batch, clip skip,
+LoRA, Hires, hooks, etc.) and unknown nested fields fail rather than being ignored.
+Automatic resolves DPM++ 2M to Karras and Euler to Uniform, checked against NUI's
+python/sdfx/schedulers.py and tests/test_schedulers.py. The tiny backend test now
+uses all these inactive fields and Automatic, proving actual generation still works.
+Validation and real-model tests passed (2); standalone process test also passed
+before the last inactive-preview option addition.
+
+IMPORTANT: preview currently requires preview_every=0 and preview_method=none;
+NUI defaults (2/approx) still need implementation. This is not full default UI
+compatibility. Next integrate real EngineClient serialization, first creating a
+NUI branch, and add preview plus catalog operations. NUI remains untouched.
 ## Native JVM subprocess verification (2026-11-03)
 
 NativeWorkerProcessSuite now launches NativeWorkerMain in a separate Java process
