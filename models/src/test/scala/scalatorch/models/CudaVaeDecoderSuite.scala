@@ -70,3 +70,24 @@ class CudaVaeDecoderSuite extends munit.FunSuite:
       assertEquals(s.allocatedBytes,0L)
     }
   }
+  test("cancelling inside inference releases intermediates and keeps resident weights reusable") {
+    val model=loaded()
+    CudaSession.withDevice() { s =>
+      var armed=false
+      var calls=0
+      val decoder=CudaVaeDecoder.upload(s,model.decoder,() => {
+        if armed then calls+=1
+        armed && calls>=10
+      })
+      val x=s.fill(Shape.from(Seq(1L,4L,3L,5L)),1f)
+      val before=s.allocatedBytes
+      armed=true
+      intercept[java.util.concurrent.CancellationException](decoder(x))
+      assertEquals(s.allocatedBytes,before)
+      armed=false
+      val result=decoder(x)
+      assert(result.toCpu.toFloatArray.forall(_.isFinite))
+      result.close();decoder.close();x.close()
+      assertEquals(s.allocatedBytes,0L)
+    }
+  }

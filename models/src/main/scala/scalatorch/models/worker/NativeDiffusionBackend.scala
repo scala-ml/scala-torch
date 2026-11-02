@@ -6,15 +6,16 @@ import java.util.UUID
 
 final class NativeBackendError(val code: String,message: String) extends RuntimeException(message)
 
-/** Explicit CPU Float32 checkpoint adapter. Unsupported settings fail before inference. */
-final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extends NativeWorkerBackend:
+/** CPU Float32 denoising adapter with explicit optional CUDA VAE decoding. */
+final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
+    vaeExecution: VaeExecution=VaeExecution.Cpu) extends NativeWorkerBackend:
   import NativeJson.*
   private val root=modelRoot.toRealPath()
   private val config=EulerConfig.read(schedulerConfig)
   private var loaded: Option[EulerImagePipeline]=None
   private var keywordState=ModelKeyword.State()
   @volatile private var modelSummary=Map.empty[String,NativeJson]
-  override def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot(modelSummary)
+  override def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot(modelSummary,vaeExecution.device)
   private def checkpointHash(context: NativeWorkContext): String=
     val digest=java.security.MessageDigest.getInstance("SHA-256")
     val weights=Vector("text_encoder"->"model.safetensors","unet"->"diffusion_pytorch_model.safetensors",
@@ -146,7 +147,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         val unet=PretrainedUNet.load(root.resolve("unet"))
         context.checkCancelled()
         val (vae,vaeInfo)=readVae(selectedVae,context)
-        val pipeline=new EulerImagePipeline(tokenizer,clip,unet,vae)
+        val pipeline=new EulerImagePipeline(tokenizer,clip,unet,vae,vaeExecution=vaeExecution)
         val hash=checkpointHash(context)
         context.beginPublication()
         loaded=Some(pipeline)
@@ -159,7 +160,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         val (vae,info)=readVae(vaeChoice(p,"path"),context)
         require(vae.config.latentChannels==previous.vae.config.latentChannels &&
           vae.config.channels.size==previous.vae.config.channels.size,"replacement VAE latent geometry differs")
-        val replacement=new EulerImagePipeline(previous.tokenizer,previous.textEncoder,previous.unet,vae)
+        val replacement=new EulerImagePipeline(previous.tokenizer,previous.textEncoder,previous.unet,vae,
+          vaeExecution=previous.vaeExecution)
         context.beginPublication()
         loaded=Some(replacement)
         modelSummary=modelSummary++info++Map("model_token"->Str(UUID.randomUUID().toString))
@@ -278,6 +280,6 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
 object NativeWorkerMain:
   def main(args: Array[String]): Unit=
     require(args.length==2,"usage: NativeWorkerMain <diffusers-root> <explicit-euler-config.json>")
-    val backend=new NativeDiffusionBackend(Path.of(args(0)),Path.of(args(1)))
+    val backend=new NativeDiffusionBackend(Path.of(args(0)),Path.of(args(1)),VaeExecution.fromEnvironment(sys.env))
     val worker=new NativeWorker(System.out,backend)
     worker.serve(new java.io.InputStreamReader(System.in,java.nio.charset.StandardCharsets.UTF_8))

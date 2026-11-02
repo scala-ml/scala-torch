@@ -1,0 +1,55 @@
+package scalatorch.models
+
+import scalatorch.*
+import java.nio.file.Path
+import java.util.concurrent.CancellationException
+
+class CudaImagePipelineSuite extends munit.FunSuite:
+  private def pipeline(execution: VaeExecution): EulerImagePipeline =
+    assume(sys.env.get("SCALATORCH_CUDA_TESTS").contains("1"),"real GPU test disabled")
+    val dir=sys.props.get("scalatorch.vae.dir")
+    assume(dir.nonEmpty,"public tiny model required")
+    val root=Path.of(dir.get).getParent
+    new EulerImagePipeline(ClipFastTokenizer.load(root.resolve("tokenizer/vocab.json"),root.resolve("tokenizer/merges.txt")),
+      PretrainedClip.load(root.resolve("text_encoder")),PretrainedUNet.load(root.resolve("unet")),
+      PretrainedVae.load(root.resolve("vae")),vaeExecution=execution)
+  test("Euler and DPM image pipelines use CUDA decode with one latent scaling") {
+    val cpu=pipeline(VaeExecution.Cpu)
+    val gpu=new EulerImagePipeline(cpu.tokenizer,cpu.textEncoder,cpu.unet,cpu.vae,vaeExecution=VaeExecution.Cuda())
+    val noise=DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true)
+    val request=DiffusionImageRequest("a red cat","",10,6,42,guidanceScale=1f)
+    for dpm <- Seq(false,true) do
+      def run(p: EulerImagePipeline)=
+        if dpm then p.generateDpm(request,DpmSchedule.karras(noise,2)) else p.generate(request,noise.euler(2))
+      val expected=run(cpu);val actual=run(gpu)
+      assertEquals(actual.shape,expected.shape)
+      val max=actual.toFloatArray.zip(expected.toFloatArray).map((a,e) => math.abs(a.toDouble-e)).max
+      println(s"CUDA VAE pipeline dpm=$dpm maxAbsError=$max")
+      assert(max<2e-5)
+    intercept[CancellationException](gpu.generate(request,noise.euler(1),cancelled=() => true))
+  }
+  test("CUDA decode failure retains exact input for recovery and cancellation is not wrapped") {
+    val p=pipeline(VaeExecution.Cuda(maxBytes=1))
+    val request=DiffusionImageRequest("a cat","",10,6,42,guidanceScale=1f)
+    val schedule=DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true).euler(1)
+    var latents: Tensor[Float]=null
+    val error=intercept[VaeDecodeFailure](p.generate(request,schedule,onProgress=x => latents=x.latents))
+    assertEquals(error.decoderInput.toFloatArray.toVector,
+      latents.toFloatArray.toVector.map(_*(1/p.vae.config.scalingFactor).toFloat))
+    var checks=0
+    intercept[CancellationException] {
+      VaeExecution.Cuda().decode(p.vae.decoder,error.decoderInput,() => { checks+=1;checks>5 })
+    }
+    val result=VaeExecution.Cuda().decode(p.vae.decoder,error.decoderInput,() => false)
+    assert(result.toFloatArray.forall(_.isFinite))
+  }
+  test("worker VAE device settings are explicit and reject invalid values") {
+    assertEquals(VaeExecution.fromEnvironment(Map.empty),VaeExecution.Cpu)
+    assertEquals(VaeExecution.fromEnvironment(Map("SDFX_SCALATORCH_VAE_DEVICE"->"cuda")),VaeExecution.Cuda())
+    assertEquals(VaeExecution.fromEnvironment(Map("SDFX_SCALATORCH_VAE_DEVICE"->"cuda:2",
+      "SDFX_SCALATORCH_VAE_MAX_BYTES"->"4096")),VaeExecution.Cuda(2,4096))
+    for device <- Seq("gpu","cuda:-1","cuda:foo") do
+      intercept[IllegalArgumentException](VaeExecution.fromEnvironment(Map("SDFX_SCALATORCH_VAE_DEVICE"->device)))
+    intercept[IllegalArgumentException](VaeExecution.fromEnvironment(Map("SDFX_SCALATORCH_VAE_DEVICE"->"cuda",
+      "SDFX_SCALATORCH_VAE_MAX_BYTES"->"0")))
+  }

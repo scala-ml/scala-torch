@@ -1,3 +1,15 @@
+# Optional CUDA VAE decode (2026-11-03)
+
+NativeWorkerMain supports SDFX_SCALATORCH_VAE_DEVICE=cpu|cuda|cuda:<index> plus
+SDFX_SCALATORCH_VAE_MAX_BYTES (default1GiB). The existing native launch variables
+remain required. CLIP/U-Net and scheduler run on CPU; raw VAE decode uses resident
+CUDA FP32 then releases its session. Status runtime.vae_device reports placement.
+Model load stays fp32/cpu and VAE replacement preserves placement. Cancellation
+checks run between operations; failures retain exact decoder-input recovery.
+
+Actual Java subprocess PNG generation and NUI EngineClient integration passed
+with CUDA decoding; see HANDOFF.md and NUI docs/scala-torch-native-engine.md.
+This extends the CPU desktop checkpoint below; full GPU denoising is not done.
 # Native desktop generation checkpoint (2026-11-03)
 
 The actual NUI JavaFX app now completes a tiny CPU generation through

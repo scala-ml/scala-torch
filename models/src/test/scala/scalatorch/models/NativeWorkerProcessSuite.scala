@@ -7,6 +7,13 @@ import java.util.concurrent.{LinkedBlockingQueue,TimeUnit}
 
 class NativeWorkerProcessSuite extends munit.FunSuite:
   test("public worker subprocess speaks JSON Lines and generates a real PNG") {
+    runWorker(false)
+  }
+  test("public worker subprocess selects CUDA VAE decode and generates a real PNG") {
+    assume(sys.env.get("SCALATORCH_CUDA_TESTS").contains("1"),"real GPU test disabled")
+    runWorker(true)
+  }
+  private def runWorker(cuda: Boolean): Unit = {
     val configured=sys.props.get("scalatorch.clip.dir")
     assume(configured.nonEmpty,"public tiny model required")
     val root=Path.of(configured.get).getParent
@@ -15,13 +22,15 @@ class NativeWorkerProcessSuite extends munit.FunSuite:
     val errors=temp.resolve("stderr.txt")
     Files.writeString(config,"""{"num_train_timesteps":1000,"beta_start":0.00085,"beta_end":0.012,"beta_schedule":"scaled_linear"}""")
     val javaExe=Path.of(sys.props("java.home"),"bin",if sys.props("os.name").startsWith("Windows") then "java.exe" else "java")
-    val builder=new ProcessBuilder(javaExe.toString,"-Dfile.encoding=UTF-8","-cp",sys.props("scalatorch.worker.classpath"),
+    val builder=new ProcessBuilder(javaExe.toString,"--enable-native-access=ALL-UNNAMED","-Dfile.encoding=UTF-8","-cp",sys.props("scalatorch.worker.classpath"),
       "scalatorch.models.worker.NativeWorkerMain",root.toString,config.toString)
     builder.redirectError(errors.toFile)
     // The worker must not depend on inherited Python or test JVM configuration.
     builder.environment().remove("PYTHONPATH")
     builder.environment().remove("PYTHONHOME")
     builder.environment().remove("JAVA_TOOL_OPTIONS")
+    builder.environment().put("SDFX_SCALATORCH_VAE_DEVICE",if cuda then "cuda" else "cpu")
+    builder.environment().remove("SDFX_SCALATORCH_VAE_MAX_BYTES")
     val process=builder.start()
     val input=new java.io.BufferedWriter(new java.io.OutputStreamWriter(process.getOutputStream,UTF_8))
     val lines=new LinkedBlockingQueue[String]()
@@ -53,6 +62,7 @@ class NativeWorkerProcessSuite extends munit.FunSuite:
       send("status","system_status")
       val status=receive()("result").asInstanceOf[Obj].fields
       assertEquals(status("model").asInstanceOf[Obj].fields("name"),Str(root.getFileName.toString))
+      assertEquals(status("runtime").asInstanceOf[Obj].fields("vae_device"),Str(if cuda then "cuda:0" else "cpu"))
       send("generate","txt2img",Map("output_dir"->Str(temp.toString),"params"->Obj(Map(
         "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(3),
         "seed"->Number(BigDecimal(Long.MaxValue)),"sampler_name"->Str("DPM++ 2M"),"scheduler"->Str("Karras")))))

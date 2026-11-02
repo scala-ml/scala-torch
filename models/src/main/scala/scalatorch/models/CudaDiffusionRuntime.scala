@@ -7,15 +7,17 @@ import scala.util.Using
 
 /** Shared inference executor for a snapshot of a diffusion parameter tree. */
 private[models] final class CudaDiffusionRuntime private (session: CudaSession,
-    weights: Map[Parameter,CudaTensor]) extends AutoCloseable:
+    weights: Map[Parameter,CudaTensor],cancelled: () => Boolean) extends AutoCloseable:
   private var closed=false
   private def check(): Unit =
     if closed then throw IllegalStateException("CUDA diffusion runtime is closed")
     session.allocatedBytes
+    VaeExecution.checkCancelled(cancelled)
   private def scope(body: Using.Manager => CudaTensor): CudaTensor =
     check()
     Using.Manager { use =>
       val result=body(use)
+      check()
       session.reshape(result,result.shape)
     }.get
 
@@ -148,6 +150,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         val owned=use(value)
         hidden.close()
         hidden=owned
+        check()
       model.postQuantConv.foreach(c => next(conv(hidden,c)))
       next(conv(hidden,model.convIn))
       next(resnet(hidden,model.midBlock.first,None))
@@ -174,11 +177,15 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       closed=true
 
 private[models] object CudaDiffusionRuntime:
-  def upload[A: Module](session: CudaSession,model: A): CudaDiffusionRuntime =
+  def upload[A: Module](session: CudaSession,model: A,cancelled: () => Boolean=() => false): CudaDiffusionRuntime =
     val uploaded=scala.collection.mutable.LinkedHashMap.empty[Parameter,CudaTensor]
     try
-      Module.parameters(model).foreach(p => uploaded(p)=session.upload(p.data))
-      new CudaDiffusionRuntime(session,uploaded.toMap)
+      Module.parameters(model).foreach { p =>
+        VaeExecution.checkCancelled(cancelled)
+        uploaded(p)=session.upload(p.data)
+      }
+      VaeExecution.checkCancelled(cancelled)
+      new CudaDiffusionRuntime(session,uploaded.toMap,cancelled)
     catch case error: Throwable =>
       uploaded.values.toVector.reverse.foreach { t =>
         try t.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)

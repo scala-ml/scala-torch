@@ -1,3 +1,41 @@
+## CUDA VAE decoding connected through pipeline and NUI worker (2026-11-03)
+
+EulerImagePipeline now takes explicit VaeExecution (default Cpu). Cuda opens a
+thread-local session per decode, uploads decoder weights, runs resident inference,
+downloads raw RGB, and closes all resources. CLIP/UNet/sampling remain CPU. The
+pipeline still applies inverse VAE scaling exactly once and wraps non-cancellation
+failures as VaeDecodeFailure with the exact decoder input. No silent CPU fallback.
+
+NativeWorkerMain reads SDFX_SCALATORCH_VAE_DEVICE=cpu|cuda|cuda:<index> and optional
+SDFX_SCALATORCH_VAE_MAX_BYTES (default1073741824). These augment the existing native
+launch config. Model loading remains fp32/cpu; set_vae preserves decoder placement.
+NativeSystemStatus.runtime.vae_device reports placement and gpu_status states that
+CUDA decode is configured, without claiming live GPU memory telemetry.
+
+CudaDiffusionRuntime checks cancellation during weight upload and between scopes
+and decoder operations. Running kernels remain synchronous/non-preemptible. Close
+paths ignore cancellation so cleanup succeeds. Test cancels inside inference,
+checks exact allocation accounting, then reuses the same weights successfully.
+
+Validation on actual GTX1650 SUPER4GiB:
+- models/testOnly *CudaImagePipelineSuite *CudaVaeDecoderSuite
+  *CudaDiffusionAttentionSuite *CudaDiffusionResnetSuite *PretrainedVaeSuite
+  *NativeDiffusionBackendSuite *NativeWorkerSuite:31 passed, no skips.
+- models/testOnly *NativeWorkerProcessSuite:2 passed (separate Java processes,
+  CPU and CUDA VAE; JSON Lines status, PNG and preview). Python/test JVM env removed.
+- Euler CPU-vs-CUDA-decode maxAbsError7.45e-8; DPM5.96e-8; recovery input, upload
+  cancellation, runtime cancellation, settings parsing and CPU regressions pass.
+- NUI feat/scala-torch-native-engine engine/testOnly *NativeScalaEngineSuite:
+  CUDA VAE opt-in passed1 in14.039s; real EngineClient serialization and PNG workflow,
+  VAE replacement/restore plus reported device verified. NUI test/docs committed
+  separately. No new JavaFX screenshot in this checkpoint.
+
+NUI server currently inherits SDFX_SCALATORCH_VAE_DEVICE=cuda and test cp/model env.
+scala-torch server was shut down before NUI test. Restart with CUDA tests plus
+JAVA_TOOL_OPTIONS for scalatorch.{clip,unet,vae}.dir when further tests require it.
+Native worker artifacts were rebuilt and .superpowers/worker-classpath.txt points
+at those updated jars. Remaining work includes GPU U-Net/CLIP composition, FP16,
+offload and full existing NUI features. CUDA VAE alone is not goal completion.
 ## Complete resident CUDA VAE decoder (2026-11-03)
 
 CudaVaeDecoder.upload(session, VaeDecoder) now executes the complete loaded FP32

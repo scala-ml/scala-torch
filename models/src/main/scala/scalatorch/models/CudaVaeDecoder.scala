@@ -11,5 +11,5 @@ final class CudaVaeDecoder private (runtime: CudaDiffusionRuntime,model: VaeDeco
   def close(): Unit=runtime.close()
 
 object CudaVaeDecoder:
-  def upload(session: CudaSession,model: VaeDecoder): CudaVaeDecoder =
-    new CudaVaeDecoder(CudaDiffusionRuntime.upload(session,model),model)
+  def upload(session: CudaSession,model: VaeDecoder,cancelled: () => Boolean=() => false): CudaVaeDecoder =
+    new CudaVaeDecoder(CudaDiffusionRuntime.upload(session,model,cancelled),model)

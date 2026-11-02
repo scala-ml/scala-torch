@@ -8,9 +8,10 @@ final case class DiffusionImageRequest(prompt: String,negativePrompt: String,wid
     guidanceScale: Float=7.5f,truncatePrompt: Boolean=false,clipSkip: Int=1)
 final case class DiffusionImageProgress(completedSteps: Int,totalSteps: Int,timestep: Float,latents: Tensor[Float])
 
-/** Single-image CPU inference composition with explicit Euler or DPM++ schedules. */
+/** Single-image CPU denoising with explicit Euler/DPM++ schedules and selectable VAE placement. */
 final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder: ClipTextModel,
-    val unet: ConditionalUNet2d,val vae: VaeModel,maxImagePixels: Long=16777216L,maxLatentElements: Long=16777216L):
+    val unet: ConditionalUNet2d,val vae: VaeModel,maxImagePixels: Long=16777216L,maxLatentElements: Long=16777216L,
+    val vaeExecution: VaeExecution=VaeExecution.Cpu):
   require(maxImagePixels>=0 && maxLatentElements>=0,"negative image pipeline allocation limit")
   require(tokenizer.vocabSize<=textEncoder.tokenEmbedding.weight.data.shape.dims.head &&
     tokenizer.maxLength<=textEncoder.positionEmbedding.weight.data.shape.dims.head,"pipeline tokenizer/text encoder mismatch")
@@ -92,7 +93,7 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
     checkCancelled()
     val decoderInput=latent*(1/vae.config.scalingFactor).toFloat
     val image=try
-      val decoded=vae.decode(decoderInput).data
+      val decoded=vaeExecution.decode(vae.decoder,decoderInput.data,cancelled)
       require(decoded.toFloatArray.forall(_.isFinite),"VAE produced nonfinite image values")
       decoded
     catch
