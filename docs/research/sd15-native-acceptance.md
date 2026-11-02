@@ -1,5 +1,26 @@
 # SD1.5 native acceptance work (2026-11-03)
 
+## Completed512x512 native txt2img
+
+The immutable-runtime retry completed512x512,20steps,DPM++2M/Karras,seed42,
+CFG7.5 with the prompt "a photograph of a red apple on a wooden table".
+No Python process was invoked. The standard FP32 SD1.5 weights below were used;
+CUDA U-Net/VAE offload with1GiB session limits, CPU CLIP/scheduler.
+Protocol result timing_s=1190.2307244 (~19m50s), process exit0, empty stderr.
+Other short GPU tests ran concurrently, so this is not a clean benchmark.
+
+Output: .superpowers/sd15-512-20-snapshot/native-597b8a88-ee25-482c-9dd4-9c1ec5692287.png
+SHA256:91bf121f5ae3a4bf0f4ad86110d91207a8400af5701dd3243bfe7196844421fd.
+Visually inspected at512px: one clearly recognizable red apple, stem/highlights,
+on brown wooden planks. This establishes a normal-resolution, recognizable
+SD1.5 native output for this request. It is not universal quality/parity,
+SDXL, complete extension support or packaged NUI acceptance.
+
+session80265 is now terminal/success; do not poll/restart it as live.
+A new immutable512px img2img run is active in session62925,output
+.superpowers/sd15-img2img-512-20. It uses this output as source, requests a green
+apple,20scheduled/10active steps,strength0.5,seed42. Result not yet observed.
+
 ## Native img2img smoke
 
 After CUDA encoder implementation, the same standard FP32 SD1.5 checkpoint

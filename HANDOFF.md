@@ -1,3 +1,25 @@
+## SUCCESS:512px native SD1.5 image; full-size img2img started (2026-11-03)
+
+Immutable txt2img session80265 COMPLETED exit0,empty stderr.512x512,20steps,
+DPM++2M/Karras,seed42,CFG7.5,standardSD1.5FP32 weights; Java/CUDA only runtime.
+PNG inspected: recognizable redapple withstem/highlights onwoodenplanks.
+Path.superpowers/sd15-512-20-snapshot/native-597b8a88-ee25-482c-9dd4-9c1ec5692287.png
+SHA25691bf121f5ae3a4bf0f4ad86110d91207a8400af5701dd3243bfe7196844421fd.
+timing1190.2307244s (~19m50s),concurrentGPUtestsso notcleanbenchmark. This fixes
+the prior mutable-runtime acceptance setup; originalfailure maskedVAEexception
+not separately reconstructed. Detailed evidence docs/research/sd15-native-acceptance.md.
+
+NEW full512img2img ACTIVE session62925,launcherPID33108 (maywrapactualJava),
+.superpowers/sd15-img2img-512-20. Promptgreenapple,sourceabove,20scheduled/
+10active steps,strength0.5,seed42. Latestmodelloadsuccess;VAEencoder running.
+models/package completed beforelaunch;14jars snapshot into its.runtime folder.
+Poll62925,not terminal80265or11471. Keepaliveuntilterminal. InspectfinalPNG.
+
+SDXL textplanTask1done at2ddf8a8,Task2 NUIprompt/chunks/dualCLIP remainsNEXT.
+No new runtimechanges thisturn; actualfullsizeacceptance evidence gained.
+scala-torch sbtliveCUDA+tinySDXLprops;NUI branchunchanged973e5d2,serverstopped.
+FullgoalNOTcomplete:SDXLpipeline,extensions,inpainting,GUI/MCP/package gates.
+
 ## SDXL CLIP raw states and pooling projection (2026-11-03)
 
 Text-pipeline planTask1implemented. ClipTextConfig appends projectionWidth,
