@@ -60,6 +60,10 @@ final class Variable private (
   def crossEntropy(targets: Tensor[Long], reduction: LossReduction = LossReduction.Mean, ignoreIndex: Long = -100): Variable =
     LossOps.crossEntropy(this,targets,reduction,ignoreIndex)
 
+  def resizeNearest2d(height: Int,width: Int,mode: NearestMode = NearestMode.Floor): Variable =
+    Variable.result(Resize2d.nearest(data,height,width,mode),Vector(
+      this -> ((g: Tensor[Float]) => Resize2d.backward(data,g,height,width,mode))))
+
   def groupNorm(groups: Int,epsilon: Double = 1e-5): Variable =
     Variable.result(GroupNormOps.forward(data,groups,epsilon),Vector(
       this -> ((g: Tensor[Float]) => GroupNormOps.backward(data,g,groups,epsilon))))
