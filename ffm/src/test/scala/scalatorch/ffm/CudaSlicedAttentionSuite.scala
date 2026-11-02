@@ -69,6 +69,24 @@ class CudaSlicedAttentionSuite extends munit.FunSuite:
         assertEquals(s.allocatedBytes,0L)
     }
   }
+  test("full spatial key count at width40 matches the original serial kernel") {
+    gpu()
+    CudaSession.withDevice() { s =>
+      val q=s.upload(data(Seq(1L,1L,512L,40L),21))
+      val k=s.upload(data(Seq(1L,1L,4096L,40L),22))
+      val v=s.upload(data(Seq(1L,1L,4096L,40L),23))
+      val start=System.nanoTime()
+      val reference=s.causalAttention(q,k,v,queryStart=4095)
+      val middle=System.nanoTime()
+      val parallel=s.scaledDotProductAttention(q,k,v)
+      val end=System.nanoTime()
+      println(s"attention 512x4096 width40 serialMs=${(middle-start)/1e6} parallelMs=${(end-middle)/1e6}")
+      assertEquals(parallel.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits),
+        reference.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits))
+      parallel.close();reference.close();v.close();k.close();q.close()
+      assertEquals(s.allocatedBytes,0L)
+    }
+  }
   test("automatic query slicing fits a 64 KiB workspace instead of an 8 MiB score matrix") {
     gpu()
     val qs=Shape.from(Seq(1L,2L,512L,4L));val ks=Shape.from(Seq(1L,2L,1024L,4L))

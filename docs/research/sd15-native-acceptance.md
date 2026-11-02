@@ -80,3 +80,17 @@ The original512px run remains active (session11471, actual Java PID33796); step2
 and a preview were received. Short GPU regression tests ran concurrently, so its
 wall time is no longer an uncontended baseline. Do not use that time as a clean
 before/after benchmark. Final image correctness is still useful evidence.
+## Parallel score generation
+
+Noncausal attention now launches one thread per(query,key) dot product, then a
+row-wise max/exp/sum/normalize kernel, then parallel weighted output channels.
+Each dot/reduction keeps its previous serial order and Double rounding. Scratch
+remains bounded by the existing byte/session limits and is reused across stages.
+Causal/cache attention entry and its ABI are unchanged. Query-row offset and GQA
+mapping are covered by exact comparisons with the original serial kernel.
+
+Added a512-query/4096-key/width40 exact-output regression using16MiB score scratch.
+One observed comparison was278.9792ms serial versus32.5511ms parallel, but the
+original512px image job was concurrently using the GPU. Treat these as diagnostic
+samples, not an isolated benchmark or full-pipeline speed claim. The image job
+reached step3/20; it remains on the old loaded CudaSession/attention path.

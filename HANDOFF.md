@@ -1,3 +1,23 @@
+## Parallel query/key score generation (2026-11-03)
+
+Noncausal CUDA attention now has three stages: parallel per(query,key) ordered
+Double dot products; original-order row max/exp/sum/normalization; parallel per
+output channel ordered weighted sum. Original causal/cache attention entry is
+unchanged. No additional scratch allocation; same slice/work/session limits.
+
+ffm/testOnly * passed55; models/testOnly *Cuda* passed23, no failures/skips.
+New512query/4096key/width40 regression exactly matches original serial all-visible
+causal reference. Observed278.9792ms old versus32.5511ms new in this test, with
+concurrent GPU generation: diagnostic only, not an uncontended benchmark. Existing
+GQA,batch,IEEE,slices,width40/80/160,Candle U-Net/VAE and pipeline tests all pass.
+
+Original512x512/20step SD1.5 run remains active, session11471 actual Java33796,
+wrapper508. Step3/20 received; latest working set~9.7GB. Its loaded original
+attention entry remains compatible; do not restart because observation times out.
+Poll existing handle and .superpowers/sd15-512-20/protocol.jsonl. Full image is
+still pending. Future performance measurement must run without concurrent GPU
+tests. New implementation jars were rebuilt by model tests, while old process
+retains old loaded CudaSession semantics. NUI unchanged; full goal still open.
 ## Parallel attention weighted outputs (2026-11-03)
 
 Added attention_prepare / attention_output PTX entries for noncausal attention.
