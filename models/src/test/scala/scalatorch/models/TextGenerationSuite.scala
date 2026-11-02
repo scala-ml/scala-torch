@@ -21,6 +21,9 @@ class TextGenerationSuite extends FunSuite:
     val model = LlamaModel.init(config, 1, trainable=false)
     val result = TextGeneration.generate(model,tokenizer,"Hi",2)
     assertEquals(result.ids, Vector(0L,0L))
+    val sampled = TextGeneration.generate(model,tokenizer,"Hi",2,SamplingConfig(temperature=1,topK=2,seed=42))
+    assertEquals(sampled.ids,Vector(1L,1L))
+    assertEquals(sampled.text,"\u0000\u0000")
     assertEquals(result.text, "") // ID0 is special and skipped by decode.
     assertEquals(TextGeneration.generate(model,tokenizer,"Hi",0), GeneratedText(Vector.empty,""))
     intercept[IllegalArgumentException](TextGeneration.generate(model,tokenizer,"",1))

@@ -58,4 +58,10 @@ class SmolLlamaSuite extends FunSuite:
     assertEquals(generated.ids,expectedIds)
     assertEquals(generated.text,new String(resource("text.txt"),java.nio.charset.StandardCharsets.UTF_8))
     assert(generated.text.contains("Paris"))
+    val policy = SamplingConfig(temperature=0.7,topK=20,topP=0.9,seed=42)
+    val sampled = TextGeneration.generate(model,tokenizer,prompt,12,policy)
+    assertEquals(sampled,TextGeneration.generate(model,tokenizer,prompt,12,policy))
+    assert(sampled.ids.nonEmpty && sampled.ids.size <= 12)
+    assert(sampled.ids.forall(id => id >= 0 && id < model.config.vocabSize))
+    println(s"SmolLM2 seeded sample IDs=${sampled.ids.mkString(",")} text=${sampled.text}")
   }

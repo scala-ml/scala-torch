@@ -3,12 +3,13 @@ package scalatorch.models
 final case class GeneratedText(ids: Vector[Long], text: String)
 
 object TextGeneration:
-  /** Greedy continuation; the caller supplies any desired chat template or special tokens. */
-  def generate(model: LlamaModel, tokenizer: ByteBpeTokenizer, prompt: String, maxNewTokens: Int): GeneratedText =
+  /** Generated continuation; the caller supplies any desired chat template or special tokens. */
+  def generate(model: LlamaModel, tokenizer: ByteBpeTokenizer, prompt: String, maxNewTokens: Int,
+      sampling: SamplingConfig = SamplingConfig()): GeneratedText =
     require(tokenizer.vocabSize == model.config.vocabSize, "tokenizer/model vocabulary size mismatch")
     val input = tokenizer.encode(prompt).toVector
     require(input.nonEmpty, "prompt must encode to at least one token")
-    val continuation = model.generateIds(input, maxNewTokens).drop(input.size)
+    val continuation = model.generateIds(input, maxNewTokens, sampling=sampling).drop(input.size)
     GeneratedText(continuation, tokenizer.decode(continuation.toArray))
 
 final case class ChatMessage(role: String, content: String)

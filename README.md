@@ -20,7 +20,7 @@ Safetensors archives can now be indexed and read without Python: F16/BF16/F32→
 
 Differentiable causal grouped-query attention and Llama-style RoPE are available on rank-4 `(batch, heads, tokens, width)` Variables. Attention supports query position offsets for decode chunks and a configurable score-workspace limit. Numerical gradient and masking tests cover these operations.
 
-Not implemented yet: a persistent GPU Tensor backend, cuBLAS acceleration, sharded weights, broader tokenizer/config variants, stochastic sampling, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
+Not implemented yet: a persistent GPU Tensor backend, cuBLAS acceleration, sharded weights, broader tokenizer/config variants, LoRA tuning, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
 
 ```sh
 sbt 'core / Test / testOnly scalatorch.*'
@@ -153,3 +153,12 @@ sbt -batch ';set models / Compile / run / javaOptions += "-Xmx3g";models / Compi
 ```
 
 Verified output: `The capital of France is Paris.` Omit `--smollm-chat` for raw prompt mode. This flag explicitly chooses the pinned SmolLM2 template; arbitrary model chat templates are not interpreted. The CLI prints only the continuation. See [trained-model evidence and public test](docs/research/trained-text-generation.md).
+
+Seeded sampling is available through the Scala API:
+
+```scala
+val policy = scalatorch.models.SamplingConfig(temperature=0.7,topK=20,topP=0.9,seed=42)
+val generated = model.generateIds(promptIds,32,sampling=policy)
+```
+
+Temperature0 keeps the default greedy behavior. [Sampling semantics and tests](docs/research/token-sampling.md) cover temperature, top-k/top-p ordering, numerical boundaries and seed replay.

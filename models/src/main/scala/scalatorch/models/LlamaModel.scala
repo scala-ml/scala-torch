@@ -65,11 +65,13 @@ final case class LlamaModel(config: LlamaConfig, embedding: Embedding, layers: V
   def logits(tokens: Tensor[Long]): Tensor[Float] = Autograd.noGrad { forward(tokens).data }
   def newCache(batchSize: Int = 1, capacity: Int = config.maxPositions, maxBytes: Long = 268435456L): LlamaCache =
     new LlamaCache(this,batchSize,capacity,maxBytes)
-  def generateIds(prompt: Seq[Long], maxNewTokens: Int, useCache: Boolean = true): Vector[Long] =
+  def generateIds(prompt: Seq[Long], maxNewTokens: Int, useCache: Boolean = true,
+      sampling: SamplingConfig = SamplingConfig()): Vector[Long] =
     require(prompt.nonEmpty && maxNewTokens >= 0 && prompt.length.toLong + maxNewTokens <= config.maxPositions, "invalid generation length")
     require(prompt.forall(id => id >= 0 && id < config.vocabSize), "generation token outside vocabulary")
     var ids = prompt.toVector
     if maxNewTokens == 0 then return ids
+    val sampler = new TokenSampler(sampling)
     var generated = 0
     var stopped = false
     val cache = if useCache then Some(newCache(capacity=prompt.length+maxNewTokens)) else None
@@ -79,8 +81,7 @@ final case class LlamaModel(config: LlamaConfig, embedding: Embedding, layers: V
         val input = Tensor.fromLongs(chunk, Shape.from(Seq(1L,chunk.length.toLong)))
         val result = cache.fold(logits(input))(_.decode(input))
         val scores = result.slice(1,chunk.length-1L,chunk.length.toLong).toFloatArray
-        require(scores.forall(_.isFinite), "nonfinite generation logits")
-        val next = scores.indices.maxBy(scores).toLong
+        val next = sampler.sample(scores)
         ids = ids :+ next
         generated += 1
         stopped = config.eosTokenIds.contains(next)

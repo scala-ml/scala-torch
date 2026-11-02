@@ -18,4 +18,4 @@ Run the trained-model gate:
 sbt -batch ';set models / Test / javaOptions ++= Seq("-Xmx3g", "-Dscalatorch.smollm.model.dir=/absolute/path/to/smollm2-135m");models / Test / testOnly scalatorch.models.SmolLlamaSuite scalatorch.models.TextGenerationSuite'
 ```
 
-The model/tokenizer gate is optional in default tests and explicitly enabled during full verification. This is CPU reference inference, not a benchmark or GPU model backend. Stochastic sampling, generalized chat/tokenizer variants, model download management, sharded weights, LoRA, large-model memory planning, diffusion and the NUI migration remain open.
+The model/tokenizer gate is optional in default tests and explicitly enabled during full verification. This is CPU reference inference, not a benchmark or GPU model backend. [Seeded sampling](token-sampling.md) is now available through the Scala API. Generalized chat/tokenizer variants, model download management, sharded weights, LoRA, large-model memory planning, diffusion and the NUI migration remain open.
