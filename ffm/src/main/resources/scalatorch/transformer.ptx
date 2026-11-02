@@ -546,10 +546,10 @@ DONE:
  .param .u64 query, .param .u64 key, .param .u64 value, .param .u64 out, .param .u64 scores,
  .param .u32 rows, .param .u32 heads, .param .u32 kvheads, .param .u32 qtokens,
  .param .u32 ktokens, .param .u32 width, .param .u32 vwidth, .param .u32 start, .param .u32 storageTokens,
- .param .f64 forward_attention_scale
+ .param .f64 forward_attention_scale, .param .u32 forward_causal
 ) {
  .reg .pred p,pnan,pnew;
- .reg .b32 r<28>;
+ .reg .b32 r<29>;
  .reg .b64 d<12>;
  .reg .f32 f<4>;
  .reg .f64 g<9>;
@@ -558,6 +558,7 @@ DONE:
  ld.param.u32 r0,[rows]; ld.param.u32 r1,[heads]; ld.param.u32 r2,[kvheads];
  ld.param.u32 r3,[qtokens]; ld.param.u32 r4,[ktokens]; ld.param.u32 r5,[width];
  ld.param.u32 r6,[vwidth]; ld.param.u32 r7,[start]; ld.param.u32 r27,[storageTokens]; ld.param.f64 g0,[forward_attention_scale];
+ ld.param.u32 r28,[forward_causal];
  mov.u32 r8,%tid.x; mov.u32 r9,%ctaid.x; mov.u32 r10,%ntid.x;
  mad.lo.u32 r11,r9,r10,r8;
  setp.ge.u32 p,r11,r0; @p bra DONE;
@@ -566,6 +567,7 @@ DONE:
  div.u32 r16,r1,r2; div.u32 r13,r13,r16;
  mad.lo.u32 r17,r14,r2,r13; mul.lo.u32 r17,r17,r27;
  add.u32 r18,r7,r12; add.u32 r18,r18,1; min.u32 r18,r18,r4;
+ setp.eq.u32 p,r28,0; @p mov.u32 r18,r4;
  mul.lo.u32 r21,r11,r5; mul.lo.u32 r24,r11,r4;
  mov.u32 r19,0; mov.f64 g1,0dFFF0000000000000; setp.ne.u32 pnan,r0,r0;
 SCORES:

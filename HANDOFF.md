@@ -1,3 +1,16 @@
+## Resident CUDA noncausal attention (2026-11-03)
+
+CudaSession.scaledDotProductAttention supports noncausal self/cross attention,
+grouped query heads, unequal query/key token counts and value widths. Shared PTX
+attention now receives an explicit causal flag; existing causal and KV-cache
+callers retain causal behavior. Activations and scores stay on device.
+
+SCALATORCH_CUDA_TESTS=1 sbt "ffm/testOnly *": all45 passed on the actual GPU.
+Two new tests compare CPU full-key references, prove future keys participate,
+check future NaN propagation, empty batches, score limits and allocation cleanup.
+Existing causal/cache/backward tests also pass with the changed kernel signature.
+Scores still require quadratic Double workspace; this is not memory-efficient
+attention or end-to-end GPU diffusion. Model composition remains outstanding.
 ## Resident CUDA GroupNorm/LayerNorm (2026-11-03)
 
 CudaSession.groupNorm supports (N,C,...) groups with independently optional

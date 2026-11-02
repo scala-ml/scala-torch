@@ -252,8 +252,15 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     AttentionLayout.validate(query.shape,key.shape,value.shape,queryStart,maxScoreElements)
     attentionFromStorage(query,key,value,queryStart,key.shape.dims(2),key.shape.dims(2),maxScoreElements)
 
+  /** Noncausal self/cross-attention, including grouped query heads and unequal token counts. */
+  def scaledDotProductAttention(query: CudaTensor,key: CudaTensor,value: CudaTensor,
+      maxScoreElements: Long=16777216L): CudaTensor =
+    validate(query);validate(key);validate(value)
+    AttentionLayout.validate(query.shape,key.shape,value.shape,0,maxScoreElements)
+    attentionFromStorage(query,key,value,0,key.shape.dims(2),key.shape.dims(2),maxScoreElements,causal=false)
+
   private def attentionFromStorage(query: CudaTensor,key: CudaTensor,value: CudaTensor,queryStart: Int,
-      tokens: Long,storageTokens: Long,maxScores: Long): CudaTensor =
+      tokens: Long,storageTokens: Long,maxScores: Long,causal: Boolean=true): CudaTensor =
     val keyShape=Shape.from(key.shape.dims.updated(2,tokens))
     val valueShape=Shape.from(value.shape.dims.updated(2,tokens))
     val (output,scores)=AttentionLayout.validate(query.shape,keyShape,valueShape,queryStart,maxScores)
@@ -265,7 +272,8 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       execute(output,rows,kernels("attention")) { (arena,result) =>
         Seq(query.address,key.address,value.address,result.address,scratch.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
           Seq(rows,q(1),k(1),q(2),k(2),q(3),v(3),queryStart.toLong,storageTokens).map(x => arena.allocateFrom(JAVA_INT,x.toInt)) :+
-          arena.allocateFrom(JAVA_DOUBLE,1.0/math.sqrt(q(3).toDouble))
+          arena.allocateFrom(JAVA_DOUBLE,1.0/math.sqrt(q(3).toDouble)) :+
+          arena.allocateFrom(JAVA_INT,if causal then 1 else 0)
       }
     }
 
