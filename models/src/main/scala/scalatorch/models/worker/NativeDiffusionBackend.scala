@@ -37,7 +37,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
       finally input.close()
     }
     java.util.HexFormat.of().formatHex(digest.digest())
-  val supported=Set("load_model","unload","txt2img","list_models","list_samplers")
+  val supported=Set("load_model","unload","txt2img","list_models","list_samplers","list_files")
   private def unsupported(message: String): Nothing=throw new NativeBackendError("unsupported",message)
   private def keys(p: Map[String,NativeJson],allowed: Set[String]): Unit=
     val unknown=p.keySet--allowed
@@ -59,6 +59,15 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
     val p=request.params
     context.checkCancelled()
     request.kind match
+      case "list_files" =>
+        keys(p,Set("kind","dirs"))
+        val dirs=p.get("dirs") match
+          case Some(Arr(values)) => values.map {
+            case Str(path) => path
+            case _ => throw IllegalArgumentException("dirs must contain strings")
+          }
+          case _ => throw IllegalArgumentException("dirs must be an array")
+        Map("files"->Arr(NativeFileCatalog.scan(str(p,"kind",""),dirs,() => context.checkCancelled())))
       case "list_models" =>
         keys(p,Set("dirs"))
         val directories=p.get("dirs") match

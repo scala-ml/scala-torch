@@ -1,3 +1,20 @@
+## Native auxiliary file catalogs (2026-11-03)
+
+NativeFileCatalog and list_files handle NUI file kinds vae/lora/controlnet/embeddings/
+upscalers/face_restore/svd/zero123/photomaker. Scan recursively, filter standard weight
+extensions case-insensitively, skip hidden directories, deduplicate real paths,
+collapse ControlNet config.json and SVD/Zero123 model_index.json child folders,
+and return relative names/absolute paths/rounded MiB sizes. No symlinks followed
+(including file links, a deliberate current limitation vs Python file-link behavior).
+Traversal/results bounded; cancellation checked during scan and directory size walks.
+Discovery does not imply native application of those extensions is implemented.
+
+Catalog unit and existing backend suites: 3 passed. NUI NativeScalaEngineSuite
+now calls real client.listFiles for VAE and client.systemStatus, then load/generate/
+preview/unload; passed in 17.034 seconds on the native branch. NUI sbt server is
+currently active with native integration variables, no SDFX native launch env set.
+Full migration remains incomplete; actual desktop interaction, normal models and
+GPU execution, full plugins and production packaging still need implementation.
 ## Native system status (2026-11-03)
 
 system_status is now an immediate reader-thread control in NativeWorker. Backend
