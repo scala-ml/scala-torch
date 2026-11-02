@@ -4,6 +4,8 @@ Deep learning in Scala 3, targeting Java 25 and Python-free LLMs, training, and 
 
 Requires **Java 25, Scala 3.3.8 LTS, sbt 2.0.10**. Versions are pinned in the build.
 
+The 0.1.0 distribution is being prepared; it is **not yet published to Maven Central**. See [publishing status and artifact coordinates](docs/PUBLISHING.md), [release scope](docs/releases/0.1.0.md), and the [standalone consumer](examples/consumer).
+
 Published Llama checkpoint inference now runs in Scala: standard config + single-file/indexed safetensors loading, differentiable model composition, persistent CPU KV cache, and greedy token-ID generation. The public tiny-random Llama matches 128000 independent Rust Candle logits with maximum absolute error `5.96e-8`; cached chunks also match that reference. This verifies architecture interoperability; the random checkpoint is not a useful language model. A native byte-level BPE tokenizer now matches the pinned SmolLM2 tokenizer reference. The trained SmolLM2-135M-Instruct model now generates text offline, matching independent Candle logits and greedy output.
 
 Published conditional U-Net loading now runs on CPU: `PretrainedUNet.load(path)` reads Diffusers config and safetensors directly, freezes parameters by default and supports opt-in training. The pinned tiny-sd-pipe U-Net matches three independent Rust reference cases within `2.33e-6` maximum absolute error. The [reference notes](docs/research/pretrained-unet.md) record Candle0.9.1's explicit erf-GELU correction and checkpoint hashes. This is U-Net interoperability; complete image generation and NUI migration still require prompt tokenization, VAE and schedulers.
