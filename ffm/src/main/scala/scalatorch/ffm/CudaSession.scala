@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("resize_nearest","groupnorm","conv2d","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
+  private val kernels=Seq("concat_copy","resize_nearest","groupnorm","conv2d","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -351,6 +351,33 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
             Using.Manager { use => use(keys);use(values);() }.get
     catch case error: Throwable =>
       try keys.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
+  /** Concatenate packed tensors on any axis, retaining no input handles. */
+  def cat(inputs: Seq[CudaTensor],dim: Int): CudaTensor =
+    check()
+    val values=inputs.toVector
+    values.foreach(validate)
+    val output=ConcatLayout.outputShape(values.map(_.shape),dim)
+    val result=allocate(output)
+    try
+      if output.numel>0 then
+        val suffix=Shape.from(output.dims.drop(dim+1)).numel
+        val rowWidth=output.dims(dim)*suffix
+        var offset=0L
+        values.foreach { value =>
+          val chunk=value.shape.dims(dim)*suffix
+          if value.shape.numel>0 then
+            launch(value.shape.numel,kernels("concat_copy")) { arena =>
+              Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+                Seq(value.shape.numel.toInt,chunk.toInt,rowWidth.toInt,offset.toInt)
+                  .map(v => arena.allocateFrom(JAVA_INT,v))
+            }
+          offset+=chunk
+        }
+      result
+    catch case error: Throwable =>
+      try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
 
   /** Packed NCHW nearest resize; copies Float32 bits without arithmetic on values. */

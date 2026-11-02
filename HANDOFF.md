@@ -1,3 +1,19 @@
+## Resident CUDA concatenation and skip connection (2026-11-03)
+
+CudaSession.cat joins packed tensors along any axis with one output allocation,
+no scratch and one raw-bit copy kernel per nonempty input. Shape validation is
+shared with CPU autograd via ConcatLayout; repeated inputs and empty tensors are
+supported, including empty shapes with Long-sized dimensions. Input handles are
+not retained; output survives their closure. Invalid shape, sum overflow and
+budget failures leave inputs and allocation accounting intact.
+
+Actual GPU autograd/testOnly *ConcatSuite passed5 (new CUDA3, existing CPU2).
+New tests directly compare CPU Variable.cat for all axes of ranks1/2/4, unequal
+axis widths, empty/repeated inputs, strided uploads and IEEE payloads. A composed
+resize -> skip concat -> GroupNorm -> convolution chain matches CPU bit-for-bit,
+with only the final output downloaded. ffm/testOnly * passed all48 regressions.
+This does not yet connect the loaded diffusion graph to GPU inference; model
+composition, missing operations and memory planning remain active work.
 ## Resident CUDA nearest resize (2026-11-03)
 
 CudaSession.resizeNearest2d implements NCHW Floor and Exact nearest resize,

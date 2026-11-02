@@ -3,6 +3,27 @@
 .target sm_50
 .address_size 64
 
+.visible .entry concat_copy(
+ .param .u64 input, .param .u64 output, .param .u32 count,
+ .param .u32 chunk, .param .u32 row_width, .param .u32 offset
+) {
+ .reg .pred p;
+ .reg .b32 r<10>;
+ .reg .b64 d<4>;
+ ld.param.u64 d0,[input]; ld.param.u64 d1,[output];
+ ld.param.u32 r0,[count]; ld.param.u32 r1,[chunk];
+ ld.param.u32 r2,[row_width]; ld.param.u32 r3,[offset];
+ mov.u32 r4,%ctaid.x; mov.u32 r5,%ntid.x; mov.u32 r6,%tid.x;
+ mad.lo.u32 r4,r4,r5,r6;
+ setp.ge.u32 p,r4,r0; @p bra DONE;
+ div.u32 r5,r4,r1; rem.u32 r6,r4,r1;
+ mad.lo.u32 r7,r5,r2,r6; add.u32 r7,r7,r3;
+ mul.wide.u32 d2,r4,4; add.u64 d2,d0,d2;
+ mul.wide.u32 d3,r7,4; add.u64 d3,d1,d3;
+ ld.global.u32 r8,[d2]; st.global.u32 [d3],r8;
+DONE: ret;
+}
+
 .visible .entry resize_nearest(
  .param .u64 input, .param .u64 output, .param .u32 count,
  .param .u32 ih, .param .u32 iw, .param .u32 oh, .param .u32 ow, .param .u32 exact
