@@ -3,7 +3,12 @@ package scalatorch.cpu
 import scalatorch.*
 
 /** Immutable CPU Float32 inference backend; release is a no-op for GC-owned storage. */
-object CpuFloatBackend extends FloatBackend[Tensor[Float]]:
+object CpuFloatBackend extends TrainingBackend[Tensor[Float]]:
+  def siluBackward(value: Tensor[Float],gradient: Tensor[Float]): Tensor[Float] = CpuBackward.silu(value,gradient)
+  def rmsNormInputBackward(value: Tensor[Float],weight: Tensor[Float],gradient: Tensor[Float],epsilon: Double = 1e-6): Tensor[Float] =
+    CpuBackward.rmsInput(value,weight,gradient,epsilon)
+  def rmsNormWeightBackward(value: Tensor[Float],gradient: Tensor[Float],epsilon: Double = 1e-6): Tensor[Float] =
+    CpuBackward.rmsWeight(value,gradient,epsilon)
   def fill(shape: Shape,value: Float): Tensor[Float] =
     require(shape.numel<=Int.MaxValue,"fill exceeds Int indexing")
     Tensor.fromFloats(Array.fill(shape.numel.toInt)(value),shape)

@@ -94,13 +94,14 @@ DONE:
  ret;
 }
 
-.visible .entry silu(.param .u64 a, .param .u64 out, .param .u32 count) {
+.visible .entry silu(.param .u64 a, .param .u64 out, .param .u32 count, .param .u64 upstream, .param .u32 backward) {
  .reg .pred p;
- .reg .b32 r<8>;
- .reg .b64 d<7>;
+ .reg .b32 r<9>;
+ .reg .b64 d<9>;
  .reg .f32 f<5>;
  .reg .f64 g<8>;
  ld.param.u64 d0,[a]; ld.param.u64 d1,[out]; ld.param.u32 r0,[count];
+ ld.param.u64 d7,[upstream]; ld.param.u32 r8,[backward];
  mov.u32 r1,%tid.x; mov.u32 r2,%ctaid.x; mov.u32 r3,%ntid.x;
  mad.lo.u32 r4,r2,r3,r1;
  setp.ge.u32 p,r4,r0; @p bra DONE;
@@ -147,13 +148,126 @@ SIGMOID:
 NEGATIVE:
  div.rn.f64 g6,g4,g5;
 PRODUCT:
+ setp.ne.u32 p,r8,0; @p bra DERIVATIVE;
  mul.rn.f64 g7,g0,g6; cvt.rn.f32.f64 f4,g7; bra STORE;
+DERIVATIVE:
+ setp.eq.f64 p,g6,0d0000000000000000; @p bra GRAD_ZERO;
+ setp.eq.f64 p,g6,0d3FF0000000000000; @p bra UPSTREAM;
+ sub.rn.f64 g7,0d3FF0000000000000,g6;
+ mul.rn.f64 g7,g0,g7; add.rn.f64 g7,g7,0d3FF0000000000000;
+ mul.rn.f64 g6,g6,g7;
+ setp.eq.f64 p,g6,0d0000000000000000; @p bra GRAD_ZERO;
+UPSTREAM:
+ add.u64 d8,d7,d2; ld.global.f32 f1,[d8]; cvt.f64.f32 g7,f1;
+ mul.rn.f64 g7,g7,g6; cvt.rn.f32.f64 f4,g7; bra STORE;
+GRAD_ZERO:
+ mov.f32 f4,0f00000000; bra STORE;
 NAN_VALUE:
  mov.f32 f4,f0; bra STORE;
 NEG_INF:
+ setp.ne.u32 p,r8,0; @p bra GRAD_ZERO;
  mov.f32 f4,0f80000000;
 STORE:
  st.global.f32 [d4],f4;
+DONE:
+ ret;
+}
+
+.visible .entry rms_input_backward(
+ .param .u64 x, .param .u64 weight, .param .u64 upstream, .param .u64 out,
+ .param .u32 rows, .param .u32 width, .param .f64 epsilon
+) {
+ .reg .pred p;
+ .reg .b32 r<9>;
+ .reg .b64 d<9>;
+ .reg .f32 f<3>;
+ .reg .f64 g<10>;
+ ld.param.u64 d0,[x]; ld.param.u64 d1,[weight]; ld.param.u64 d2,[upstream]; ld.param.u64 d3,[out];
+ ld.param.u32 r0,[rows]; ld.param.u32 r1,[width]; ld.param.f64 g0,[epsilon];
+ mov.u32 r2,%tid.x; mov.u32 r3,%ctaid.x; mov.u32 r4,%ntid.x;
+ mad.lo.u32 r5,r3,r4,r2; setp.ge.u32 p,r5,r0; @p bra DONE;
+ mul.lo.u32 r6,r5,r1; mov.u32 r7,0; mov.f64 g1,0d0000000000000000;
+SQUARES:
+ setp.ge.u32 p,r7,r1; @p bra INVERSE;
+ add.u32 r8,r6,r7; mul.wide.u32 d4,r8,4; add.u64 d5,d0,d4;
+ ld.global.f32 f0,[d5]; cvt.f64.f32 g2,f0; mul.rn.f64 g3,g2,g2; add.rn.f64 g1,g1,g3;
+ add.u32 r7,r7,1; bra SQUARES;
+INVERSE:
+ cvt.rn.f64.u32 g8,r1; div.rn.f64 g1,g1,g8; add.rn.f64 g1,g1,g0;
+ sqrt.rn.f64 g1,g1; div.rn.f64 g4,0d3FF0000000000000,g1;
+ mov.u32 r7,0; mov.f64 g5,0d0000000000000000;
+DOT:
+ setp.ge.u32 p,r7,r1; @p bra OUTPUT_START;
+ add.u32 r8,r6,r7; mul.wide.u32 d4,r8,4; add.u64 d5,d0,d4; add.u64 d6,d2,d4;
+ mul.wide.u32 d4,r7,4; add.u64 d7,d1,d4;
+ ld.global.f32 f0,[d5]; ld.global.f32 f1,[d6]; ld.global.f32 f2,[d7];
+ cvt.f64.f32 g2,f0; cvt.f64.f32 g6,f1; cvt.f64.f32 g7,f2;
+ mul.rn.f64 g6,g6,g7; mul.rn.f64 g6,g6,g2; mul.rn.f64 g6,g6,g4;
+ add.rn.f64 g5,g5,g6; add.u32 r7,r7,1; bra DOT;
+OUTPUT_START:
+ mov.u32 r7,0;
+OUTPUT:
+ setp.ge.u32 p,r7,r1; @p bra DONE;
+ add.u32 r8,r6,r7; mul.wide.u32 d4,r8,4;
+ add.u64 d5,d0,d4; add.u64 d6,d2,d4; add.u64 d8,d3,d4;
+ mul.wide.u32 d4,r7,4; add.u64 d7,d1,d4;
+ ld.global.f32 f0,[d5]; ld.global.f32 f1,[d6]; ld.global.f32 f2,[d7];
+ cvt.f64.f32 g2,f0; cvt.f64.f32 g6,f1; cvt.f64.f32 g7,f2;
+ mul.rn.f64 g6,g6,g7; mul.rn.f64 g2,g2,g4; mul.rn.f64 g2,g2,g5;
+ div.rn.f64 g2,g2,g8; sub.rn.f64 g9,g6,g2; mul.rn.f64 g9,g4,g9;
+ cvt.rn.f32.f64 f0,g9; st.global.f32 [d8],f0;
+ add.u32 r7,r7,1; bra OUTPUT;
+DONE:
+ ret;
+}
+
+.visible .entry rms_inverse(.param .u64 x, .param .u64 out,
+ .param .u32 rows, .param .u32 width, .param .f64 epsilon) {
+ .reg .pred p;
+ .reg .b32 r<9>;
+ .reg .b64 d<4>;
+ .reg .f32 f;
+ .reg .f64 g<4>;
+ ld.param.u64 d0,[x]; ld.param.u64 d1,[out];
+ ld.param.u32 r0,[rows]; ld.param.u32 r1,[width]; ld.param.f64 g0,[epsilon];
+ mov.u32 r2,%tid.x; mov.u32 r3,%ctaid.x; mov.u32 r4,%ntid.x;
+ mad.lo.u32 r5,r3,r4,r2; setp.ge.u32 p,r5,r0; @p bra DONE;
+ mul.lo.u32 r6,r5,r1; mov.u32 r7,0; mov.f64 g1,0d0000000000000000;
+SQUARES:
+ setp.ge.u32 p,r7,r1; @p bra INVERSE;
+ add.u32 r8,r6,r7; mul.wide.u32 d2,r8,4; add.u64 d3,d0,d2;
+ ld.global.f32 f,[d3]; cvt.f64.f32 g2,f; mul.rn.f64 g2,g2,g2; add.rn.f64 g1,g1,g2;
+ add.u32 r7,r7,1; bra SQUARES;
+INVERSE:
+ cvt.rn.f64.u32 g3,r1; div.rn.f64 g1,g1,g3; add.rn.f64 g1,g1,g0;
+ sqrt.rn.f64 g1,g1; div.rn.f64 g1,0d3FF0000000000000,g1;
+ mul.wide.u32 d2,r5,8; add.u64 d3,d1,d2; st.global.f64 [d3],g1;
+DONE:
+ ret;
+}
+
+.visible .entry rms_weight_backward(.param .u64 x, .param .u64 upstream, .param .u64 inverse, .param .u64 out,
+ .param .u32 rows, .param .u32 width) {
+ .reg .pred p;
+ .reg .b32 r<8>;
+ .reg .b64 d<8>;
+ .reg .f32 f<2>;
+ .reg .f64 g<4>;
+ ld.param.u64 d0,[x]; ld.param.u64 d1,[upstream]; ld.param.u64 d2,[inverse]; ld.param.u64 d3,[out];
+ ld.param.u32 r0,[rows]; ld.param.u32 r1,[width];
+ mov.u32 r2,%tid.x; mov.u32 r3,%ctaid.x; mov.u32 r4,%ntid.x;
+ mad.lo.u32 r5,r3,r4,r2; setp.ge.u32 p,r5,r1; @p bra DONE;
+ mov.u32 r6,0; mov.f64 g3,0d0000000000000000;
+REDUCE:
+ setp.ge.u32 p,r6,r0; @p bra STORE;
+ mad.lo.u32 r7,r6,r1,r5; mul.wide.u32 d4,r7,4; add.u64 d5,d0,d4; add.u64 d6,d1,d4;
+ mul.wide.u32 d4,r6,8; add.u64 d7,d2,d4;
+ ld.global.f32 f0,[d5]; ld.global.f32 f1,[d6]; ld.global.f64 g2,[d7];
+ cvt.f64.f32 g0,f1; cvt.f64.f32 g1,f0;
+ mul.rn.f64 g0,g0,g1; mul.rn.f64 g0,g0,g2; add.rn.f64 g3,g3,g0;
+ add.u32 r6,r6,1; bra REDUCE;
+STORE:
+ mul.wide.u32 d4,r5,4; add.u64 d5,d3,d4; cvt.rn.f32.f64 f0,g3; st.global.f32 [d5],f0;
 DONE:
  ret;
 }

@@ -21,7 +21,7 @@ final class CudaTensor private[ffm] (private[ffm] val session: CudaSession,
 
 /** Thread-confined device storage and synchronous packed GEMM execution. */
 final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
-    val deviceName: String, val driverVersion: Int, val maxBytes: Long) extends FloatBackend[CudaTensor]:
+    val deviceName: String, val driverVersion: Int, val maxBytes: Long) extends TrainingBackend[CudaTensor]:
   private val owner=Thread.currentThread()
   private var closed=false
   private var used=0L
@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("binary","scale","fill","sum","expand_scalar","silu","rmsnorm","transpose","embedding","rope","attention","cache_append").map { name =>
+  private val kernels=Seq("binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","rope","attention","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -276,8 +276,43 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   def silu(value: CudaTensor): CudaTensor =
     validate(value)
     execute(value.shape,value.shape.numel,kernels("silu")) { (arena,result) =>
-      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) :+
-        arena.allocateFrom(JAVA_INT,value.shape.numel.toInt)
+      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+        Seq(arena.allocateFrom(JAVA_INT,value.shape.numel.toInt),arena.allocateFrom(JAVA_LONG,0L),arena.allocateFrom(JAVA_INT,0))
+    }
+  def siluBackward(value: CudaTensor,gradient: CudaTensor): CudaTensor =
+    validate(value);validate(gradient)
+    require(value.shape==gradient.shape,"SiLU gradient shape mismatch")
+    execute(value.shape,value.shape.numel,kernels("silu")) { (arena,result) =>
+      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+        Seq(arena.allocateFrom(JAVA_INT,value.shape.numel.toInt),arena.allocateFrom(JAVA_LONG,gradient.address),arena.allocateFrom(JAVA_INT,1))
+    }
+  private def rmsBackwardDimensions(value: CudaTensor,gradient: CudaTensor,epsilon: Double): (Long,Long) =
+    validate(value);validate(gradient)
+    require(value.shape==gradient.shape,"RMSNorm gradient shape mismatch")
+    require(epsilon.isFinite && epsilon>0,"invalid RMSNorm epsilon")
+    require(value.shape.rank>0 && value.shape.dims.last>0 && value.shape.dims.last<=Int.MaxValue,"invalid RMSNorm width")
+    val width=value.shape.dims.last
+    (width,value.shape.numel/width)
+  def rmsNormInputBackward(value: CudaTensor,weight: CudaTensor,gradient: CudaTensor,epsilon: Double = 1e-6): CudaTensor =
+    val (width,rows)=rmsBackwardDimensions(value,gradient,epsilon)
+    validate(weight)
+    require(weight.shape==Shape.from(Seq(width)),"RMSNorm weight shape mismatch")
+    execute(value.shape,rows,kernels("rms_input_backward")) { (arena,result) =>
+      Seq(value.address,weight.address,gradient.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+        Seq(rows.toInt,width.toInt).map(v => arena.allocateFrom(JAVA_INT,v)) :+ arena.allocateFrom(JAVA_DOUBLE,epsilon)
+    }
+  def rmsNormWeightBackward(value: CudaTensor,gradient: CudaTensor,epsilon: Double = 1e-6): CudaTensor =
+    val (width,rows)=rmsBackwardDimensions(value,gradient,epsilon)
+    // Private scratch stores one Double inverse per row in two Float32-sized slots.
+    val inverse=execute(Shape.from(Seq(rows,2L)),rows,kernels("rms_inverse")) { (arena,result) =>
+      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+        Seq(rows.toInt,width.toInt).map(v => arena.allocateFrom(JAVA_INT,v)) :+ arena.allocateFrom(JAVA_DOUBLE,epsilon)
+    }
+    Using.resource(inverse) { _ =>
+      execute(Shape.from(Seq(width)),width,kernels("rms_weight_backward")) { (arena,result) =>
+        Seq(value.address,gradient.address,inverse.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+          Seq(rows.toInt,width.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
+      }
     }
   def rmsNorm(value: CudaTensor,weight: CudaTensor,epsilon: Double = 1e-6): CudaTensor =
     validate(value);validate(weight)

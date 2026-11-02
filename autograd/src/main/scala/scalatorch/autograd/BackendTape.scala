@@ -8,7 +8,7 @@ import scala.util.Using
   * Graph values and leaf gradients live until close; use a fresh tape per training step.
   * No implicit transfers, broadcasting, mutation, or higher-order gradients.
   */
-final class BackendTape[T](val backend: FloatBackend[T]) extends AutoCloseable:
+final class BackendTape[T](val backend: TrainingBackend[T]) extends AutoCloseable:
   private val thread=Thread.currentThread()
   private var closed=false
   private val nodes=mutable.ArrayBuffer.empty[Value]
@@ -59,6 +59,10 @@ final class BackendTape[T](val backend: FloatBackend[T]) extends AutoCloseable:
       this -> ((g,_) => backend.multiply(g,other.data)),other -> ((g,_) => backend.multiply(g,data))))
     def *(scalar: Float): Value = result(backend.scale(data,scalar),Vector(this -> ((g,_) => backend.scale(g,scalar))))
     def -(other: Value): Value = this + other * -1f
+    def silu(): Value = result(backend.silu(data),Vector(this -> ((g,_) => backend.siluBackward(data,g))))
+    def rmsNorm(weight: Value,epsilon: Double = 1e-6): Value = result(backend.rmsNorm(data,weight.data,epsilon),Vector(
+      this -> ((g,_) => backend.rmsNormInputBackward(data,weight.data,g,epsilon)),
+      weight -> ((g,_) => backend.rmsNormWeightBackward(data,g,epsilon))))
     def matmul(other: Value): Value = result(backend.matmul(data,other.data),Vector(
       this -> ((g,s) => backend.matmul(g,s.keep(backend.transpose(other.data,0,1)))),
       other -> ((g,s) => backend.matmul(s.keep(backend.transpose(data,0,1)),g))))

@@ -30,7 +30,7 @@ class BackendTapeSuite extends munit.FunSuite:
     }
   }
   private def tensor(values: Array[Float],dims: Long*)=Tensor.fromFloats(values,Shape.from(dims))
-  private def checkGradients[T](backend: FloatBackend[T]): Unit =
+  private def checkGradients[T](backend: TrainingBackend[T]): Unit =
     val source=tensor(Array(.2f,-.4f,.6f,.8f,-.3f,.1f),2,3)
     val weights=tensor(Array(.5f,-.2f,.3f,.7f,-.6f,.4f),3,2)
     val x=backend.upload(source);val w=backend.upload(weights)
