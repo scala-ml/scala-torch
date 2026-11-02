@@ -12,6 +12,8 @@ Published conditional U-Net loading now runs on CPU: `PretrainedUNet.load(path)`
 
 [CLIP text conditioning](docs/research/clip-text.md) now loads public single/indexed safetensors and returns differentiable per-token features. It supports causal attention, learned positions, explicit earlier-layer selection and QuickGELU/erf/tanh GELU. Five independent Rust reference cases agree within `1.55e-6`; the frozen public CLIP output also drives the public U-Net. These gates use token IDs; prompt tokenization and a complete image pipeline remain open.
 
+[VAE encoder and decoder graphs](docs/research/vae-graph.md) now connect differentiable residual, image-attention and resampling components, with raw posterior-moment output and optional quant projections. Gradient and allocation-boundary tests pass; pretrained VAE loading and independent parity are the next gate.
+
 Implemented: CPU tensors (Float32/Float64/Int64/Bool), checked shapes and views, slicing, broadcasting, Float32 add/reduction/matrix multiplication, and a numscala GEMM adapter. The FFM module includes host memory scopes, a real CUDA memory-copy probe, and a driver-level Float32 GEMM probe with owned stream/event completion.
 
 First-order CPU Float32 autograd is available through `scalatorch.autograd.Variable`: shared graph gradients, broadcast reductions, GEMM, ReLU, reshape/transpose, detach and thread-local noGrad. A Python-free linear regression training test verifies loss reduction using automatic gradients.
