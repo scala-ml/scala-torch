@@ -1,3 +1,32 @@
+## SDXL U-Net stage loading and CPU text-time execution (2026-11-03)
+
+Plan tasks1/2implemented; inline ledger.superpowers/sdd/2026-11-03-sdxl-unet/progress.md.
+Task1commit27fc55d: UNetConfig appends stageHeads/stageTransformerLayers and
+linearProjection,helpersheadsAt/transformerLayersAt. Scalars expand perstage;
+vectors validatedagainststagecount/channeldivisibility. Loader reversesupstage
+index,miduseslast. Linear rank2 archive projections validated thenreshaped to
+equivalent1x1 convparameters; rank3reject. ExistingCPU/CUDA tests13passed;
+additionalnewstageGPUoffload parity passed. PreserveoriginalAPI defaults.
+
+Task2: config text_time/addition dimensions and upcast_attention=null accepted.
+DiffusionAddedConditioning(pooledText,timeIds) validatesCPUFloat32,batch,width,
+finiteness,budgets; concatenatespooled with sinusoidal timefeatures flip=true,
+freqshift0. ConditionalUNet2d appends additionEmbedding/additionTimeWidth and
+apply added:Option[DiffusionAddedConditioning]=None. AddedMLP output addsnormal
+timestepMLP. Missing/unexpected additionsreject. Loader mapsadd_embedding weights.
+CPU native tinySDXL matches independentDiffusers batch1/batch2 (different size/
+crop/text conditions) maxabs1.073e-6/2.325e-6,threshold2e-5.16affectedtests passed,
+extra negative validation passed3. Oracle scriptnow14fixtures withbatch2 cases.
+CUDA deliberately rejectsSDXL additionEmbedding untilTask3; never silentlydrops.
+
+NEXT executeTask3: CudaUNet/CudaDiffusionRuntime addedconditioning,UNetExecution
+positive/negative addedconstants cached perdenoisingloop; resident/offload oracle
+andcleanup tests. Then planTask4dualCLIP/pipeline/worker. No fullSDXLsupport yet.
+Current sbtserver scala-torch with SCALATORCH_CUDA_TESTS=1,JAVA_TOOL_OPTIONS tiny
+clip/unet/vae and scalatorch.sdxl.dir=.superpowers/models/tiny-sdxl-pipe. NUI sbt
+stopped. NUI dedicatedbranchunchanged. SD1.5 immutable512run session80265still
+live,lateststep7/20; doNOTpoll oldterminal11471. Snapshotjars protect itfrombuilds.
+
 ## SD1.5 failed final decode; immutable restart; SDXL fixtures (2026-11-03)
 
 IMPORTANT: old session11471 is TERMINAL. Reached20/20, then generation thread

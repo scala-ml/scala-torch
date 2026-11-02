@@ -14,7 +14,9 @@ final case class UNetConfig(inChannels: Int,outChannels: Int,channels: Vector[In
     contextWidth: Int,groups: Int,epsilon: Double,transformerLayers: Int,downsamplePadding: Int,
     timeWidth: Int,flipSinToCos: Boolean,frequencyShift: Double,midScale: Double,
     stageHeads: Vector[Int]=Vector.empty,stageTransformerLayers: Vector[Int]=Vector.empty,
-    linearProjection: Boolean=false):
+    linearProjection: Boolean=false,additionTimeWidth: Option[Int]=None,additionInputWidth: Option[Int]=None):
+  require(additionTimeWidth.isDefined==additionInputWidth.isDefined,"incomplete U-Net text-time dimensions")
+  require(additionTimeWidth.forall(n => n>=2 && n<=16384) && additionInputWidth.forall(n => n>0 && n<=16384),"invalid U-Net text-time dimensions")
   require(channels.nonEmpty && channels.size<=8 && downAttention.size==channels.size && upAttention.size==channels.size,
     "invalid U-Net resolution stages")
   require((channels++Vector(inChannels,outChannels,contextWidth,timeWidth)).forall(n => n>0 && n<=16384),
@@ -88,12 +90,19 @@ object UNetConfig:
       take("_diffusers_version",Null) match
         case Null | Text(_) => ()
         case _ => throw IllegalArgumentException("invalid diffusers version metadata")
-      for key <- Seq("addition_embed_type","addition_time_embed_dim","class_embed_type","cross_attention_norm",
+      val addition=take("addition_embed_type",Null) match
+        case Null =>
+          exact("addition_time_embed_dim",Null);exact("projection_class_embeddings_input_dim",Null)
+          None
+        case Text("text_time") => Some((integer("addition_time_embed_dim",0),integer("projection_class_embeddings_input_dim",0)))
+        case _ => throw IllegalArgumentException("unsupported U-Net addition embedding")
+      for key <- Seq("class_embed_type","cross_attention_norm",
         "encoder_hid_dim","encoder_hid_dim_type","num_attention_heads","num_class_embeds",
-        "projection_class_embeddings_input_dim","reverse_transformer_layers_per_block","time_cond_proj_dim",
+        "reverse_transformer_layers_per_block","time_cond_proj_dim",
         "time_embedding_act_fn","timestep_post_act") do exact(key,Null)
       for key <- Seq("center_input_sample","class_embeddings_concat","dual_cross_attention","only_cross_attention",
-        "resnet_skip_time_act","upcast_attention") do exact(key,Bool(false))
+        "resnet_skip_time_act") do exact(key,Bool(false))
+      require(Set[Value](Null,Bool(false))(take("upcast_attention",Bool(false))),"unsupported attention upcast")
       require(Set[Value](Null,Bool(false))(take("mid_block_only_cross_attention",Null)),"unsupported middle cross attention")
       for (key,v) <- Seq("act_fn"->"silu","attention_type"->"default","mid_block_type"->"UNetMidBlock2DCrossAttn",
         "resnet_time_scale_shift"->"default","time_embedding_type"->"positional") do exact(key,Text(v))
@@ -127,7 +136,7 @@ object UNetConfig:
         integer("layers_per_block",2),heads.head,integer("cross_attention_dim",1280),
         integer("norm_num_groups",32),number("norm_eps",1e-5),depths.head,
         integer("downsample_padding",1),time,boolean("flip_sin_to_cos",true),number("freq_shift",0),number("mid_block_scale_factor",1),
-        heads,depths,boolean("use_linear_projection",false))
+        heads,depths,boolean("use_linear_projection",false),addition.map(_._1),addition.map(_._2))
       require(fields.isEmpty,s"unknown U-Net config fields: ${fields.keys.toVector.sorted.mkString(", ")}")
       config
     }

@@ -7,6 +7,38 @@ import java.nio.{ByteBuffer,ByteOrder}
 import java.nio.file.{Files,Path}
 
 class SdxlUNetSuite extends munit.FunSuite:
+  private def tensor(name: String,shape: Shape): Tensor[Float] =
+    val stream=getClass.getResourceAsStream(s"/tiny-sdxl/$name.bin")
+    val data=try ByteBuffer.wrap(stream.readAllBytes()).order(ByteOrder.LITTLE_ENDIAN) finally stream.close()
+    Tensor.fromFloats(Array.fill(data.remaining()/4)(data.getFloat()),shape)
+
+  test("SDXL CPU text-time conditioning matches independent Diffusers outputs") {
+    val directory=sys.props.get("scalatorch.sdxl.dir")
+    assume(directory.nonEmpty,"tiny SDXL required")
+    val model=PretrainedUNet.load(Path.of(directory.get).resolve("unet"))
+    for batch <- Seq(1L,2L) do
+      val suffix=if batch==1 then "" else "-b2"
+      val sample=tensor("sample"+suffix,Shape.from(Seq(batch,4L,8L,8L)))
+      val context=tensor("context"+suffix,Shape.from(Seq(batch,6L,64L)))
+      val pooled=tensor("pooled"+suffix,Shape.from(Seq(batch,32L)))
+      val ids=tensor("time-ids"+suffix,Shape.from(Seq(batch,6L)))
+      val time=Tensor.fromFloats(Array(500f),Shape.from(Seq(1L)))
+      val added=DiffusionAddedConditioning(pooled,ids)
+      val expected=tensor("unet-output"+suffix,sample.shape)
+      val actual=Autograd.noGrad(model(Variable(sample),time,Variable(context),Some(added))).data
+      val error=actual.toFloatArray.zip(expected.toFloatArray).map((a,e) => math.abs(a.toDouble-e)).max
+      println(s"SDXL CPU batch=$batch maxAbsError=$error")
+      assert(error<2e-5)
+      intercept[IllegalArgumentException](model(Variable(sample),time,Variable(context)))
+      val wrong=added.copy(pooledText=Tensor.fromFloats(Array(0f),Shape.from(Seq(1L,1L))))
+      intercept[IllegalArgumentException](model(Variable(sample),time,Variable(context),Some(wrong)))
+      val badIds=ids.toFloatArray;badIds(0)=Float.NaN
+      intercept[IllegalArgumentException](model(Variable(sample),time,Variable(context),Some(added.copy(timeIds=Tensor.fromFloats(badIds,ids.shape)))))
+      val badText=pooled.toFloatArray;badText(0)=Float.PositiveInfinity
+      intercept[IllegalArgumentException](model(Variable(sample),time,Variable(context),Some(added.copy(pooledText=Tensor.fromFloats(badText,pooled.shape)))))
+      val wrongBatch=Tensor.fromFloats(Array.fill((batch.toInt+1)*6)(0f),Shape.from(Seq(batch+1,6L)))
+      intercept[IllegalArgumentException](model(Variable(sample),time,Variable(context),Some(added.copy(timeIds=wrongBatch))))
+  }
   private val base="""{"block_out_channels":[32,64],"down_block_types":["DownBlock2D","CrossAttnDownBlock2D"],"up_block_types":["CrossAttnUpBlock2D","UpBlock2D"],"cross_attention_dim":32,"attention_head_dim":[2,4],"transformer_layers_per_block":[1,2],"use_linear_projection":true}"""
   test("stage heads and transformer depths validate each corresponding width") {
     val c=UNetConfig.fromJson(base)
@@ -62,6 +94,9 @@ class SdxlUNetSuite extends munit.FunSuite:
       val context=Variable(Tensor.fromFloats(Array.tabulate(3*32)(i => math.cos(i*.07).toFloat),Shape.from(Seq(1L,3L,32L))))
       val time=Tensor.fromFloats(Array(500f),Shape.from(Seq(1L)))
       val expected=Autograd.noGrad(conv(input,time,context)).data
+      val unsupported=DiffusionAddedConditioning(Tensor.fromFloats(Array(0f),Shape.from(Seq(1L,1L))),
+        Tensor.fromFloats(Array(0f),Shape.from(Seq(1L,1L))))
+      intercept[IllegalArgumentException](conv(input,time,context,Some(unsupported)))
       val actual=Autograd.noGrad(linear(input,time,context)).data
       assertEquals(actual.toFloatArray.toVector,expected.toFloatArray.toVector)
       if sys.env.get("SCALATORCH_CUDA_TESTS").contains("1") then

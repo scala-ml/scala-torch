@@ -63,5 +63,13 @@ with torch.no_grad():
     result = unet(sample, 500, encoder_hidden_states=context,
                   added_cond_kwargs={"text_embeds": pooled, "time_ids": time_ids}).sample
     save("unet-output", result)
+    sample2 = torch.cat([sample, -sample], dim=0)
+    context2 = torch.cat([context, context * .3], dim=0)
+    pooled2 = torch.cat([pooled, -pooled], dim=0)
+    time_ids2 = torch.tensor([[64., 80., 3., 5., 64., 64.], [96., 128., 7., 9., 64., 80.]])
+    for name, tensor in [("sample-b2", sample2), ("context-b2", context2), ("pooled-b2", pooled2), ("time-ids-b2", time_ids2)]:
+        save(name, tensor)
+    save("unet-output-b2", unet(sample2, 500, encoder_hidden_states=context2,
+         added_cond_kwargs={"text_embeds": pooled2, "time_ids": time_ids2}).sample)
 (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 print(f"Prepared {len(manifest['tensors'])} independent SDXL tensors at {out}")

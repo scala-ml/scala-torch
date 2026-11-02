@@ -31,9 +31,12 @@ object DiffusionTimeSettings:
 /** CPU conditional image U-Net with additive time conditioning and exact LIFO skip accounting. */
 final case class ConditionalUNet2d(convIn: Conv2d,timeEmbedding: DiffusionTimeEmbedding,
     downBlocks: Vector[DiffusionDownBlock],midBlock: DiffusionMidBlock,upBlocks: Vector[DiffusionUpBlock],
-    normOut: GroupNorm,convOut: Conv2d,timeSettings: DiffusionTimeSettings = DiffusionTimeSettings()) derives Module:
+    normOut: GroupNorm,convOut: Conv2d,timeSettings: DiffusionTimeSettings = DiffusionTimeSettings(),
+    additionEmbedding: Option[DiffusionTimeEmbedding]=None,additionTimeWidth: Int=0) derives Module:
   private val inputChannels=convIn.weight.data.shape.dims(1)
   private val timeWidth=timeEmbedding.linear2.weight.data.shape.dims.head
+  require(if additionEmbedding.isDefined then additionTimeWidth>=2 else additionTimeWidth==0,"incomplete U-Net additional embedding")
+  additionEmbedding.foreach(a => require(a.linear2.weight.data.shape.dims.head==timeWidth,"U-Net addition output width mismatch"))
   private val featureWidth=timeEmbedding.linear1.weight.data.shape.dims(1).toInt
   private val contextWidth=midBlock.attention.blocks.head.attn2.toK.weight.data.shape.dims(1)
   require(featureWidth>=2 && featureWidth/2-timeSettings.frequencyShift>0,"invalid U-Net timestep frequency denominator")
@@ -98,9 +101,16 @@ final case class ConditionalUNet2d(convIn: Conv2d,timeEmbedding: DiffusionTimeEm
     DiffusionTimesteps.sinusoidal(times,featureWidth,timeSettings.flipSinToCos,timeSettings.frequencyShift,
       timeSettings.phaseScale,timeSettings.maxPeriod,timeSettings.maxElements)
 
-  def apply(sample: Variable,timesteps: Tensor[Float],context: Variable): Variable =
+  private[models] def addedFeatures(batch: Long,added: Option[DiffusionAddedConditioning]): Option[Tensor[Float]] =
+    require(added.isDefined==additionEmbedding.isDefined,"U-Net additional conditioning presence mismatch")
+    added.map(_.features(batch,additionTimeWidth,additionEmbedding.get.linear1.weight.data.shape.dims(1),timeSettings.maxElements))
+
+  def apply(sample: Variable,timesteps: Tensor[Float],context: Variable,
+      added: Option[DiffusionAddedConditioning]=None): Variable =
     val features=timestepFeatures(sample.data.shape,timesteps,context.data.shape)
-    val time=timeEmbedding(Variable(features,requiresGrad=false))
+    val extra=addedFeatures(sample.data.shape.dims.head,added)
+    val baseTime=timeEmbedding(Variable(features,requiresGrad=false))
+    val time=extra.fold(baseTime)(x => baseTime+additionEmbedding.get(Variable(x,requiresGrad=false)))
     var hidden=convIn(sample)
     val skips=ArrayBuffer(hidden)
     downBlocks.foreach { block =>

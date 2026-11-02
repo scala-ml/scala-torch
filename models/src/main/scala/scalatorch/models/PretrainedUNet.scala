@@ -60,6 +60,8 @@ object PretrainedUNet:
       val convIn=conv("conv_in",c.inChannels,c.channels.head)
       val time=DiffusionTimeEmbedding(linear("time_embedding.linear_1",c.channels.head,c.timeWidth),
         linear("time_embedding.linear_2",c.timeWidth,c.timeWidth))
+      val addition=c.additionInputWidth.map(width => DiffusionTimeEmbedding(
+        linear("add_embedding.linear_1",width,c.timeWidth),linear("add_embedding.linear_2",c.timeWidth,c.timeWidth)))
       var current=c.channels.head
       val skips=mutable.ArrayBuffer(current)
       val down=c.channels.indices.toVector.map { i =>
@@ -87,7 +89,7 @@ object PretrainedUNet:
         DiffusionUpBlock(layers,sample)
       }
       val model=ConditionalUNet2d(convIn,time,down,mid,up,group("conv_norm_out",current,c.epsilon),
-        conv("conv_out",current,c.outChannels),DiffusionTimeSettings(c.flipSinToCos,c.frequencyShift))
+        conv("conv_out",current,c.outChannels),DiffusionTimeSettings(c.flipSinToCos,c.frequencyShift),addition,c.additionTimeWidth.getOrElse(0))
       require(used.toSet==archive.tensors.keySet,s"unused U-Net weights: ${(archive.tensors.keySet--used).toVector.sorted.mkString(", ")}")
       model
     }

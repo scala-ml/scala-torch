@@ -227,6 +227,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
 
   def unet(input: CudaTensor,model: ConditionalUNet2d,timesteps: Tensor[Float],context: CudaTensor): CudaTensor =
     check()
+    require(model.additionEmbedding.isEmpty,"CUDA U-Net text-time conditioning is not yet implemented")
     // Small deterministic sinusoidal conditioning constants are prepared on CPU.
     // Learned timestep projections and every image/context operation run on CUDA.
     val features=model.timestepFeatures(session.shape(input),timesteps,session.shape(context))

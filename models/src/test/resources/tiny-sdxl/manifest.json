@@ -75,6 +75,46 @@
         8
       ],
       "sha256": "109edf8265c6c6735f1ad332520b12c509adcc033ca10ddd0713630c532e145e"
+    },
+    "sample-b2": {
+      "shape": [
+        2,
+        4,
+        8,
+        8
+      ],
+      "sha256": "410c5968608030af305327ce22e0f6ccd33304e1f3fad245281206118c006611"
+    },
+    "context-b2": {
+      "shape": [
+        2,
+        6,
+        64
+      ],
+      "sha256": "889c6da39d844ff4308feade8174e27e73fce9e57b52048a61c4e3660e38dd65"
+    },
+    "pooled-b2": {
+      "shape": [
+        2,
+        32
+      ],
+      "sha256": "e900116d875efed4b3a562925727434099f40430a698af6637a29d6208579f69"
+    },
+    "time-ids-b2": {
+      "shape": [
+        2,
+        6
+      ],
+      "sha256": "f3e71c1b2cd0e11a483b79f39973b5c29fee965862b39a0081743e9660b893c7"
+    },
+    "unet-output-b2": {
+      "shape": [
+        2,
+        4,
+        8,
+        8
+      ],
+      "sha256": "bdc2c2a474eb0aab177cd4cb6f5826414d277d7b84ebcad6225bfdbbeed22b89"
     }
   },
   "token_ids": [
