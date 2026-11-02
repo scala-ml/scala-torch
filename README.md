@@ -4,6 +4,8 @@ Deep learning in Scala 3, targeting Java 25 and Python-free LLMs, training, and 
 
 Requires **Java 25, Scala 3.3.8 LTS, sbt 2.0.10**. Versions are pinned in the build.
 
+Published Llama checkpoint inference now runs in Scala: standard config + single-file safetensors loading, differentiable model composition, and greedy token-ID generation. The public tiny-random Llama matches 128000 independent Rust Candle logits with maximum absolute error `5.96e-8`. This verifies architecture interoperability; the random checkpoint is not a useful language model. Tokenization, persistent KV cache and trained-model text generation remain open.
+
 Implemented: CPU tensors (Float32/Float64/Int64/Bool), checked shapes and views, slicing, broadcasting, Float32 add/reduction/matrix multiplication, and a numscala GEMM adapter. The FFM module includes host memory scopes, a real CUDA memory-copy probe, and a driver-level Float32 GEMM probe with owned stream/event completion.
 
 First-order CPU Float32 autograd is available through `scalatorch.autograd.Variable`: shared graph gradients, broadcast reductions, GEMM, ReLU, reshape/transpose, detach and thread-local noGrad. A Python-free linear regression training test verifies loss reduction using automatic gradients.
@@ -18,7 +20,7 @@ Safetensors archives can now be indexed and read without Python: F16/BF16/F32→
 
 Differentiable causal grouped-query attention and Llama-style RoPE are available on rank-4 `(batch, heads, tokens, width)` Variables. Attention supports query position offsets for decode chunks and a configurable score-workspace limit. Numerical gradient and masking tests cover these operations.
 
-Not implemented yet: a persistent GPU Tensor backend, cuBLAS acceleration, sharded model/config/tokenizer loading, persistent KV cache, LLM generation, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
+Not implemented yet: a persistent GPU Tensor backend, cuBLAS acceleration, sharded weights, tokenizer/config variants, persistent KV cache, useful trained-model text generation, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
 
 ```sh
 sbt 'core / Test / testOnly scalatorch.*'
@@ -27,6 +29,7 @@ sbt 'ffm / Test / testOnly scalatorch.ffm.*'
 sbt 'autograd / Test / testOnly scalatorch.autograd.*'
 sbt 'nn / Test / testOnly *'
 sbt 'tensorio / Test / testOnly scalatorch.io.*'
+sbt 'models / Test / testOnly scalatorch.models.*' # public checkpoint test skips unless explicitly enabled
 # Requires a Linux 64-bit CUDA driver and GPU; fails if unavailable:
 sbt 'ffm / Compile / runMain scalatorch.ffm.CudaProbe'
 # Force the actual GPU test, including when using an existing sbt server:
@@ -96,9 +99,24 @@ Using.resource(SafeTensors.open(java.nio.file.Path.of("weights.safetensors"))) {
 }
 ```
 
-Returned Tensors own their data and survive archive closure. The [reader evidence and limits](docs/research/safetensors-reader.md) document supported dtypes and configurable allocation limits. Public model inference remains unverified; a format reader alone is not an LLM runtime.
+Returned Tensors own their data and survive archive closure. The [reader evidence and limits](docs/research/safetensors-reader.md) document supported dtypes and configurable allocation limits. See [Llama model evidence and reproduction](docs/research/llama-model.md) for the separate published-model gate.
 
 For attention, use `query.rope(positionStart).causalAttention(key.rope(0), value, queryStart = positionStart)` when keys cover positions starting at zero. Cached keys should already be rotated at their own positions. Grouped query heads must divide evenly into matching K/V heads. These are correctness-first CPU operations with no dropout, padding/custom masks, advanced RoPE scaling, or performance-parity claim; see [attention evidence](docs/research/attention-rope.md).
+
+```scala
+import scalatorch.models.LlamaModel
+
+val llama = LlamaModel.load(java.nio.file.Path.of("local-llama-directory"))
+val generated: Vector[Long] = llama.generateIds(Vector(1L, 42L, 17L, 321L), maxNewTokens = 1)
+```
+
+After downloading the pinned tiny checkpoint as documented in the [model guide](docs/research/llama-model.md), the Python-free CLI is:
+
+```sh
+sbt 'models / Compile / runMain scalatorch.models.LlamaRun .superpowers/models/tiny-llama 1,42,17,321 1'
+```
+
+It produces `1,42,17,321,16196`. Greedy inference currently recomputes full prefixes and is subject to model/context/logit/workspace limits; it is not an optimized cached decoder.
 
 - [Design and roadmap](docs/superpowers/specs/2026-11-02-scala-torch-design.md)
 - [Initial implementation plan](docs/superpowers/plans/2026-11-02-tensor-foundation.md)

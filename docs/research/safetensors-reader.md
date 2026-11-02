@@ -24,4 +24,4 @@ Tests cover FP16/BF16 subnormals, signed zero, NaN/Inf; exact Int64 values beyon
 
 ## Remaining work
 
-This verifies format interoperability and loading generated upstream weights. It does not verify a published model's behavior. Sharded indexes, config/tokenizer readers, attention/RoPE/KV cache, public model revision/hash manifests and full inference comparisons remain required. mmap/zero-copy and performance measurements are also open.
+This reader checkpoint verifies format interoperability and loading generated upstream weights. Subsequent [Llama model assembly](llama-model.md) separately verifies a published checkpoint's logits and artifact hashes. Sharded indexes, tokenizer/config variants, persistent KV-cache and broader trained-model comparisons remain required. mmap/zero-copy and performance measurements are also open.

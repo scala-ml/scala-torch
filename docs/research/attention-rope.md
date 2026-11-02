@@ -24,4 +24,4 @@ The default probability workspace is limited to 16,777,216 Double elements; call
 - Invalid shapes and score caps reject, and empty oversized unused dimensions avoid narrowing or allocation.
 - Frozen K/V parameter changes after forward reject backward before publishing query gradients.
 
-The full suite has 81 passing tests including actual GPU probes. These attention tests use numerical and analytical references, not an executed PyTorch model. Double intermediates deliberately differ from exact Float32 kernel rounding. Public-model logits, tokenizer behavior and persistent KV-cache equivalence remain the next gates.
+The attention checkpoint had 81 passing tests including actual GPU probes. These operation tests use numerical and analytical references, not an executed PyTorch model. Double intermediates deliberately differ from exact Float32 kernel rounding. Subsequent [Llama model assembly](llama-model.md) verifies a published checkpoint against Candle; tokenizer behavior and persistent KV-cache equivalence remain open.
