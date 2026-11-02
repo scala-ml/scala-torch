@@ -6,6 +6,8 @@ Requires **Java 25, Scala 3.3.8 LTS, sbt 2.0.10**. Versions are pinned in the bu
 
 Published Llama checkpoint inference now runs in Scala: standard config + single-file/indexed safetensors loading, differentiable model composition, persistent CPU KV cache, and greedy token-ID generation. The public tiny-random Llama matches 128000 independent Rust Candle logits with maximum absolute error `5.96e-8`; cached chunks also match that reference. This verifies architecture interoperability; the random checkpoint is not a useful language model. A native byte-level BPE tokenizer now matches the pinned SmolLM2 tokenizer reference. The trained SmolLM2-135M-Instruct model now generates text offline, matching independent Candle logits and greedy output.
 
+Published conditional U-Net loading now runs on CPU: `PretrainedUNet.load(path)` reads Diffusers config and safetensors directly, freezes parameters by default and supports opt-in training. The pinned tiny-sd-pipe U-Net matches three independent Rust reference cases within `2.33e-6` maximum absolute error. The [reference notes](docs/research/pretrained-unet.md) record Candle0.9.1's explicit erf-GELU correction and checkpoint hashes. This is U-Net interoperability; complete image generation and NUI migration still require CLIP, VAE and schedulers.
+
 Implemented: CPU tensors (Float32/Float64/Int64/Bool), checked shapes and views, slicing, broadcasting, Float32 add/reduction/matrix multiplication, and a numscala GEMM adapter. The FFM module includes host memory scopes, a real CUDA memory-copy probe, and a driver-level Float32 GEMM probe with owned stream/event completion.
 
 First-order CPU Float32 autograd is available through `scalatorch.autograd.Variable`: shared graph gradients, broadcast reductions, GEMM, ReLU, reshape/transpose, detach and thread-local noGrad. A Python-free linear regression training test verifies loss reduction using automatic gradients.
@@ -20,7 +22,7 @@ Safetensors archives can now be indexed and read without Python: F16/BF16/F32→
 
 Differentiable causal grouped-query attention and Llama-style RoPE are available on rank-4 `(batch, heads, tokens, width)` Variables. Attention supports query position offsets for decode chunks and a configurable score-workspace limit. Numerical gradient and masking tests cover these operations.
 
-Not implemented yet: GPU transformer training, cuBLAS acceleration, broader tokenizer/config variants, or diffusion/NUI migration. Persistent GPU inference, CPU LoRA training and basic backend autodiff are described below. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
+Not implemented yet: cuBLAS acceleration, broader tokenizer/config variants, complete image generation, or NUI migration. Persistent GPU inference and resident Llama/LoRA training are described below. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
 
 ```sh
 sbt 'core / Test / testOnly scalatorch.*'

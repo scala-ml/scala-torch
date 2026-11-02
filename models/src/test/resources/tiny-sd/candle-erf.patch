@@ -1,0 +1,5 @@
+--- a/src/models/stable_diffusion/attention.rs
++++ b/src/models/stable_diffusion/attention.rs
+@@ -24 +24 @@
+-        &hidden_states_and_gate[0] * hidden_states_and_gate[1].gelu()?
++        &hidden_states_and_gate[0] * hidden_states_and_gate[1].gelu_erf()?
