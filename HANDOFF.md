@@ -1,3 +1,36 @@
+## Complete resident CUDA VAE decoder (2026-11-03)
+
+CudaVaeDecoder.upload(session, VaeDecoder) now executes the complete loaded FP32
+decoder: optional post-quant convolution, input convolution, residual/attention
+middle, all up-stage residuals and nearest/convolution upsampling, output norm,
+SiLU and RGB convolution. Input is raw unscaled latents; output is raw RGB without
+clamp. Upload once, inference keeps activations resident, download final output.
+Decoder and returned output handles have independent lifetimes. No NUI/pipeline
+GPU selector is connected yet; EulerImagePipeline continues using CPU decode.
+
+CudaDiffusionRuntime (package-private) shares snapshot weights, scoped convolution,
+GroupNorm, Linear including local LoRA, residuals, projected self/cross attention
+and VAE image attention. CudaDiffusionResnet delegates to it without API changes.
+Attention supports unequal context tokens/widths and preflights score layout;
+quadratic Double score scratch remains, not memory-efficient attention. VaeDecoder
+preflight is now shared by CPU and GPU, preserving complete feature-budget checks.
+
+Actual GPU tests with existing CUDA flag and scalatorch.vae.dir:
+- models/testOnly *CudaVaeDecoderSuite *CudaDiffusionAttentionSuite
+  *CudaDiffusionResnetSuite *PretrainedVaeSuite:20 passed,2 skipped (CPU full-pipeline
+  tests need additional properties). This ran before the last two test expansions.
+- Final models/testOnly *CudaDiffusionAttentionSuite *CudaVaeDecoderSuite:6 passed.
+  Includes added bad-shape/allocation cleanup and optional post-quant/mid-attention.
+- Full decoder matches independent Candle binary references: batch1 3x5 latent
+  maxAbsError2.0023435e-6, batch1 4x4 3.1143427e-6, batch2 3x5 2.5033951e-6.
+- Loaded VAE middle residual -> attention -> residual, projected self/cross,
+  repeat calls, model/output ownership, upload/inference budget cleanup verified.
+Existing CPU VAE six Candle cases and other loader tests also passed as above.
+No changes to FFM kernels in this checkpoint; previous FFM49 remains its last run.
+
+Next: connect optional resident decoding to pipeline/worker with explicit lifecycle
+and error/cancel handling, then continue complete U-Net execution and memory modes.
+This does not establish normal-model FP16/offload or complete Python-free NUI parity.
 ## Uploaded CUDA diffusion residual blocks (2026-11-03)
 
 CudaDiffusionResnet.upload(session, DiffusionResnet2d) snapshots existing model
