@@ -18,6 +18,7 @@ lazy val ffm = project.dependsOn(core, cpu % "test->compile").settings(common).s
   Compile / run / javaOptions += "--enable-native-access=ALL-UNNAMED"
 )
 lazy val autograd = project.dependsOn(cpu, ffm % "test->compile").settings(common).settings(
+  libraryDependencies += "org.apache.commons" % "commons-numbers-gamma" % "1.3",
   Test / javaOptions += "--enable-native-access=ALL-UNNAMED"
 )
 lazy val tensorio = (project in file("io")).dependsOn(core).settings(common).settings(

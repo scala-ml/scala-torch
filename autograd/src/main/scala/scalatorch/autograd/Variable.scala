@@ -87,6 +87,7 @@ final class Variable private (
 
   def embedding(indices: Tensor[Long]): Variable = TransformerOps.embedding(this, indices)
   def rmsNorm(weight: Variable, epsilon: Double = 1e-6): Variable = TransformerOps.rmsNorm(this, weight, epsilon)
+  def gelu(approximation: GeluApproximation = GeluApproximation.Erf): Variable = GeluOps(this,approximation)
   def silu(): Variable = TransformerOps.silu(this)
   /** Noncausal scaled dot-product attention over all keys, with optional grouped query heads. */
   def scaledDotProductAttention(key: Variable,value: Variable,maxScoreElements: Long = 16777216L): Variable =
