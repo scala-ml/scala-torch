@@ -45,10 +45,23 @@ Files: create `models/src/main/scala/scalatorch/models/SdxlTextConditioning.scal
 
 Interfaces: `SdxlTextConditioning.encode(prompt: String,negativePrompt: String,clipSkip: Int): SdxlPromptPair`; `SdxlPromptPair` holds positive/negative context Tensor[Float] and positive/negative pooled Tensor[Float]. Constructor owns both tokenizer/model pairs. Prompt parser/chunker returns token IDs and per-token weights; keep tokenizer normalization profile explicit rather than claiming slow-tokenizer ftfy parity.
 
-- [ ] Generate independent NUI encode_sdxl fixtures for plain text,empty/whitespace negative,clip_skip1/2/3,weighted spans,escaped delimiters and prompts crossing75-token boundaries.
-- [ ] Implement NUI chunking/emphasis and raw dual-CLIP concatenation; pooled text comes from encoder2's first chunk before emphasis. Match unequal chunk repeat/padding behavior.
-- [ ] Test positive/negative lengths, EOS/padding choices and model dimension mismatch. Explicitly track textual-inversion/extension support as remaining work if its weight injection is not yet available; do not silently consume directives with wrong semantics.
-- [ ] Run the conditioning and tokenizer regression suites with fixtures; commit verified behavior.
+- [x] Generate independent NUI encode_sdxl fixtures for plain text,empty/whitespace negative,clip_skip1/2/3,weighted spans,escaped delimiters and prompts crossing75-token boundaries.
+- [x] Implement NUI chunking/emphasis and raw dual-CLIP concatenation; pooled text comes from encoder2's first chunk before emphasis. Match unequal chunk repeat/padding behavior.
+- [x] Test positive/negative lengths, EOS/padding choices and model dimension mismatch. Explicitly track textual-inversion/extension support as remaining work if its weight injection is not yet available; do not silently consume directives with wrong semantics.
+- [x] Run the conditioning and tokenizer regression suites with fixtures; commit verified behavior.
+
+Task2 evidence: DiffusionPromptSuite has122 source-derived parser/chunker cases;
+SdxlTextConditioningSuite compares44 tensors from11 NUI encode_sdxl cases, including
+different encoder chunk counts (encoder2 unmerged BPE) and explicit non-EOS pad.
+Maximum absolute error1.431e-6. Combined prompt/tokenizer/CLIP suites passed12tests.
+Optional reference_sdxl_prompt.py records model input hashes and NUI source hash.
+Conditioner supports base dual encoders only and is not yet connected to worker.
+Tokenizer uses documented fast NFC profile; slow-tokenizer ftfy parity remains.
+Textual inversion, LoRA/directive processing and embedding injection remain pending:
+this class neither strips extension tags nor claims their application. Worker must
+route supported extensions or report unsupported ones when integrating Task3.
+Tokenizer load/fromText now accept explicit padToken; default EOS behavior remains.
+Worker still needs to read model tokenizer_config padding during SDXL loading.
 
 ## Task3: Shared generation pipeline and worker loading
 

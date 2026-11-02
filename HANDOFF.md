@@ -1,3 +1,19 @@
+## SDXL dual text conditioning verified (2026-11-03)
+
+SdxlTextConditioning now executes dual CLIP, NUI attention emphasis, raw selected
+hidden states, concatenation, first-chunk projected pooling, repeat-last when
+encoder chunk counts differ, empty-chunk positive/negative padding and blank
+negative zero tensors (including Python Unicode whitespace). Explicit tokenizer
+padToken supported without changing EOS default. Context/vocabulary/clip-skip/
+allocation limits checked. 11 independent NUI encode_sdxl cases/44 tensors match
+at maxabs1.431e-6; combined prompt/tokenizer/CLIP suites passed12. Optional oracle
+scripts/reference_sdxl_prompt.py; fixtures tiny-sdxl-prompt include input hashes.
+Task2 complete; Task3 NEXT: shared EulerImagePipeline conditioning and worker
+family loading, both CLIPs/tokenizers/hash, config padding and size-time IDs.
+No SDXL full pipeline/worker claim yet; extension injection and ftfy remain open.
+SD1.5 full512 img2img session62925 reached10/10, decoding still pending at poll.
+Do not restart; inspect final PNG when session terminates. NUI branch untouched.
+
 ## Native prompt parser/chunker verified (2026-11-03)
 
 SDXL text plan Task2 partial: DiffusionPrompt now handles attention brackets,

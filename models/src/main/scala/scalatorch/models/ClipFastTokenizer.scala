@@ -13,7 +13,7 @@ import scala.util.Using
 final case class ClipTokenBatch(ids: Tensor[Long],attentionMask: Tensor[Long])
 
 /** Explicit Transformers CLIPConverter fast profile; does not perform slow-tokenizer ftfy repair. */
-final class ClipFastTokenizer private (vocab: Map[String,Int],ranks: Map[(String,String),Int],val maxLength: Int):
+final class ClipFastTokenizer private (vocab: Map[String,Int],ranks: Map[(String,String),Int],val maxLength: Int,val padId: Long):
   import ClipFastTokenizer.*
   val vocabSize: Int=vocab.size
   val bosId: Long=vocab(bos).toLong
@@ -65,7 +65,7 @@ final class ClipFastTokenizer private (vocab: Map[String,Int],ranks: Map[(String
   def batch(texts: Seq[String],truncate: Boolean=false,maxElements: Long=1048576L): ClipTokenBatch =
     val count=texts.size.toLong*maxLength
     require(maxElements>=0 && count<=maxElements && count<=Int.MaxValue,"CLIP batch exceeds allocation limit")
-    val ids=Array.fill(count.toInt)(eosId)
+    val ids=Array.fill(count.toInt)(padId)
     val mask=new Array[Long](count.toInt)
     texts.zipWithIndex.foreach { (text,row) =>
       val encoded=encode(text)
@@ -95,9 +95,9 @@ object ClipFastTokenizer:
     require(bytes.length<=TokenizerJson.maxBytes,"CLIP tokenizer file exceeds32MiB")
     UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString
   }
-  def load(vocabPath: Path,mergesPath: Path,maxLength: Int=77): ClipFastTokenizer =
-    fromText(read(vocabPath),read(mergesPath),maxLength)
-  def fromText(vocabJson: String,mergesText: String,maxLength: Int=77): ClipFastTokenizer =
+  def load(vocabPath: Path,mergesPath: Path,maxLength: Int=77,padToken: String=eos): ClipFastTokenizer =
+    fromText(read(vocabPath),read(mergesPath),maxLength,padToken)
+  def fromText(vocabJson: String,mergesText: String,maxLength: Int=77,padToken: String=eos): ClipFastTokenizer =
     require(maxLength>=2 && maxLength<=16384,"invalid CLIP context length")
     val vocab=TokenizerJson.parse(vocabJson).obj.map((token,id) => token->id.int)
     require(vocab.nonEmpty && vocab.size<=1000000 && vocab.keys.forall(_.nonEmpty) &&
@@ -114,4 +114,5 @@ object ClipFastTokenizer:
       (a,b)
     }
     require(pairs.size<=1000000 && pairs.distinct.size==pairs.size,"duplicate or excessive CLIP merges")
-    new ClipFastTokenizer(vocab,pairs.zipWithIndex.toMap,maxLength)
+    require(vocab.contains(padToken),"missing CLIP pad token")
+    new ClipFastTokenizer(vocab,pairs.zipWithIndex.toMap,maxLength,vocab(padToken).toLong)
