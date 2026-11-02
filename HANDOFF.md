@@ -2,6 +2,17 @@
 
 ## Windows continuation (2026-11-03)
 
+Independent DPM verification now exists in `DpmReferenceSuite` and
+`models/src/test/resources/dpm/`. A disposable ignored reference venv used
+Python 3.12.12 / torch 2.7.1+cpu / diffusers 0.33.1 to export three four-step
+trajectories (epsilon/sample/v_prediction). Scala recursively feeds its own
+outputs and matches all 12 upstream updates within 1e-5 absolute error. Training
+sigma generation agrees within 3e-5 and rounded model timesteps match exactly.
+The final standalone reference suite passed with SHA256 fixture validation.
+Normal tests/inference use only the static TSV, not Python. Full-image parity
+and other scheduler configurations remain unverified. See fixture PROVENANCE.md
+for exact inputs and regeneration. Reference tools/env are under `.superpowers`.
+
 DPM image integration: `EulerImagePipeline.generateDpm(request, DpmSchedule, ...)`
 now runs VP DPM++ 2M with unit initial noise, unscaled model inputs, local history,
 shared prompt/guidance/decoder handling and cooperative cancellation.
