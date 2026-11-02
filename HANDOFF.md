@@ -1,3 +1,23 @@
+## Native VAE selection (2026-11-03)
+
+set_vae now stages a replacement VAE and pipeline before publication; failure or
+denied publication leaves previous pipeline/model metadata untouched. Null/empty
+path restores root/vae. Supports Diffusers directories (including indexes) and
+standalone Diffusers-key safetensors using checkpoint VAE config. load_model also
+accepts vae_path. VAE tiling and original LDM/A1111 key remapping remain unsupported.
+Set rejects changed latent channels/spatial factor. Metadata includes selected
+VAE name/hash, refreshed model_token and original checkpoint hash. Standalone VAE
+hash is file SHA256; indexed hash concatenates inventory source bytes.
+
+PretrainedVae exposes optional configOverride/filename. SafeTensorSet basename
+validation permits spaces/dots/Unicode while rejecting separators/colon/NUL and
+wrong suffixes, so ordinary external filenames work without copying model config.
+Tests cover standalone file in a config-less directory, missing file preserving
+metadata, denied-publication preserving state, restoration, and existing generation.
+Shard tests: 6 pass / 1 Linux-only skip; backend+process: 3 pass. NUI native branch
+integration now calls client.setVae(file) and None before generation; passed in
+17.014 seconds. Full application migration still incomplete. Current sbt server
+is NUI with integration env; stop before building scala-torch.
 ## Native auxiliary file catalogs (2026-11-03)
 
 NativeFileCatalog and list_files handle NUI file kinds vae/lora/controlnet/embeddings/

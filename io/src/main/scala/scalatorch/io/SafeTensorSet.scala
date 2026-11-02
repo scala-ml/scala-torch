@@ -37,7 +37,8 @@ object SafeTensorSet:
 
   def open(directory: Path, readLimits: ReadLimits = ReadLimits(), shardLimits: ShardLimits = ShardLimits(),
       filename: String = "model.safetensors"): SafeTensorSet =
-    require(filename.matches("[A-Za-z0-9_-]+\\.safetensors"),"invalid safetensors archive filename")
+    require(filename.endsWith(".safetensors") && filename.length>12 &&
+      !filename.exists(c => c=='/' || c=='\\' || c==':' || c==0),"invalid safetensors archive filename")
     val single = directory.resolve(filename)
     val indexed = directory.resolve(filename+".index.json")
     val hasSingle = Files.exists(single,LinkOption.NOFOLLOW_LINKS)

@@ -37,7 +37,35 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
       finally input.close()
     }
     java.util.HexFormat.of().formatHex(digest.digest())
-  val supported=Set("load_model","unload","txt2img","list_models","list_samplers","list_files")
+  val supported=Set("load_model","set_vae","unload","txt2img","list_models","list_samplers","list_files")
+  private def vaeChoice(params: Map[String,NativeJson],key: String): Option[Path]=params.get(key) match
+    case None | Some(Null) | Some(Str("")) => None
+    case Some(Str(value)) => Some(Path.of(value).toRealPath())
+    case _ => throw IllegalArgumentException(s"$key must be a path or null")
+  private def readVae(path: Option[Path],context: NativeWorkContext): (VaeModel,Map[String,NativeJson])=
+    val selected=path.getOrElse(root.resolve("vae"))
+    val directory=Files.isDirectory(selected)
+    val folder=if directory then selected else selected.getParent
+    val filename=if directory then "diffusion_pytorch_model.safetensors" else selected.getFileName.toString
+    val vae=PretrainedVae.load(folder,configOverride=if directory then None else Some(VaeConfig.read(root.resolve("vae/config.json"))),filename=filename)
+    context.checkCancelled()
+    val digest=java.security.MessageDigest.getInstance("SHA-256")
+    scala.util.Using.resource(scalatorch.io.SafeTensorSet.open(folder,filename=filename)) { set =>
+      set.sourceFiles.foreach { file =>
+        val input=Files.newInputStream(file)
+        try
+          val bytes=new Array[Byte](65536)
+          var n=input.read(bytes)
+          while n != -1 do
+            context.checkCancelled()
+            digest.update(bytes,0,n)
+            n=input.read(bytes)
+        finally input.close()
+      }
+    }
+    val info=if path.isEmpty then Map("vae_name"->Null,"vae_hash"->Null) else
+      Map("vae_name"->Str(selected.getFileName.toString),"vae_hash"->Str(java.util.HexFormat.of().formatHex(digest.digest())))
+    (vae,info)
   private def unsupported(message: String): Nothing=throw new NativeBackendError("unsupported",message)
   private def keys(p: Map[String,NativeJson],allowed: Set[String]): Unit=
     val unknown=p.keySet--allowed
@@ -103,22 +131,33 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         require(Path.of(str(p,"path",root.toString)).toRealPath()==root,"model path differs from configured checkpoint")
         if str(p,"dtype","fp32")!="fp32" || str(p,"vram_mode","cpu")!="cpu" then
           unsupported("native adapter currently requires fp32 and cpu")
-        if p.get("vae_path").exists(_!=Null) || p.get("vae_tiling").exists(_!=Bool(false)) then
-          unsupported("external VAE and tiling are not implemented")
+        if p.get("vae_tiling").exists(_!=Bool(false)) then unsupported("VAE tiling is not implemented")
+        val selectedVae=vaeChoice(p,"vae_path")
         val tokenizer=ClipFastTokenizer.load(root.resolve("tokenizer/vocab.json"),root.resolve("tokenizer/merges.txt"))
         context.checkCancelled()
         val clip=PretrainedClip.load(root.resolve("text_encoder"))
         context.checkCancelled()
         val unet=PretrainedUNet.load(root.resolve("unet"))
         context.checkCancelled()
-        val vae=PretrainedVae.load(root.resolve("vae"))
+        val (vae,vaeInfo)=readVae(selectedVae,context)
         val pipeline=new EulerImagePipeline(tokenizer,clip,unet,vae)
         val hash=checkpointHash(context)
         context.beginPublication()
         loaded=Some(pipeline)
-        modelSummary=Map("name"->Str(root.getFileName.toString),"kind"->Str("diffusers"),"hash"->Str(hash))
-        Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),"kind"->Str("diffusers"),
-          "hash"->Str(hash),"model_token"->Str(UUID.randomUUID().toString))
+        modelSummary=Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),"kind"->Str("diffusers"),
+          "hash"->Str(hash),"model_token"->Str(UUID.randomUUID().toString))++vaeInfo
+        modelSummary
+      case "set_vae" =>
+        keys(p,Set("path"))
+        val previous=loaded.getOrElse(throw new NativeBackendError("no_model","load a model first"))
+        val (vae,info)=readVae(vaeChoice(p,"path"),context)
+        require(vae.config.latentChannels==previous.vae.config.latentChannels &&
+          vae.config.channels.size==previous.vae.config.channels.size,"replacement VAE latent geometry differs")
+        val replacement=new EulerImagePipeline(previous.tokenizer,previous.textEncoder,previous.unet,vae)
+        context.beginPublication()
+        loaded=Some(replacement)
+        modelSummary=modelSummary++info++Map("model_token"->Str(UUID.randomUUID().toString))
+        modelSummary
       case "unload" =>
         keys(p,Set.empty)
         context.beginPublication()

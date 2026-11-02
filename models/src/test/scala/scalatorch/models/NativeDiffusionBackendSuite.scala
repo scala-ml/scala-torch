@@ -59,6 +59,18 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       val metadata=run("load_model",Map("path"->Str(root.toString),"dtype"->Str("fp32"),"vram_mode"->Str("cpu")))
       assert(metadata("hash").asInstanceOf[Str].value.matches("[0-9a-f]{64}"))
       assertEquals(backend.systemStatus("model").asInstanceOf[Obj].fields("hash"),metadata("hash"))
+      val externalVae=output.resolve("external VAE.fp16.safetensors")
+      Files.copy(root.resolve("vae/diffusion_pytorch_model.safetensors"),externalVae)
+      val swapped=run("set_vae",Map("path"->Str(externalVae.toString)))
+      assert(swapped("vae_hash").asInstanceOf[Str].value.matches("[0-9a-f]{64}"))
+      val retained=backend.systemStatus("model")
+      intercept[Exception](run("set_vae",Map("path"->Str(output.resolve("missing.safetensors").toString))))
+      assertEquals(backend.systemStatus("model"),retained)
+      val deniedVae=new NativeWorkContext(() => false,() => false,(_,_) => ())
+      intercept[java.util.concurrent.CancellationException](backend.execute(NativeRequest("vae-denied","set_vae",Map("path"->Null),None),deniedVae))
+      assertEquals(backend.systemStatus("model"),retained)
+      val restored=run("set_vae",Map("path"->Null))
+      assertEquals(restored("vae_name"),Null)
       intercept[NativeBackendError](run("load_model",Map("dtype"->Str("fp16"))))
       val result=run("txt2img",NativeGenerationDefaults.envelope++Map("output_dir"->Str(output.toString),"params"->Obj(NativeGenerationDefaults.generation++Map(
         "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(2),
