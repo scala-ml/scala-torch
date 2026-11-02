@@ -1,3 +1,22 @@
+## Img2img RGB resize compatibility (2026-11-03)
+
+Added DiffusionImageResize: Lanczos3, NUI stretch/crop/fill geometry, bounded
+source/output/intermediate pixel counts. RGB only; file decoding/EXIF/alpha and
+worker img2img routing remain NEXT, not implemented or advertised yet.
+Twenty-one independent Pillow13.0.0 fixtures (7geometries x3modes) match exactly;
+DiffusionImageResizeSuite passed after fixes. Initial failure exposed bicubic
+edge extrapolation in zero-size fill boxes; second exposed Pillow13 vertical-first
+resampling condition. Both diagnosed against oracle; no tolerance relaxation.
+Fixtures include one-pixel axes,up/down/mixed scales,portrait/landscape,identity.
+Normal Scala tests need no Python; optional scripts/reference_image_resize.py
+regenerates fixtures from an explicit NUI repo path. Provenance and upstream
+behavior reference recorded in docs/research/native-img2img.md. No new runtime
+library or copied upstream code. Older Pillow-version parity not claimed.
+
+Original512px/20step native SD1.5 job remains active in session11471, Java33796.
+Step8/20 and preview just received. Same protocol/output directory as before;
+keep polling existing handle. New RGB tests are CPU-only and did not add GPU
+contention this turn. NUI dedicated branch unchanged. Full goal still incomplete.
 ## Img2img pipeline foundation (2026-11-03)
 
 EulerImagePipeline generate/generateDpm now accept optional DiffusionImageSource

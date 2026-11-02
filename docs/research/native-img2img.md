@@ -25,3 +25,27 @@ This is library plumbing, not complete NUI img2img support. Remaining work:
 worker image path/format/bounds validation and preprocessing; NUI request routing
 and metadata/replay; CUDA VAE encode for practical full-size performance; real
 SD1.5/SDXL acceptance and inpainting. The complete migration goal remains open.
+## RGB resizing foundation
+
+DiffusionImageResize implements Lanczos3 with normalized22-bit coefficients,
+per-axis RGB clipping, stretch/center-crop/edge-fill geometry. Twenty-one RGB
+fixtures from NUI images.resize_image with Pillow13.0.0 match byte-for-byte.
+The7 geometries cover up/down/mixed scaling, portrait/landscape, one-pixel axes,
+and unchanged dimensions, across modes0/1/2. Invalid mode/size/budget reject.
+Input and intermediate pixel counts are bounded. EXIF/alpha handling is not part
+of this component and remains needed before worker img2img can accept image files.
+
+Two mismatches were diagnosed against the independent oracle: edge fill's
+zero-size box uses bicubic extrapolation (9/8 edge,-1/8 adjacent), not simple
+edge repetition; Pillow13 may execute vertical resampling first when its pixel
+reduction exceeds twice horizontal reduction. Preserve this order because RGB
+clipping between passes changes values. Behavior source checked:
+https://github.com/python-pillow/Pillow/blob/main/src/libImaging/Resample.c
+Implementation was written independently from the filter formula and oracle;
+no upstream code or new dependency was copied into the native runtime.
+
+Reproduce fixtures using scripts/reference_image_resize.py with NUI repo path
+and Pillow13.0.0. NUI python/sdfx/images.py SHA256 at generation:
+c06acef02c883518f658c49c34bff19284f75801a433f7faedece9de7a0e44d0.
+The Python script is an optional reference generator; checked-in RGB fixtures
+allow Scala-only tests. This does not assert parity with older Pillow versions.
