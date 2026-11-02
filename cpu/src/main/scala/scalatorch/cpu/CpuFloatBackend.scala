@@ -4,6 +4,10 @@ import scalatorch.*
 
 /** Immutable CPU Float32 inference backend; release is a no-op for GC-owned storage. */
 object CpuFloatBackend extends FloatBackend[Tensor[Float]]:
+  def rope(value: Tensor[Float],positionStart: Int = 0,theta: Double = 10000.0): Tensor[Float] =
+    CpuAttention.rope(value,positionStart,theta)
+  def causalAttention(query: Tensor[Float],key: Tensor[Float],value: Tensor[Float],queryStart: Int = 0,
+      maxScoreElements: Long = 16777216L): Tensor[Float] = CpuAttention.causal(query,key,value,queryStart,maxScoreElements)
   def upload(source: Tensor[Float]): Tensor[Float] = source
   def download(value: Tensor[Float]): Tensor[Float] = value
   def shape(value: Tensor[Float]): Shape = value.shape

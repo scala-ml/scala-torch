@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("binary","silu","rmsnorm","transpose","embedding").map { name =>
+  private val kernels=Seq("binary","silu","rmsnorm","transpose","embedding","rope","attention").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -97,6 +97,39 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
           driver.call("cuMemcpyHtoD_v2",Seq(JAVA_LONG,ADDRESS,JAVA_LONG),Long.box(buffer.address),host,Long.box(values.length.toLong*4))
       }
       body(buffer.address)
+    }
+
+  def rope(value: CudaTensor,positionStart: Int = 0,theta: Double = 10000.0): CudaTensor =
+    validate(value)
+    val count=RotaryCoefficients.count(value.shape,positionStart,theta)
+    if count==0 then return reshape(value,value.shape)
+    require(count*2<=Int.MaxValue && count*8+value.shape.numel*4<=maxBytes-used,"rotary workspace budget exceeded")
+    val coefficients=RotaryCoefficients.values(value.shape,positionStart,theta)
+    Using.resource(allocate(Shape.from(Seq(count*2)))) { buffer =>
+      Using.resource(Arena.ofConfined()) { arena =>
+        val host=arena.allocateFrom(JAVA_DOUBLE,coefficients*)
+        driver.call("cuMemcpyHtoD_v2",Seq(JAVA_LONG,ADDRESS,JAVA_LONG),Long.box(buffer.address),host,Long.box(count*8))
+      }
+      execute(value.shape,value.shape.numel/2,kernels("rope")) { (arena,result) =>
+        Seq(value.address,result.address,buffer.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+          Seq((value.shape.numel/2).toInt,value.shape.dims(2).toInt,value.shape.dims(3).toInt).map(v => arena.allocateFrom(JAVA_INT,v))
+      }
+    }
+
+  def causalAttention(query: CudaTensor,key: CudaTensor,value: CudaTensor,queryStart: Int = 0,
+      maxScoreElements: Long = 16777216L): CudaTensor =
+    validate(query);validate(key);validate(value)
+    val (output,scores)=AttentionLayout.validate(query.shape,key.shape,value.shape,queryStart,maxScoreElements)
+    if output.numel==0 then return allocate(output)
+    require(scores*2<=Int.MaxValue,"attention Double workspace exceeds Int indexing")
+    val q=query.shape.dims;val k=key.shape.dims;val v=value.shape.dims
+    val rows=output.numel/v(3)
+    Using.resource(allocate(Shape.from(Seq(scores*2)))) { scratch =>
+      execute(output,rows,kernels("attention")) { (arena,result) =>
+        Seq(query.address,key.address,value.address,result.address,scratch.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
+          Seq(rows,q(1),k(1),q(2),k(2),q(3),v(3),queryStart.toLong).map(x => arena.allocateFrom(JAVA_INT,x.toInt)) :+
+          arena.allocateFrom(JAVA_DOUBLE,1.0/math.sqrt(q(3).toDouble))
+      }
     }
 
   def transpose(value: CudaTensor,dim0: Int,dim1: Int): CudaTensor =

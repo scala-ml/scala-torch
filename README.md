@@ -176,3 +176,5 @@ The [persistent CUDA storage layer](docs/research/native-backends.md#persistent-
 [`FloatBackend[T]`](docs/research/float-backends.md) provides shared CPU/CUDA inference operations: GEMM, equal-shape add/multiply, SiLU and last-axis RMSNorm, with explicit transfer and release. The same generic gated MLP/residual computation is tested on both backends. Full transformer GPU execution remains pending.
 
 Backend embedding and layout operations now gather validated Long token IDs, reshape CUDA tensors with shared allocation ownership, and transpose arbitrary axis pairs into packed device outputs. Activations and embedding tables stay on the GPU; integer metadata transfers are explicit implementation work covered by the allocation budget.
+
+Backend rotary positions and causal grouped-query attention now run on CPU or CUDA, including offset queries and bounded score workspace. CPU forward results match existing autograd; real-GPU tests cover numerical agreement and causal masking. Pretrained full-model GPU integration is the next gate.

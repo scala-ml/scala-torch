@@ -133,3 +133,15 @@ class AttentionSuite extends munit.FunSuite:
     assertEquals(q.grad.get.shape, q.data.shape)
     assertEquals(values.grad.get.toFloatArray.length, 0)
   }
+
+  test("inference backend rotary and GQA preserve existing autograd forward semantics") {
+    import scalatorch.cpu.CpuFloatBackend
+    def values(shape: Shape,seed: Int) = Tensor.fromFloats(Array.tabulate(shape.numel.toInt)(i => ((i*7+seed)%19-9).toFloat/5),shape)
+    val q=values(Shape.from(Seq(2L,4L,6L,3L)),1).transpose(2,3)
+    val k=values(Shape.from(Seq(2L,2L,5L,6L)),2)
+    val v=values(Shape.from(Seq(2L,2L,5L,4L)),3)
+    assertEquals(CpuFloatBackend.rope(q,7,100000).toFloatArray.toVector,
+      Variable(q,false).rope(positionStart=7,theta=100000).data.toFloatArray.toVector)
+    assertEquals(CpuFloatBackend.causalAttention(q,k,v,2).toFloatArray.toVector,
+      Variable(q,false).causalAttention(Variable(k,false),Variable(v,false),queryStart=2).data.toFloatArray.toVector)
+  }

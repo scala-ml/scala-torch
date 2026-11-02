@@ -148,3 +148,110 @@ DONE:
 DONE:
  ret;
 }
+
+.visible .entry rope(
+ .param .u64 a, .param .u64 out, .param .u64 coefficients,
+ .param .u32 pairs, .param .u32 tokens, .param .u32 width
+) {
+ .reg .pred p;
+ .reg .b32 r<12>;
+ .reg .b64 d<10>;
+ .reg .f32 f<4>;
+ .reg .f64 g<8>;
+ ld.param.u64 d0,[a]; ld.param.u64 d1,[out]; ld.param.u64 d2,[coefficients];
+ ld.param.u32 r0,[pairs]; ld.param.u32 r1,[tokens]; ld.param.u32 r2,[width];
+ mov.u32 r3,%tid.x; mov.u32 r4,%ctaid.x; mov.u32 r5,%ntid.x;
+ mad.lo.u32 r6,r4,r5,r3;
+ setp.ge.u32 p,r6,r0; @p bra DONE;
+ shr.u32 r7,r2,1; div.u32 r8,r6,r7; rem.u32 r9,r6,r7;
+ rem.u32 r10,r8,r1; mul.lo.u32 r11,r9,2; mad.lo.u32 r10,r10,r2,r11;
+ mul.wide.u32 d3,r10,8; add.u64 d4,d2,d3;
+ ld.global.f64 g0,[d4]; ld.global.f64 g1,[d4+8];
+ mad.lo.u32 r10,r8,r2,r9; add.u32 r11,r10,r7;
+ mul.wide.u32 d3,r10,4; mul.wide.u32 d5,r11,4;
+ add.u64 d4,d0,d3; add.u64 d6,d0,d5;
+ ld.global.f32 f0,[d4]; ld.global.f32 f1,[d6];
+ cvt.f64.f32 g2,f0; cvt.f64.f32 g3,f1;
+ mul.rn.f64 g4,g2,g0; mul.rn.f64 g5,g3,g1; sub.rn.f64 g4,g4,g5;
+ mul.rn.f64 g6,g3,g0; mul.rn.f64 g7,g2,g1; add.rn.f64 g6,g6,g7;
+ cvt.rn.f32.f64 f2,g4; cvt.rn.f32.f64 f3,g6;
+ add.u64 d7,d1,d3; add.u64 d8,d1,d5;
+ st.global.f32 [d7],f2; st.global.f32 [d8],f3;
+DONE:
+ ret;
+}
+
+// One thread per query row. Scores/unnormalized probabilities use Double scratch.
+.visible .entry attention(
+ .param .u64 query, .param .u64 key, .param .u64 value, .param .u64 out, .param .u64 scores,
+ .param .u32 rows, .param .u32 heads, .param .u32 kvheads, .param .u32 qtokens,
+ .param .u32 ktokens, .param .u32 width, .param .u32 vwidth, .param .u32 start,
+ .param .f64 scale
+) {
+ .reg .pred p,pnan,pnew;
+ .reg .b32 r<28>;
+ .reg .b64 d<12>;
+ .reg .f32 f<4>;
+ .reg .f64 g<9>;
+ ld.param.u64 d0,[query]; ld.param.u64 d1,[key]; ld.param.u64 d2,[value];
+ ld.param.u64 d3,[out]; ld.param.u64 d4,[scores];
+ ld.param.u32 r0,[rows]; ld.param.u32 r1,[heads]; ld.param.u32 r2,[kvheads];
+ ld.param.u32 r3,[qtokens]; ld.param.u32 r4,[ktokens]; ld.param.u32 r5,[width];
+ ld.param.u32 r6,[vwidth]; ld.param.u32 r7,[start]; ld.param.f64 g0,[scale];
+ mov.u32 r8,%tid.x; mov.u32 r9,%ctaid.x; mov.u32 r10,%ntid.x;
+ mad.lo.u32 r11,r9,r10,r8;
+ setp.ge.u32 p,r11,r0; @p bra DONE;
+ rem.u32 r12,r11,r3; div.u32 r13,r11,r3;
+ rem.u32 r13,r13,r1; mul.lo.u32 r15,r3,r1; div.u32 r14,r11,r15;
+ div.u32 r16,r1,r2; div.u32 r13,r13,r16;
+ mad.lo.u32 r17,r14,r2,r13; mul.lo.u32 r17,r17,r4;
+ add.u32 r18,r7,r12; add.u32 r18,r18,1; min.u32 r18,r18,r4;
+ mul.lo.u32 r21,r11,r5; mul.lo.u32 r24,r11,r4;
+ mov.u32 r19,0; mov.f64 g1,0dFFF0000000000000; setp.ne.u32 pnan,r0,r0;
+SCORES:
+ setp.ge.u32 p,r19,r18; @p bra EXP_INIT;
+ add.u32 r22,r17,r19; mul.lo.u32 r22,r22,r5;
+ mov.u32 r20,0; mov.f64 g2,0d0000000000000000;
+DOT:
+ setp.ge.u32 p,r20,r5; @p bra SCORE_STORE;
+ add.u32 r26,r21,r20; mul.wide.u32 d5,r26,4; add.u64 d6,d0,d5;
+ add.u32 r26,r22,r20; mul.wide.u32 d5,r26,4; add.u64 d7,d1,d5;
+ ld.global.f32 f0,[d6]; ld.global.f32 f1,[d7];
+ cvt.f64.f32 g3,f0; cvt.f64.f32 g4,f1;
+ mul.rn.f64 g5,g3,g4; add.rn.f64 g2,g2,g5;
+ add.u32 r20,r20,1; bra DOT;
+SCORE_STORE:
+ mul.rn.f64 g2,g2,g0; add.u32 r23,r24,r19;
+ mul.wide.u32 d5,r23,8; add.u64 d8,d4,d5; st.global.f64 [d8],g2;
+ setp.nan.f64 pnew,g2,g2; or.pred pnan,pnan,pnew; max.f64 g1,g1,g2;
+ add.u32 r19,r19,1; bra SCORES;
+EXP_INIT:
+ @pnan mov.f64 g1,0d7FF8000000000000;
+ mov.f64 g6,0d0000000000000000; mov.u32 r19,0;
+EXP:
+ setp.ge.u32 p,r19,r18; @p bra OUTPUT_INIT;
+ add.u32 r23,r24,r19; mul.wide.u32 d5,r23,8; add.u64 d8,d4,d5;
+ ld.global.f64 g2,[d8]; sub.rn.f64 g2,g2,g1;
+ cvt.rn.f32.f64 f0,g2; mul.rn.f32 f0,f0,0f3FB8AA3B; ex2.approx.f32 f0,f0;
+ cvt.f64.f32 g2,f0; st.global.f64 [d8],g2; add.rn.f64 g6,g6,g2;
+ add.u32 r19,r19,1; bra EXP;
+OUTPUT_INIT:
+ mov.u32 r20,0; mul.lo.u32 r25,r11,r6;
+OUTPUT:
+ setp.ge.u32 p,r20,r6; @p bra DONE;
+ mov.u32 r19,0; mov.f64 g7,0d0000000000000000;
+WEIGHTED:
+ setp.ge.u32 p,r19,r18; @p bra OUTPUT_STORE;
+ add.u32 r23,r24,r19; mul.wide.u32 d5,r23,8; add.u64 d8,d4,d5;
+ ld.global.f64 g2,[d8]; div.rn.f64 g2,g2,g6;
+ add.u32 r26,r17,r19; mad.lo.u32 r26,r26,r6,r20;
+ mul.wide.u32 d5,r26,4; add.u64 d9,d2,d5; ld.global.f32 f0,[d9];
+ cvt.f64.f32 g3,f0; mul.rn.f64 g4,g2,g3; add.rn.f64 g7,g7,g4;
+ add.u32 r19,r19,1; bra WEIGHTED;
+OUTPUT_STORE:
+ add.u32 r26,r25,r20; mul.wide.u32 d5,r26,4; add.u64 d10,d3,d5;
+ cvt.rn.f32.f64 f0,g7; st.global.f32 [d10],f0;
+ add.u32 r20,r20,1; bra OUTPUT;
+DONE:
+ ret;
+}

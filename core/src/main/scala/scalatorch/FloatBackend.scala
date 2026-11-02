@@ -18,3 +18,5 @@ trait FloatBackend[T]:
   def multiply(a: T, b: T): T
   def silu(value: T): T
   def rmsNorm(value: T, weight: T, epsilon: Double = 1e-6): T
+  def rope(value: T, positionStart: Int = 0, theta: Double = 10000.0): T
+  def causalAttention(query: T,key: T,value: T,queryStart: Int = 0,maxScoreElements: Long = 16777216L): T
