@@ -174,6 +174,7 @@ final class Variable private (
     }
 
 object Variable:
+  def cat(inputs: Seq[Variable],dim: Int): Variable = ConcatOps(inputs,dim)
   def apply(data: Tensor[Float], requiresGrad: Boolean = true): Variable =
     require(data.device == Device.Cpu && data.dtype == DType.Float32, "autograd requires CPU Float32")
     new Variable(data, requiresGrad, Vector.empty, Vector.empty)
