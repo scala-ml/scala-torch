@@ -1,3 +1,28 @@
+## Resident CUDA convolution for diffusion (2026-11-03)
+
+Added CudaSession.conv2d on resident CudaTensor inputs/output, NCHW/OIHW grouped
+cross-correlation. PTX one thread/output, Double accumulation in identical product
+order to CPU reference (no tiling/performance claim). Parameters staged on GPU and
+charged to allocation budget; all scratch freed on success/failure. Geometry checks
+shared with CPU through private[scalatorch] Conv2dOps.Geometry/geometry(Shape,...).
+GPU module now loads conv2d entry alongside existing transformer kernels.
+
+Verified actual hardware again: GTX1650 SUPER, 4096MiB, driver610.88. Enabled
+SCALATORCH_CUDA_TESTS=1 before starting scala-torch sbt. core Conv2dSuite 3 passed;
+ffm/test ALL 36 passed, no skipped convolution tests (XML tests3 failures0 skipped0).
+New tests cover 6 configs (padding/stride/dilation/groups including depthwise),
+bit-for-bit CPU reference agreement, noncontiguous upload, empty batches, NaN/Inf
+and padding, released handle rejection, allocation failure/no-leak accounting.
+No Python used. CUDA SDK/nvcc absent on PATH; committed PTX loaded by CUDA driver.
+
+This does NOT yet run image pipeline on GPU. EulerImagePipeline/Variable/nn Conv2d
+remain CPU-only; CudaSession resident API is separate from Tensor[Float]. Next add
+GPU diffusion primitives (GroupNorm/LayerNorm, noncausal attention, concat/resize,
+GEGLU etc) and backend-generic/explicit resident U-Net/VAE composition; integrate
+memory lifetime/offload/fp16 for full-sized models. Current direct Double conv is
+correctness foundation and may be slow on GTX1650; no acceleration claim.
+NUI unchanged this wave. Current scala-torch sbt server has CUDA_TESTS=1; no tests
+running. Full user goal remains active; earlier tiny CPU UI success is retained.
 ## Native keyword mapping commands and atomic edits (2026-11-03)
 
 Added NativeKeywordMappings handler for model_keyword check/save/delete, routed by

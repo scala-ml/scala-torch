@@ -883,3 +883,61 @@ INVALID:
  atom.global.or.b32 r5,[d5],1;
 DONE: ret;
 }
+
+// One thread per output, Double accumulation in the CPU reference's product order.
+.visible .entry conv2d(.param .u64 c_x, .param .u64 c_w, .param .u64 c_out,
+ .param .u64 c_geometry, .param .u32 c_count) {
+ .reg .pred p;
+ .reg .u32 ci,h,w,co,cg,kh,kw,oh,ow,sh,sw,ph,pw,dh,dw,groups;
+ .reg .u32 count,idx,ox,oy,oc,batch,first,ch,ky,kx,tmp,xi,wi;
+ .reg .u64 px,pwgt,pout,pg,addr,offset;
+ .reg .s64 iy,ix,coord,tmp64;
+ .reg .f32 xf,wf,result;
+ .reg .f64 sum,xd,wd,product;
+ ld.param.u64 px,[c_x]; ld.param.u64 pwgt,[c_w]; ld.param.u64 pout,[c_out];
+ ld.param.u64 pg,[c_geometry]; ld.param.u32 count,[c_count];
+ mov.u32 idx,%ctaid.x; mov.u32 tmp,%ntid.x; mul.lo.u32 idx,idx,tmp;
+ mov.u32 tmp,%tid.x; add.u32 idx,idx,tmp; setp.ge.u32 p,idx,count; @p bra C_DONE;
+ ld.global.u32 ci,[pg]; ld.global.u32 h,[pg+4]; ld.global.u32 w,[pg+8];
+ ld.global.u32 co,[pg+12]; ld.global.u32 cg,[pg+16]; ld.global.u32 kh,[pg+20];
+ ld.global.u32 kw,[pg+24]; ld.global.u32 oh,[pg+28]; ld.global.u32 ow,[pg+32];
+ ld.global.u32 sh,[pg+36]; ld.global.u32 sw,[pg+40]; ld.global.u32 ph,[pg+44];
+ ld.global.u32 pw,[pg+48]; ld.global.u32 dh,[pg+52]; ld.global.u32 dw,[pg+56];
+ ld.global.u32 groups,[pg+60];
+ rem.u32 ox,idx,ow; div.u32 tmp,idx,ow; rem.u32 oy,tmp,oh;
+ div.u32 tmp,tmp,oh; rem.u32 oc,tmp,co; div.u32 batch,tmp,co;
+ div.u32 tmp,co,groups; div.u32 first,oc,tmp; mul.lo.u32 first,first,cg;
+ mov.f64 sum,0d0000000000000000; mov.u32 ch,0;
+C_CHANNEL:
+ setp.ge.u32 p,ch,cg; @p bra C_STORE;
+ mov.u32 ky,0;
+C_ROW:
+ setp.ge.u32 p,ky,kh; @p bra C_NEXT_CHANNEL;
+ mul.wide.u32 iy,oy,sh; cvt.u64.u32 tmp64,ph; sub.s64 iy,iy,tmp64;
+ mul.wide.u32 tmp64,ky,dh; add.s64 iy,iy,tmp64;
+ setp.lt.s64 p,iy,0; @p bra C_NEXT_ROW;
+ cvt.u64.u32 tmp64,h; setp.ge.s64 p,iy,tmp64; @p bra C_NEXT_ROW;
+ mov.u32 kx,0;
+C_COL:
+ setp.ge.u32 p,kx,kw; @p bra C_NEXT_ROW;
+ mul.wide.u32 ix,ox,sw; cvt.u64.u32 tmp64,pw; sub.s64 ix,ix,tmp64;
+ mul.wide.u32 tmp64,kx,dw; add.s64 ix,ix,tmp64;
+ setp.lt.s64 p,ix,0; @p bra C_NEXT_COL;
+ cvt.u64.u32 tmp64,w; setp.ge.s64 p,ix,tmp64; @p bra C_NEXT_COL;
+ add.u32 tmp,first,ch; mad.lo.u32 xi,batch,ci,tmp;
+ cvt.u32.u64 tmp,iy; mad.lo.u32 xi,xi,h,tmp;
+ cvt.u32.u64 tmp,ix; mad.lo.u32 xi,xi,w,tmp;
+ mad.lo.u32 wi,oc,cg,ch; mad.lo.u32 wi,wi,kh,ky; mad.lo.u32 wi,wi,kw,kx;
+ mul.wide.u32 offset,xi,4; add.u64 addr,px,offset; ld.global.f32 xf,[addr];
+ mul.wide.u32 offset,wi,4; add.u64 addr,pwgt,offset; ld.global.f32 wf,[addr];
+ cvt.f64.f32 xd,xf; cvt.f64.f32 wd,wf; mul.rn.f64 product,xd,wd; add.rn.f64 sum,sum,product;
+C_NEXT_COL:
+ add.u32 kx,kx,1; bra C_COL;
+C_NEXT_ROW:
+ add.u32 ky,ky,1; bra C_ROW;
+C_NEXT_CHANNEL:
+ add.u32 ch,ch,1; bra C_CHANNEL;
+C_STORE:
+ cvt.rn.f32.f64 result,sum; mul.wide.u32 offset,idx,4; add.u64 addr,pout,offset; st.global.f32 [addr],result;
+C_DONE: ret;
+}

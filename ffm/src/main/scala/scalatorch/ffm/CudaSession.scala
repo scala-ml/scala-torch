@@ -19,7 +19,7 @@ final class CudaTensor private[ffm] (private[ffm] val session: CudaSession,
   def matmul(other: CudaTensor): CudaTensor = session.matmul(this,other)
   def close(): Unit = session.release(this)
 
-/** Thread-confined device storage and synchronous packed GEMM execution. */
+/** Thread-confined resident Float32 storage and synchronous CUDA kernels. */
 final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val deviceName: String, val driverVersion: Int, val maxBytes: Long) extends AdamWBackend[CudaTensor]:
   private val owner=Thread.currentThread()
@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
+  private val kernels=Seq("conv2d","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -464,6 +464,20 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
         Seq(arena.allocateFrom(JAVA_INT,value.shape.numel.toInt),arena.allocateFrom(JAVA_FLOAT,scalar))
     }
+  /** NCHW/OIHW direct grouped cross-correlation. Inputs and output remain resident. */
+  def conv2d(input: CudaTensor,weight: CudaTensor,config: Conv2dConfig=Conv2dConfig()): CudaTensor =
+    validate(input);validate(weight)
+    val g=Conv2dOps.geometry(input.shape,weight.shape,config)
+    val dimensions=Array(g.ci,g.h,g.w,g.co,g.cg,g.kh,g.kw,g.oh,g.ow,
+      config.stride._1,config.stride._2,config.padding._1,config.padding._2,
+      config.dilation._1,config.dilation._2,config.groups)
+    withInts(dimensions) { geometry =>
+      execute(g.shape,g.shape.numel,kernels("conv2d")) { (arena,result) =>
+        Seq(input.address,weight.address,result.address,geometry).map(v => arena.allocateFrom(JAVA_LONG,v)) :+
+          arena.allocateFrom(JAVA_INT,g.shape.numel.toInt)
+      }
+    }
+
   def silu(value: CudaTensor): CudaTensor =
     validate(value)
     execute(value.shape,value.shape.numel,kernels("silu")) { (arena,result) =>
