@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("concat_copy","resize_nearest","groupnorm","conv2d","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
+  private val kernels=Seq("broadcast_add","concat_copy","resize_nearest","groupnorm","conv2d","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -485,6 +485,26 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
         Seq(a.shape.numel.toInt,op).map(v => arena.allocateFrom(JAVA_INT,v))
     }
   def add(a: CudaTensor,b: CudaTensor): CudaTensor = binary(a,b,0)
+  /** NumPy-style trailing-axis broadcasting, without materializing expanded operands. */
+  def addBroadcast(a: CudaTensor,b: CudaTensor): CudaTensor =
+    validate(a);validate(b)
+    if a.shape==b.shape then return add(a,b)
+    val rank=math.max(a.shape.rank,b.shape.rank)
+    def padded(s: Shape)=Vector.fill(rank-s.rank)(1L)++s.dims
+    val ad=padded(a.shape);val bd=padded(b.shape)
+    val output=Shape.from(ad.zip(bd).map { (x,y) =>
+      require(x==y || x==1 || y==1,"incompatible broadcast dimensions")
+      if x==1 then y else x
+    })
+    require(output.numel<=Int.MaxValue,"broadcast output exceeds Int indexing")
+    if output.numel==0 then return allocate(output)
+    def strides(ds: Vector[Long])=ds.scanRight(1L)(_ * _).tail.zip(ds).map((s,d) => if d==1 then 0L else s)
+    withInts((output.dims++strides(ad)++strides(bd)).map(_.toInt).toArray) { metadata =>
+      execute(output,output.numel,kernels("broadcast_add")) { (arena,result) =>
+        Seq(a.address,b.address,result.address,metadata).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+          Seq(output.numel.toInt,rank).map(v => arena.allocateFrom(JAVA_INT,v))
+      }
+    }
   def multiply(a: CudaTensor,b: CudaTensor): CudaTensor = binary(a,b,1)
   def fill(shape: Shape,value: Float): CudaTensor =
     execute(shape,shape.numel,kernels("fill")) { (arena,result) =>

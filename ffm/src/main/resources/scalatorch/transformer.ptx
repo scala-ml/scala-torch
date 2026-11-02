@@ -3,6 +3,36 @@
 .target sm_50
 .address_size 64
 
+.visible .entry broadcast_add(
+ .param .u64 a, .param .u64 b, .param .u64 output, .param .u64 meta,
+ .param .u32 count, .param .u32 rank
+) {
+ .reg .pred p;
+ .reg .b32 r<16>;
+ .reg .b64 d<9>;
+ .reg .f32 f<3>;
+ ld.param.u64 d0,[a]; ld.param.u64 d1,[b]; ld.param.u64 d2,[output]; ld.param.u64 d3,[meta];
+ ld.param.u32 r0,[count]; ld.param.u32 r1,[rank];
+ mov.u32 r2,%ctaid.x; mov.u32 r3,%ntid.x; mov.u32 r4,%tid.x;
+ mad.lo.u32 r2,r2,r3,r4; setp.ge.u32 p,r2,r0; @p bra DONE;
+ mov.u32 r3,r2; mov.u32 r4,r1; mov.u32 r5,0; mov.u32 r6,0;
+ mul.wide.u32 d4,r1,4; add.u64 d5,d3,d4; add.u64 d6,d5,d4;
+LOOP:
+ setp.eq.u32 p,r4,0; @p bra VALUE;
+ sub.u32 r4,r4,1; mul.wide.u32 d4,r4,4;
+ add.u64 d7,d3,d4; ld.global.u32 r7,[d7];
+ rem.u32 r8,r3,r7; div.u32 r3,r3,r7;
+ add.u64 d7,d5,d4; ld.global.u32 r9,[d7]; mad.lo.u32 r5,r8,r9,r5;
+ add.u64 d7,d6,d4; ld.global.u32 r9,[d7]; mad.lo.u32 r6,r8,r9,r6;
+ bra LOOP;
+VALUE:
+ mul.wide.u32 d4,r5,4; add.u64 d4,d0,d4; ld.global.f32 f0,[d4];
+ mul.wide.u32 d4,r6,4; add.u64 d4,d1,d4; ld.global.f32 f1,[d4];
+ add.rn.f32 f2,f0,f1;
+ mul.wide.u32 d4,r2,4; add.u64 d4,d2,d4; st.global.f32 [d4],f2;
+DONE: ret;
+}
+
 .visible .entry concat_copy(
  .param .u64 input, .param .u64 output, .param .u32 count,
  .param .u32 chunk, .param .u32 row_width, .param .u32 offset

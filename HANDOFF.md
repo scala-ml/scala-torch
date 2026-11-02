@@ -1,3 +1,33 @@
+## Uploaded CUDA diffusion residual blocks (2026-11-03)
+
+CudaDiffusionResnet.upload(session, DiffusionResnet2d) snapshots existing model
+parameters once. Inference composes resident GroupNorm, SiLU, biased convolution,
+optional timestep projection/addition, shortcut and output scaling. Parameter
+and temporary handles are explicit; intermediate activations close after use;
+Using.Manager cleans exceptional paths. Returned tensors survive block closure.
+CPU parameter mutation after upload does not affect the snapshot. Local Linear
+low-rank adapters on time projections also execute resident (this does NOT add
+NUI LoRA loading/application or claim whole diffusion LoRA support).
+
+CudaSession.addBroadcast implements trailing-axis addition with zero strides,
+without expanding inputs. Integer geometry metadata is budgeted and cleaned.
+Equal shapes retain existing binary fast path; empty shapes skip metadata/kernels.
+
+Validation: SCALATORCH_CUDA_TESTS=1 and JAVA_TOOL_OPTIONS with
+-Dscalatorch.vae.dir=C:/Users/Mizushima/dev/scala-torch/.superpowers/models/tiny-sd-pipe/vae
+were set before restarting sbt. models/testOnly *CudaDiffusionResnetSuite
+*DiffusionResnetSuite passed6, including actual safetensors VAE decoder mid first
+and second residuals chained on GPU (attention intentionally not part of that
+residual-only test). Conditioned/unconditioned/channel-changing cases, time
+projection LoRA, repeated calls, snapshot isolation, closed-block rejection and
+upload/execution budget cleanup passed. CPU parity tolerance3e-6 (loaded VAE5e-6).
+ffm/testOnly * passed all49 including broadcast bias/time/scalar/empty layouts
+and scratch cleanup when output allocation fails. No Python runtime involved.
+
+The full loaded VAE/UNet graph and NUI worker still use the CPU pipeline. Next
+connect projected attention and remaining graph operations to a reusable resident
+model executor, then verify complete inference; FP16/offload remain outstanding.
+Current sbt server inherits the CUDA flag and scalatorch.vae.dir above.
 ## Resident CUDA concatenation and skip connection (2026-11-03)
 
 CudaSession.cat joins packed tensors along any axis with one output allocation,
