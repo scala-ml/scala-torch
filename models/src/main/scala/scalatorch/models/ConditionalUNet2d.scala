@@ -87,17 +87,19 @@ final case class ConditionalUNet2d(convIn: Conv2d,timeEmbedding: DiffusionTimeEm
     require(normOut.channels==channels && convOut.weight.data.shape.dims(1)==channels,"U-Net output channel mismatch")
   validate()
 
-  def apply(sample: Variable,timesteps: Tensor[Float],context: Variable): Variable =
-    val shape=sample.data.shape
+  private[models] def timestepFeatures(shape: Shape,timesteps: Tensor[Float],context: Shape): Tensor[Float] =
     require(shape.rank==4 && shape.dims(1)==inputChannels,"U-Net sample must have matching NCHW channels")
     val batch=shape.dims.head
-    require(context.data.shape.rank==3 && context.data.shape.dims.head==batch &&
-      context.data.shape.dims(2)==contextWidth && context.data.shape.dims(1)>0,"U-Net context batch/width mismatch")
+    require(context.rank==3 && context.dims.head==batch &&
+      context.dims(2)==contextWidth && context.dims(1)>0,"U-Net context batch/width mismatch")
     require(timesteps.shape.rank==1 && (timesteps.shape.dims.head==1 || timesteps.shape.dims.head==batch),
       "U-Net requires one timestep or one per sample")
     val times=if timesteps.shape.dims.head==batch then timesteps else timesteps.broadcastTo(Shape.from(Seq(batch)))
-    val features=DiffusionTimesteps.sinusoidal(times,featureWidth,timeSettings.flipSinToCos,timeSettings.frequencyShift,
+    DiffusionTimesteps.sinusoidal(times,featureWidth,timeSettings.flipSinToCos,timeSettings.frequencyShift,
       timeSettings.phaseScale,timeSettings.maxPeriod,timeSettings.maxElements)
+
+  def apply(sample: Variable,timesteps: Tensor[Float],context: Variable): Variable =
+    val features=timestepFeatures(sample.data.shape,timesteps,context.data.shape)
     val time=timeEmbedding(Variable(features,requiresGrad=false))
     var hidden=convIn(sample)
     val skips=ArrayBuffer(hidden)

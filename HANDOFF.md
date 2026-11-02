@@ -1,3 +1,38 @@
+## Complete resident CUDA U-Net forward (2026-11-03)
+
+CudaUNet.upload(session, ConditionalUNet2d, cancelled) snapshots the full model.
+Forward composes learned timestep MLP, input convolution, all down layers,
+residual/attention middle, LIFO skips and up layers, output norm/activation/conv.
+Skips hold independent retained handles and release immediately after concatenation;
+all exceptional/cancel paths are scoped. Only small sinusoidal timestep constants
+are computed on CPU and uploaded; learned layers, context projections and image
+activations stay on GPU. No intermediate activation readbacks.
+
+ConditionalUNet2d.timestepFeatures shares input/context/time validation and CPU
+sinusoidal constants between CPU and GPU paths. Both common padding-one downsample
+and explicit right/bottom zero-pad downsample are supported. The latter composes
+resident fill/cat operations, with extra copies; it is not an optimized padding
+kernel. Odd-size upsampling targets the next skip's exact spatial dimensions.
+
+Actual GPU verification:
+- Three independent Candle U-Net cases:3x5 t7.5 maxAbsError1.3113022e-6,
+  4x4 t0 1.0132790e-6,4x6 t19 2.2649765e-6. Initial test mistakenly used t7.5
+  for all files; corrected fixture inputs to the existing reference specification.
+- Batch2 shared/per-sample timesteps and padding-zero/one paths match CPU within
+  max3.8743019e-7. Outputs survive model/input closure. Invalid conditioning,
+  cancellation then reuse, and limited-workspace failure preserve allocation counts.
+- models/testOnly *CudaUNetSuite:3 passed after fixture correction.
+- PretrainedUNetSuite:7 passed in initial combined run (pinned weights/reference
+  validation); that combined run still had the fixture-input test failure above.
+- Final models/testOnly *Cuda* *ConditionalUNetSuite *DiffusionTimeSuite:26 passed,
+  no skips, including existing CUDA VAE/pipeline regressions and CPU gradient tests.
+
+No worker/pipeline U-Net selector is connected yet. Next keep uploaded U-Net weights
+and encoded contexts alive across the full denoising loop, integrate explicit CUDA
+selection, then verify full prompt-to-image through NUI. Sampling and CLIP remain
+CPU today; dense score budgets, normal-model memory, FP16/offload, SDXL and other
+existing NUI features remain outstanding. Current scala-torch sbt server retains
+CUDA test flag and all three pinned model directory properties. NUI unchanged.
 ## Resident U-Net spatial Transformer and GEGLU (2026-11-03)
 
 CudaSession.geglu now executes final-axis split Gaussian-error GELU gating on GPU.

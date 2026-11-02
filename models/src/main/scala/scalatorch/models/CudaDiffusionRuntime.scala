@@ -204,6 +204,66 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       result
     }
 
+  private def downsample(input: CudaTensor,model: DiffusionDownsample2d): CudaTensor =
+    if model.conv.config.padding==(1,1) then conv(input,model.conv)
+    else scope { use =>
+      val shape=session.shape(input)
+      val column=use(session.fill(Shape.from(shape.dims.updated(3,1L)),0f))
+      val wider=use(session.cat(Seq(input,column),3));column.close()
+      val row=use(session.fill(Shape.from(wider.shape.dims.updated(2,1L)),0f))
+      val padded=use(session.cat(Seq(wider,row),2));wider.close();row.close()
+      val result=use(conv(padded,model.conv));padded.close()
+      result
+    }
+
+  def unet(input: CudaTensor,model: ConditionalUNet2d,timesteps: Tensor[Float],context: CudaTensor): CudaTensor =
+    check()
+    // Small deterministic sinusoidal conditioning constants are prepared on CPU.
+    // Learned timestep projections and every image/context operation run on CUDA.
+    val features=model.timestepFeatures(session.shape(input),timesteps,session.shape(context))
+    scope { use =>
+      val f=use(session.upload(features))
+      val first=use(linear(f,model.timeEmbedding.linear1));f.close()
+      val activated=use(session.silu(first));first.close()
+      val time=use(linear(activated,model.timeEmbedding.linear2));activated.close()
+      var hidden=use(conv(input,model.convIn))
+      val skips=scala.collection.mutable.ArrayBuffer.empty[CudaTensor]
+      def saveSkip(): Unit=skips+=use(session.reshape(hidden,hidden.shape))
+      def next(value: CudaTensor): Unit =
+        val owned=use(value)
+        hidden.close();hidden=owned
+        check()
+      def layer(block: DiffusionUNetLayer): Unit =
+        next(resnet(hidden,block.resnet,Some(time)))
+        block.attention.foreach(a => next(spatialTransformer(hidden,a,context)))
+      saveSkip()
+      model.downBlocks.foreach { block =>
+        block.layers.foreach { l => layer(l);saveSkip() }
+        block.downsample.foreach { d => next(downsample(hidden,d));saveSkip() }
+      }
+      next(resnet(hidden,model.midBlock.first,Some(time)))
+      next(spatialTransformer(hidden,model.midBlock.attention,context))
+      next(resnet(hidden,model.midBlock.second,Some(time)))
+      model.upBlocks.foreach { block =>
+        block.layers.foreach { l =>
+          val skip=skips.remove(skips.size-1)
+          next(session.cat(Seq(hidden,skip),1));skip.close()
+          layer(l)
+        }
+        block.upsample.foreach { up =>
+          val target=skips.last.shape
+          next(session.resizeNearest2d(hidden,target.dims(2).toInt,target.dims(3).toInt))
+          next(conv(hidden,up.conv))
+        }
+      }
+      require(skips.isEmpty,"U-Net leaves unused skip tensors")
+      time.close()
+      next(norm(hidden,model.normOut))
+      next(session.silu(hidden))
+      next(conv(hidden,model.convOut))
+      hidden
+    }
+
   def decode(input: CudaTensor,model: VaeDecoder): CudaTensor =
     check()
     model.preflight(session.shape(input))
