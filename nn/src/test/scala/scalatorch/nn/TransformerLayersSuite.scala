@@ -125,3 +125,14 @@ class TransformerLayersSuite extends munit.FunSuite:
     output.sum().backward()
     assertEquals(table.grad.get.toFloatArray.length, 0)
   }
+  test("attention and rotary retain frozen saved-parameter invalidation") {
+    for changeKey <- Seq(true, false) do
+      val q = Parameter(tensor(Seq(1,1,2,2), 1,2,3,4))
+      val k = Parameter(tensor(Seq(1,1,2,2), 2,3,4,5), trainable = false)
+      val v = Parameter(tensor(Seq(1,1,2,2), 3,4,5,6), trainable = false)
+      val loss = q.value.rope().causalAttention(k.value.rope(), v.value).sum()
+      val changed = if changeKey then k else v
+      changed.load(tensor(Seq(1,1,2,2), 7,8,9,10))
+      intercept[IllegalArgumentException](loss.backward())
+      assertEquals(q.grad, None)
+  }

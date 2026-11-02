@@ -59,6 +59,9 @@ final class Variable private (
   def embedding(indices: Tensor[Long]): Variable = TransformerOps.embedding(this, indices)
   def rmsNorm(weight: Variable, epsilon: Double = 1e-6): Variable = TransformerOps.rmsNorm(this, weight, epsilon)
   def silu(): Variable = TransformerOps.silu(this)
+  def causalAttention(key: Variable, value: Variable, queryStart: Int = 0,
+      maxScoreElements: Long = 16777216L): Variable = AttentionOps.causal(this, key, value, queryStart, maxScoreElements)
+  def rope(positionStart: Int = 0, theta: Double = 10000.0): Variable = AttentionOps.rope(this, positionStart, theta)
 
   def relu(): Variable =
     val source = data.toFloatArray
