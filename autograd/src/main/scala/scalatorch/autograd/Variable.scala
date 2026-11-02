@@ -60,6 +60,10 @@ final class Variable private (
   def crossEntropy(targets: Tensor[Long], reduction: LossReduction = LossReduction.Mean, ignoreIndex: Long = -100): Variable =
     LossOps.crossEntropy(this,targets,reduction,ignoreIndex)
 
+  def groupNorm(groups: Int,epsilon: Double = 1e-5): Variable =
+    Variable.result(GroupNormOps.forward(data,groups,epsilon),Vector(
+      this -> ((g: Tensor[Float]) => GroupNormOps.backward(data,g,groups,epsilon))))
+
   def pad2d(padding: Padding2d): Variable =
     Variable.result(SpatialPadding.forward(data,padding),Vector(
       this -> ((g: Tensor[Float]) => SpatialPadding.backward(data,g,padding))))
