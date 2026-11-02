@@ -24,8 +24,19 @@ catalogs do not automatically identify converted Diffusers directories.
 
 Selected LoRAs, textual inversion embeddings and extra-network tags still fail
 explicitly pending their native inference implementation. Mapping UI commands
-(`model_keyword` check/save/delete), catalog installation and model keyword
-capability advertisement are not yet implemented. Disabled ControlNet slots are
+(`model_keyword` check/save/delete) now support the configured Diffusers directory
+and legacy-hash checkpoint/LoRA files. File mappings preserve `match_name` aliases.
+The NUI client integration test saves a mapping, generates using it, checks the
+resolved prompt, deletes the mapping and checks that it is gone. UI compilation
+also passes; this test does not click the mapping panel's buttons.
+
+Edits retain unrelated CSV records and comments, including original line endings.
+They acquire the NUI-compatible Windows byte lock, reject malformed CSV, write a
+temporary file and an original-byte backup, and atomically replace the mapping.
+Cancellation before publication preserves the original file and removes temporary
+artifacts (the reusable lock file remains). Lock contention is cancellable.
+Catalog installation, bundled upstream catalogs and model keyword capability
+advertisement are not yet implemented. Disabled ControlNet slots are
 accepted; active or malformed slots still fail.
 
 Evidence: isolated home

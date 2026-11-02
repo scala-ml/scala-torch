@@ -1,3 +1,36 @@
+## Native keyword mapping commands and atomic edits (2026-11-03)
+
+Added NativeKeywordMappings handler for model_keyword check/save/delete, routed by
+NativeDiffusionBackend.supported/execute. Configured Diffusers directory uses full
+native model hash (cached while loaded, computed otherwise); checkpoint/LoRA files
+use legacy hash. match_name alias preserved, NUI response choices/source/filename/
+hash/keywords/default_catalog_available/deleted implemented. Mapping metadata for
+LoRA works but actual LoRA inference remains unsupported. No catalog downloader or
+bundled upstream catalog yet; only local default and custom files are searched.
+
+KeywordMappingEditor preserves unrelated raw records/comments/line endings,
+replaces duplicate matching rows, CSV-quotes new content, rejects malformed CSV.
+Uses same Windows one-byte .lock as Python NUI, cancellation-aware 30sec lock wait,
+fsynced staging and original-byte backup, final content comparison and atomic move.
+Publication refusal cleans staging/backup without altering original; lock file
+persists. Late cancellation after successful write is not falsely reported as a
+rolled-back operation. Non-Windows Python flock interoperability is not claimed.
+
+12 unit tests passed (editor3, handler2, reader7), including lock cancellation,
+malformed preservation, backups and rejected publication. Real NUI EngineClient
+integration passed 17sec: mapping check/save -> generation resolves a red cat ->
+delete/check, along with prior loader/VAE/previews. UI compile also passed. This
+is client/worker transport evidence, NOT a new actual button-click test.
+
+NUI dedicated branch feat/scala-torch-native-engine commit 86e45de includes extended
+NativeScalaEngineSuite and correct missing-catalog label for checkpoint vs LoRA.
+NUI worktree clean; no push. scala-torch changes committed separately. Current sbt
+server NUI started with SCALATORCH_WORKER_CLASSPATH_FILE and SCALATORCH_TINY_MODEL;
+scala-torch server stopped. No active background tests remain.
+
+NEXT: normal-model/GPU diffusion and remaining inference options remain substantial;
+keyword catalog install/default resources and feature advertisement also pending.
+Original goal still active; tiny UI generation is not full Python-removal parity.
 ## First successful actual NUI desktop generation (2026-11-03)
 
 NativeKeywordHook now accepts model_keyword in generation, reads mapping CSV,

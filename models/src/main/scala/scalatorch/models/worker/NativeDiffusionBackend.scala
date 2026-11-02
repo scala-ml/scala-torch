@@ -38,7 +38,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
       finally input.close()
     }
     java.util.HexFormat.of().formatHex(digest.digest())
-  val supported=Set("load_model","set_vae","unload","txt2img","list_models","list_samplers","list_files")
+  val supported=Set("load_model","set_vae","unload","txt2img","list_models","list_samplers","list_files","model_keyword")
   private def vaeChoice(params: Map[String,NativeJson],key: String): Option[Path]=params.get(key) match
     case None | Some(Null) | Some(Str("")) => None
     case Some(Str(value)) => Some(Path.of(value).toRealPath())
@@ -88,6 +88,11 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
     val p=request.params
     context.checkCancelled()
     request.kind match
+      case "model_keyword" =>
+        NativeKeywordMappings.execute(p,root,() => modelSummary.get("hash") match
+          case Some(Str(hash)) => hash
+          case _ => checkpointHash(context)
+        ,context)
       case "list_files" =>
         keys(p,Set("kind","dirs"))
         val dirs=p.get("dirs") match
