@@ -1,3 +1,32 @@
+## Native worker img2img and file decoding (2026-11-03)
+
+NativeDiffusionBackend now accepts img2img using existing shared generation path:
+bounded input decoding, EXIF orientation, white-alpha RGB, resize0/1/2,
+Float32 NCHW normalization, CPU VAE encode and active schedule suffix.
+Default inactive inpainting fields accepted; active masks/settings rejected.
+txt2img strict option checking retained. Publication cancellation cleans outputs.
+DiffusionImageInput uses JDK ImageIO; PNG/JPEG/TIFF orientation1..8 plus L/LA/P
+fixtures match NUI/Pillow13 exactly (27inputs). Optional oracle generator only
+uses Python; normal runtime/tests do not. Allocation/malformed metadata tested.
+Latest focused Scala tests passed8, no skips (NativeImg2ImgSuite,
+NativeDiffusionBackendSuite,NativeGenerationDefaultsSuite,DiffusionImageInputSuite,
+DiffusionImageResizeSuite). New img2img test verifies both samplers,seed replay,
+resize effect,active progress,invalid options and publication denial cleanup.
+
+NUI feat/scala-torch-native-engine adds actual typed Img2ImgParams request to
+NativeScalaEngineSuite; it passed1 in29.912s with CPU tiny checkpoint at64x64,
+including preceding txt2img,previews,keyword prompt,seed and2activeimg2imgsteps.
+No production NUI route change needed. Worker jars rebuilt via models/package.
+Scala-torch sbt server shut down; NUI sbt server is live with CPU integration env
+SCALATORCH_WORKER_CLASSPATH_FILE and SCALATORCH_TINY_MODEL. Before different env,
+stop that sbt server normally. No new GPU contention from this turn's tests.
+
+Original512px/20step SD1.5 job remains live: session11471,Java33796,step14/20
+latest; do not restart because of a timeout. Inspect final image when complete.
+Next: full NUI metadata/replay acceptance and CUDA VAE encode, then real SD1.5/
+SDXL img2img; inpainting/extensions/packaging remain. Full goal still incomplete.
+See docs/research/native-img2img.md for exact bounds/provenance/limitations.
+
 ## Img2img RGB resize compatibility (2026-11-03)
 
 Added DiffusionImageResize: Lanczos3, NUI stretch/crop/fill geometry, bounded

@@ -44,7 +44,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
       finally input.close()
     }
     java.util.HexFormat.of().formatHex(digest.digest())
-  val supported=Set("load_model","set_vae","unload","txt2img","list_models","list_samplers","list_files","model_keyword")
+  val supported=Set("load_model","set_vae","unload","txt2img","img2img","list_models","list_samplers","list_files","model_keyword")
   private def vaeChoice(params: Map[String,NativeJson],key: String): Option[Path]=params.get(key) match
     case None | Some(Null) | Some(Str("")) => None
     case Some(Str(value)) => Some(Path.of(value).toRealPath())
@@ -178,7 +178,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         loaded=None
         modelSummary=Map.empty
         Map.empty
-      case "txt2img" =>
+      case "txt2img" | "img2img" =>
         val pipeline=loaded.getOrElse(throw new NativeBackendError("no_model","load a model first"))
         keys(NativeGenerationDefaults.strip(p,NativeGenerationDefaults.envelope),Set("params","output_dir","preview_every","preview_method","vae_recovery_dir"))
         val previewEvery=integer(p,"preview_every",2)
@@ -188,7 +188,10 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val g=p.get("params") match
           case Some(Obj(fields)) => fields
           case _ => throw IllegalArgumentException("params must be an object")
-        keys(NativeGenerationDefaults.strip(g,NativeGenerationDefaults.generation),Set("prompt","negative_prompt","width","height","steps","seed","subseed","cfg_scale","sampler_name","scheduler","clip_skip","n_iter","checkpoint","vae","extra","hooks"))
+        val img2img=request.kind=="img2img"
+        val defaults=if img2img then NativeGenerationDefaults.generation.removed("img2img") else NativeGenerationDefaults.generation
+        val allowed=Set("prompt","negative_prompt","width","height","steps","seed","subseed","cfg_scale","sampler_name","scheduler","clip_skip","n_iter","checkpoint","vae","extra","hooks")
+        keys(NativeGenerationDefaults.strip(g,defaults),if img2img then allowed+"img2img" else allowed)
         val prediction=NativeGenerationMetadata.prediction(g.get("extra"),config.prediction)
         g.get("checkpoint") match
           case None | Some(Null) => ()
@@ -214,6 +217,34 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         require(steps>0 && steps<=1000,"steps must be between 1 and 1000")
         val imageRequest=DiffusionImageRequest(str(g,"prompt",""),str(g,"negative_prompt",""),
           integer(g,"width",512),integer(g,"height",512),seed,number(g,"cfg_scale",7).toFloat,clipSkip=integer(g,"clip_skip",1))
+        val source=if !img2img then None else
+          val fields=g.get("img2img") match
+            case Some(Obj(fields)) => fields
+            case _ => throw IllegalArgumentException("img2img must be an object")
+          keys(NativeGenerationDefaults.strip(fields,NativeGenerationDefaults.inpainting),Set("init_image","denoising_strength","resize_mode"))
+          val strength=number(fields,"denoising_strength",BigDecimal("0.75")).toDouble
+          require(strength.isFinite && strength>=0 && strength<=1,"denoising_strength must be between 0 and 1")
+          val mode=integer(fields,"resize_mode",0)
+          require(mode>=0 && mode<=2,"resize_mode must be 0, 1 or 2")
+          val name=str(fields,"init_image","")
+          require(name.nonEmpty,"init_image is required")
+          val width=imageRequest.width;val height=imageRequest.height
+          require(width>0 && height>0 && width.toLong*height<=16777216L,"invalid img2img output dimensions")
+          context.checkCancelled()
+          val input=DiffusionImageInput.readRgb(Path.of(name))
+          context.checkCancelled()
+          val resized=DiffusionImageResize(input,width,height,mode)
+          context.checkCancelled()
+          val plane=width*height
+          val values=new Array[Float](plane*3)
+          for y <- 0 until height do
+            context.checkCancelled()
+            for x <- 0 until width do
+              val rgb=resized.getRGB(x,y)
+              for channel <- 0 until 3 do
+                values(channel*plane+y*width+x)=((rgb >>> (16-8*channel))&255)/255f*2f-1f
+          Some(DiffusionImageSource(scalatorch.Tensor.fromFloats(values,
+            scalatorch.Shape.from(Seq(1L,3L,height.toLong,width.toLong))),strength))
         val sampler=str(g,"sampler_name","DPM++ 2M")
         val requestedSchedule=str(g,"scheduler","Automatic")
         val schedule=if requestedSchedule=="Automatic" then (if sampler=="DPM++ 2M" then "Karras" else "Uniform") else requestedSchedule
@@ -245,10 +276,10 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
             val image=try
               if sampler=="DPM++ 2M" then
                 val layout=if schedule=="Karras" then DpmSchedule.karras(config.noise,steps) else DpmSchedule.uniform(config.noise,steps)
-                pipeline.generateDpm(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=prediction)
+                pipeline.generateDpm(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=prediction,source=source)
               else
                 val layout=if schedule=="Karras" then config.noise.karrasEuler(steps) else config.noise.euler(steps,config.spacing,config.stepsOffset)
-                pipeline.generate(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=prediction)
+                pipeline.generate(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=prediction,source=source)
             catch
               case failure: VaeDecodeFailure =>
                 context.checkCancelled()

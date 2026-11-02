@@ -21,9 +21,9 @@ pipeline_stable_diffusion_img2img.py get_timesteps/prepare_latents, and
 scheduling_dpmsolver_multistep.py add_noise. Native implementation uses existing
 Scala tensors, VAE posterior and schedulers, with no Python runtime calls.
 
-This is library plumbing, not complete NUI img2img support. Remaining work:
-worker image path/format/bounds validation and preprocessing; NUI request routing
-and metadata/replay; CUDA VAE encode for practical full-size performance; real
+The worker now accepts img2img, but complete NUI img2img support is not established.
+Remaining work: NUI cross-repository request/metadata/replay acceptance;
+CUDA VAE encode for practical full-size performance; real
 SD1.5/SDXL acceptance and inpainting. The complete migration goal remains open.
 ## RGB resizing foundation
 
@@ -32,8 +32,8 @@ per-axis RGB clipping, stretch/center-crop/edge-fill geometry. Twenty-one RGB
 fixtures from NUI images.resize_image with Pillow13.0.0 match byte-for-byte.
 The7 geometries cover up/down/mixed scaling, portrait/landscape, one-pixel axes,
 and unchanged dimensions, across modes0/1/2. Invalid mode/size/budget reject.
-Input and intermediate pixel counts are bounded. EXIF/alpha handling is not part
-of this component and remains needed before worker img2img can accept image files.
+Input and intermediate pixel counts are bounded. EXIF/alpha handling runs in
+DiffusionImageInput before resizing.
 
 Two mismatches were diagnosed against the independent oracle: edge fill's
 zero-size box uses bicubic extrapolation (9/8 edge,-1/8 adjacent), not simple
@@ -49,3 +49,31 @@ and Pillow13.0.0. NUI python/sdfx/images.py SHA256 at generation:
 c06acef02c883518f658c49c34bff19284f75801a433f7faedece9de7a0e44d0.
 The Python script is an optional reference generator; checked-in RGB fixtures
 allow Scala-only tests. This does not assert parity with older Pillow versions.
+
+## Worker image input
+
+NativeDiffusionBackend accepts the NUI img2img envelope and nested Img2ImgParams.
+It decodes the source once per request, applies EXIF orientation and RGB conversion,
+resizes with mode0/1/2, then normalizes RGB to Float32 NCHW using channel/255*2-1.
+Each iteration samples the VAE posterior and diffusion noise with its own seed.
+The shared generation path retains previews, active-step progress, staging,
+publication cancellation, decode recovery, and model keyword processing.
+Active inpainting settings and masks reject explicitly; txt2img still rejects
+active img2img parameters. The default encoder remains CPU.
+
+DiffusionImageInput uses JDK ImageIO, with a 256MiB encoded-file limit and
+16,777,216-pixel decoded limit checked before raster decoding. EXIF parsing is
+bounded to 1MiB metadata and supports JPEG APP1, PNG eXIf and TIFF headers.
+RGBA/palette alpha composites over white. L/LA use direct gray samples; NUI's
+load_rgb discards LA alpha. Twenty-seven checked-in fixtures cover orientations
+1..8 in PNG/JPEG/TIFF and L/LA/palette transparency. RGB bytes match NUI load_rgb
+with Pillow13.0.0 exactly for these fixtures; this does not prove every codec,
+color profile, bit depth or older Pillow version is identical. Malformed files,
+out-of-bounds EXIF and allocation limits are tested. The optional oracle script
+scripts/reference_image_input.py takes the NUI repo path; normal tests and
+runtime do not invoke Python. Source provenance is the same images.py hash above.
+
+NativeImg2ImgSuite exercises real tiny checkpoint weights through the worker API:
+Euler/DPM++ generation, seeded replay, differing resize modes, strength-based
+progress, invalid paths/strength/masks, and publication-denial cleanup. This is
+not real SD1.5/SDXL image-quality or full desktop acceptance.

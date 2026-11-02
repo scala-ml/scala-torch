@@ -11,6 +11,9 @@ private[worker] object NativeGenerationDefaults:
     "batch_size"->Number(1),"eta"->Null,"hires"->hires,
     "img2img"->Null,"loras"->Arr(Vector.empty),"controlnet"->Arr(Vector.empty),
     "styles"->Arr(Vector.empty))
+  val inpainting: Map[String,NativeJson]=Map("mask"->Null,"mask_blur"->Number(4),
+    "inpainting_fill"->Number(1),"inpaint_full_res"->Bool(false),
+    "inpaint_full_res_padding"->Number(32),"inpainting_mask_invert"->Bool(false))
   val envelope: Map[String,NativeJson]=Map("lora_paths"->Obj(Map.empty),"embedding_paths"->Arr(Vector.empty),
     "controlnet_paths"->Obj(Map.empty),"upscaler_paths"->Obj(Map.empty),"lbw_presets"->Obj(Map.empty),
     "system_info_fields"->Arr(Vector.empty),
