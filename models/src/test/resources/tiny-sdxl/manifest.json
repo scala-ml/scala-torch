@@ -1,0 +1,98 @@
+{
+  "source": "hf-internal-testing/tiny-stable-diffusion-xl-pipe",
+  "revision": "fa06b5c3d6d45fabd978486616c6dae068519e85",
+  "torch": "2.7.1+cpu",
+  "diffusers": "0.33.1",
+  "transformers": "4.49.0",
+  "tensors": {
+    "text_encoder-penultimate": {
+      "shape": [
+        2,
+        6,
+        32
+      ],
+      "sha256": "865d6d75bd5e21b13de41fe3d0c10b12849958fd7df429baa78cc8158a1afa7b"
+    },
+    "text_encoder-final": {
+      "shape": [
+        2,
+        6,
+        32
+      ],
+      "sha256": "c97d154552590d14d36711b1ad1ac7c3517127f391571484ccc56904841e5bf9"
+    },
+    "text_encoder_2-penultimate": {
+      "shape": [
+        2,
+        6,
+        32
+      ],
+      "sha256": "1d5abed23146412bcae04b92ddbc5da3ae613ced77180c5d4f7548a66b762646"
+    },
+    "text_encoder_2-projected": {
+      "shape": [
+        2,
+        32
+      ],
+      "sha256": "3bd91412e8c0482c90e0f3ce95fc9c80b0f27d0e4590177b0a083d8c4ce24c4d"
+    },
+    "sample": {
+      "shape": [
+        1,
+        4,
+        8,
+        8
+      ],
+      "sha256": "a03fe83bac1b3f3dc979524699bd9aa1bb993571e33aa86f8cf83079a8a38601"
+    },
+    "context": {
+      "shape": [
+        1,
+        6,
+        64
+      ],
+      "sha256": "4fe3daf5208e4d663ded9d7aac3e7506797f41b7deb8f8bae623ee0d330ad3aa"
+    },
+    "pooled": {
+      "shape": [
+        1,
+        32
+      ],
+      "sha256": "d885fb1ff4b871cfaffa0f861d16cf28eaac515432b407535e34aec9fd4bb54e"
+    },
+    "time-ids": {
+      "shape": [
+        1,
+        6
+      ],
+      "sha256": "3e3fc846be350bc870182ba97ca01a0c62614d5a85e99b84d5a228bdbe8162ef"
+    },
+    "unet-output": {
+      "shape": [
+        1,
+        4,
+        8,
+        8
+      ],
+      "sha256": "109edf8265c6c6735f1ad332520b12c509adcc033ca10ddd0713630c532e145e"
+    }
+  },
+  "token_ids": [
+    [
+      0,
+      17,
+      22,
+      2,
+      1,
+      1
+    ],
+    [
+      0,
+      29,
+      2,
+      1,
+      1,
+      1
+    ]
+  ]
+}

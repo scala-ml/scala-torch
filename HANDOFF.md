@@ -1,3 +1,33 @@
+## SD1.5 failed final decode; immutable restart; SDXL fixtures (2026-11-03)
+
+IMPORTANT: old session11471 is TERMINAL. Reached20/20, then generation thread
+died without PNG. jcmd thread dumps twice confirmed missing worker;GPUidle.
+Stopped only orphan Java33796 to collectstderr. Error: NoClassDefFoundError
+NativeVaeRecovery$ in VAE recovery, masking the original VAE exception.
+Class exists in currentjar; mutable rebuilt jars during44min run suspected.
+No claim that original final decode is correct. Evidence in old outputdir
+thread-after-step20.txt andstderr.txt; keep it.
+
+scripts/run-native-diffusion.ps1 now snapshots14classpathjars into run/.runtime
+and records SHA256 manifest beforelaunch. Verified allcopies. NEW512px20step
+run ACTIVE session80265,launcherPID13624 (maywrap actualJava);output
+.superpowers/sd15-512-20-snapshot. Latest observed modelloadsuccess, no steps
+yet. Poll samehandle; no restart solelytimeout. Newparallelattentioncode used.
+It cannot be affected by subsequent sbt jar replacement. Inspect finalPNG
+or reported VAEfailure before further full-sizeimg2img.
+
+SDXL prepared local hf-internal-testing/tiny-stable-diffusion-xl-pipe pinned
+fa06b5c3d6d45fabd978486616c6dae068519e85; configs,tokenizers,weights downloaded
+into.superpowers/models/tiny-sdxl-pipe and upstreamLFS SHAverified.
+scripts/reference_sdxl.py verifies hashes then weights_only loads pickleweights
+to local safetensors; OPTIONAL CPUoracle, never native runtime. Generated9
+CLIP/U-Net reference tensors in models/src/test/resources/tiny-sdxl; allSHA
+checked,manifestversions torch2.7.1cpu/diffusers0.33.1/transformers4.49.0.
+NativeSDXL NOTimplemented yet. Plan docs/superpowers/plans/2026-11-03-sdxl-unet.md
+documents stageheads/depth,linearprojection,text_timeconditioning andCPU/CUDA
+oracle gates. Executeinline; noagents. Then dualCLIP/pipeline/worker planneeded.
+NUI tree unchanged thisturn; dedicatedbranch973e5d2,NUI sbtliveCUDAoffload16MiB.
+
 ## Generator replay and real SD1.5 img2img smoke (2026-11-03)
 
 NUI NativeGeneratorSuite passed1 in8.373s with actual AppServices/Generator,

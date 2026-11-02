@@ -21,7 +21,20 @@ directory. CUDA offload1GiB per component and134217728 attention score work
 are explicit. No timeout/restart and no Python invocation. Supply an explicit
 compatible scheduler config; the harness does not claim PNDM support.
 
-Original512x512/20step txt2img is still active; no final-image acceptance yet.
+Original512x512/20step txt2img reached step20 but did not publish a PNG.
+The worker thread exited with NoClassDefFoundError for NativeVaeRecovery during
+VAE failure recovery. Thread dumps confirmed no generation worker remained;
+GPU had returned to idle. Only then the orphaned Java33796 process was stopped
+to retrieve stderr (session11471 now terminal). The original VAE exception was
+masked by recovery class loading, so it does not identify a decoder math fault.
+The class exists in the current jar. Concurrent sbt jar replacement is suspected:
+the old process lazily loaded classes from mutable build output for44minutes.
+
+The acceptance harness now copies all14 classpath jars into output/.runtime
+before launch and records their SHA256 in runtime-manifest.json. A new512px20step
+run started in .superpowers/sd15-512-20-snapshot,session80265. It uses the current
+parallel attention implementation. Keep this same process until terminal;
+no final image or runtime speed claim is established yet.
 
 ## Checkpoint and initial txt2img work
 

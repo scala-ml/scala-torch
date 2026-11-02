@@ -20,6 +20,23 @@ $output=[IO.Path]::GetFullPath($OutputDirectory)
 if(Test-Path -LiteralPath $output) {throw 'Output directory must be new to preserve earlier evidence'}
 $source=if($InputImage) {(Resolve-Path -LiteralPath $InputImage).Path} else {''}
 New-Item -ItemType Directory -Path $output | Out-Null
+# A JVM lazily loads classes/resources. Never point a long-running acceptance job
+# at jars that sbt may replace while independent development/tests continue.
+$runtime=Join-Path $output '.runtime'
+New-Item -ItemType Directory -Path $runtime | Out-Null
+$entries=$classpath.Split([IO.Path]::PathSeparator)
+$snapshots=@()
+$manifest=@()
+for($index=0;$index -lt $entries.Length;$index++) {
+  $entry=$entries[$index]
+  if(-not(Test-Path -LiteralPath $entry -PathType Leaf)) {throw "Acceptance classpath requires jar files: $entry"}
+  $target=Join-Path $runtime ("{0:D3}-{1}" -f $index,[IO.Path]::GetFileName($entry))
+  Copy-Item -LiteralPath $entry -Destination $target
+  $snapshots+=$target
+  $manifest+=@{source=$entry;snapshot=$target;sha256=(Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()}
+}
+$classpath=$snapshots -join [IO.Path]::PathSeparator
+[IO.File]::WriteAllText("$output/runtime-manifest.json",($manifest | ConvertTo-Json -Depth 4))
 $parameters=@{prompt=$Prompt;negative_prompt='';width=$Side;height=$Side;steps=$Steps;seed=42;cfg_scale=7.5;sampler_name='DPM++ 2M';scheduler='Karras'}
 $kind='txt2img'
 if($source) {
