@@ -147,3 +147,22 @@ class BackendAdamCheckpointSuite extends munit.FunSuite:
       intercept[IllegalArgumentException](prepared.loadCheckpoint(path))
     } finally Files.deleteIfExists(path)
   }
+
+  test("explicit inference restore handles metadata-free checkpoints without AdamW arguments") {
+    val path=Files.createTempFile("backend-inference-template-",".stb")
+    try Using.resource(BackendLlamaTraining.prepareAdamW(model(17),CpuFloatBackend,config)) { prepared =>
+      run(prepared,2);prepared.saveCheckpoint(path,2)
+      val target=model(99)
+      assertEquals(TrainedLlama.restore(target,path),2L)
+      val expected=weights(prepared)
+      scalatorch.nn.Module.stateDict(target).foreach((name,t) => assertEquals(t.toFloatArray.toVector,expected(name)))
+      val bytes=Files.readAllBytes(path)
+      Files.write(path,"STBADM01".getBytes(java.nio.charset.StandardCharsets.UTF_8)++bytes.slice(8,40)++bytes.drop(44))
+      assertEquals(TrainedLlama.restore(target,path),2L)
+      val corrupt=Files.readAllBytes(path);corrupt(corrupt.length-1)=(corrupt.last^1).toByte
+      Files.write(path,corrupt)
+      val before=target.embedding.weight.data
+      intercept[IllegalArgumentException](TrainedLlama.restore(target,path))
+      assert(target.embedding.weight.data eq before)
+    } finally Files.deleteIfExists(path)
+  }

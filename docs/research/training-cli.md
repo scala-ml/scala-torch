@@ -53,3 +53,17 @@ Dataset tests check exact transition coverage, ignored tail padding, epoch rollo
 Separate forked JVM commands also ran pinned SmolLM2-135M-Instruct against a four-line text corpus. CPU and CUDA first-step loss were both **5.6415625**. A fresh CUDA process resumed from step1 and saved step2, whose different batch had loss **6.411142**. This verifies the command workflow; it is not a convergence or language-quality claim. Local evidence is `.superpowers/training-cli-native.log`; corpus/checkpoint artifacts remain ignored under `.superpowers/training-cli/`.
 
 Next work includes trained-artifact inference ergonomics, richer data formats and sampling policies, and a Transformers-style library above the current model layer. Optimized kernels/memory handling, diffusion and complete Python elimination from NUI remain part of the overall objective.
+
+## Inference from a training checkpoint
+
+Run generation without the original training corpus or optimizer arguments:
+
+```sh
+sbt --server -Dsbt.io.virtual=false -Dsbt.server.autostart=false -batch 'models / Compile / runMain scalatorch.models.BackendTextRun cuda MODEL_DIRECTORY "What is the capital of France?" 16 --smollm-chat --checkpoint saved.stb'
+```
+
+Use `cpu` for CPU execution. The model directory still supplies the original config, safetensors and tokenizer. `TrainedLlama.load(directory, checkpoint)` reconstructs full-model or LoRA settings from TrainRun metadata, checks the exact tokenizer-file SHA-256 and restores saved weights. It validates optimizer settings, moment values/counters and the complete checksum while streaming past moments without retaining their arrays. Inference does not allocate a resident optimizer.
+
+For metadata-free API checkpoints and legacy STBADM01 files, use `TrainedLlama.restore(matchingModel, checkpoint)`; callers supply the matching full/LoRA architecture. Automatic reconstruction requires TrainRun metadata because adapter scaling cannot be inferred from weight shapes.
+
+Tests delete the corpus before inference, compare restored weights/logits/greedy tokens against the training restore path on CPU/CUDA, and reject changed tokenizer bytes. A separate forked CUDA CLI loaded the actual two-step SmolLM2 LoRA checkpoint and emitted `The capital of France is Paris.` This proves saved-artifact generation, not improved model quality. Existing calls without `--checkpoint` continue loading the published model.

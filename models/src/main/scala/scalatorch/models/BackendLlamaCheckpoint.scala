@@ -60,28 +60,44 @@ private[models] object BackendLlamaCheckpoint:
         Files.move(temporary,destination,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING)
       finally Files.deleteIfExists(temporary)
     finally Files.deleteIfExists(state)
-  def load(model: LlamaModel,config: AdamWConfig,path: Path,maxBytes: Long,context: Option[String]): BackendAdamCheckpoint.Saved =
+  private final case class Header(fingerprint: Array[Byte],context: String,length: Long,size: Long)
+  private def readHeader(in: DataInputStream,maxBytes: Long): Header =
+    require(maxBytes>=48L,"invalid checkpoint byte budget")
+    val version=in.readNBytes(8)
+    val legacy=version.sameElements(legacyMagic)
+    require(legacy || version.sameElements(magic),"unsupported backend checkpoint format")
+    val fingerprint=in.readNBytes(32)
+    require(fingerprint.length==32,"truncated checkpoint fingerprint")
+    val contextSize=if legacy then 0 else in.readInt()
+    require(contextSize>=0 && contextSize<=16384,"invalid checkpoint context size")
+    val bytes=in.readNBytes(contextSize)
+    require(bytes.length==contextSize,"truncated checkpoint context")
+    val context=UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes)).toString
+    require(context.length<=4096 && TokenizerJson.validUnicode(context),"invalid checkpoint context")
+    val length=in.readLong()
+    val header=(if legacy then 48L else headerBytes)+contextSize
+    require(length>=0 && length<=maxBytes-header,"checkpoint byte budget exceeded")
+    Header(fingerprint,context,length,header)
+
+  /** Bounded metadata discovery only; restore verifies the model binding and complete payload. */
+  def savedContext(path: Path,maxBytes: Long): String =
+    try Using.resource(new DataInputStream(new BufferedInputStream(Files.newInputStream(path)))) { in =>
+      val header=readHeader(in,maxBytes)
+      require(Files.size(path)==header.size+header.length,"checkpoint size mismatch")
+      header.context
+    } catch case error: IOException => throw IllegalArgumentException("invalid or unreadable backend checkpoint",error)
+
+  private def withPayload[A](model: LlamaModel,path: Path,maxBytes: Long,context: Option[String])(body: Path => A): A =
     require(maxBytes>=48L,"invalid checkpoint byte budget")
     val state=Files.createTempFile("backend-adam-load-",".tmp")
     try
       try Using.resource(new DataInputStream(new BufferedInputStream(Files.newInputStream(path)))) { in =>
-        val version=in.readNBytes(8)
-        val legacy=version.sameElements(legacyMagic)
-        require(legacy || version.sameElements(magic),"unsupported backend checkpoint format")
-        val fingerprint=in.readNBytes(32)
-        val contextSize=if legacy then 0 else in.readInt()
-        require(contextSize>=0 && contextSize<=16384,"invalid checkpoint context size")
-        val bytes=in.readNBytes(contextSize)
-        require(bytes.length==contextSize,"truncated checkpoint context")
-        val storedContext=UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes)).toString
-        context.foreach(expected => require(expected==storedContext,"checkpoint training context mismatch"))
-        require(MessageDigest.isEqual(fingerprint,binding(model,storedContext)),"checkpoint model configuration/context mismatch")
-        val length=in.readLong()
-        val header=(if legacy then 48L else headerBytes)+contextSize
-        require(length>=0 && length<=maxBytes-header,"checkpoint byte budget exceeded")
+        val header=readHeader(in,maxBytes)
+        context.foreach(expected => require(expected==header.context,"checkpoint training context mismatch"))
+        require(MessageDigest.isEqual(header.fingerprint,binding(model,header.context)),"checkpoint model configuration/context mismatch")
         Using.resource(new BufferedOutputStream(Files.newOutputStream(state))) { out =>
           val buffer=new Array[Byte](65536)
-          var remaining=length
+          var remaining=header.length
           while remaining>0 do
             val n=in.read(buffer,0,math.min(remaining,buffer.length.toLong).toInt)
             require(n>0,"truncated backend checkpoint")
@@ -90,5 +106,9 @@ private[models] object BackendLlamaCheckpoint:
         require(in.read()== -1,"backend checkpoint has trailing bytes")
       }
       catch case error: IOException => throw IllegalArgumentException("invalid or unreadable backend checkpoint",error)
-      BackendAdamCheckpoint.load(model,config,state)
+      body(state)
     finally Files.deleteIfExists(state)
+  def load(model: LlamaModel,config: AdamWConfig,path: Path,maxBytes: Long,context: Option[String]): BackendAdamCheckpoint.Saved =
+    withPayload(model,path,maxBytes,context)(state => BackendAdamCheckpoint.load(model,config,state))
+  def loadWeights(model: LlamaModel,path: Path,maxBytes: Long,context: Option[String]): BackendAdamCheckpoint.Saved =
+    withPayload(model,path,maxBytes,context)(state => BackendAdamCheckpoint.loadWeights(model,state))

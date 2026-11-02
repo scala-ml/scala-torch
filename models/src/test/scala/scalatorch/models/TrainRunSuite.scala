@@ -48,6 +48,30 @@ class TrainRunSuite extends munit.FunSuite:
     Files.writeString(dir.resolve("data.txt"),"different training data\n")
     intercept[IllegalArgumentException](TrainRun.run(TrainRun.parse(args(dir,"resume.stb",5,backend,mode :+ "--resume")),_ => ()))
     assertEquals(Files.readAllBytes(dir.resolve("resume.stb")).toVector,saved)
+    Files.delete(dir.resolve("data.txt"))
+    val loaded=TrainedLlama.load(dir,dir.resolve("whole.stb"))
+    assertEquals(loaded.trainingStep,4L)
+    val base=LlamaModel.load(dir,trainable=full)
+    val template=if full then base else LlamaLoRA.attach(base,4,8,42,targetLayers=Some(Set(0))).model
+    val expected=Using.resource(BackendLlamaTraining.prepareAdamW(template,scalatorch.cpu.CpuFloatBackend,scalatorch.AdamWConfig(.02))) { prepared =>
+      prepared.loadCheckpoint(dir.resolve("whole.stb"));prepared.stateDict()
+    }
+    scalatorch.nn.Module.loadStateDict(template,expected)
+    scalatorch.nn.Module.stateDict(loaded.model).foreach { (name,tensor) =>
+      assertEquals(tensor.toFloatArray.toVector,expected(name).toFloatArray.toVector)
+    }
+    val prompt=loaded.tokenizer.encode("aba").toVector
+    def compare[T](engine: scalatorch.FloatBackend[T]): Unit = Using.resource(BackendLlama.prepare(loaded.model,engine)) { prepared =>
+      val tokens=scalatorch.Tensor.fromLongs(prompt.toArray,scalatorch.Shape.from(Seq(1L,prompt.size.toLong)))
+      prepared.logits(tokens).toFloatArray.zip(template.logits(tokens).toFloatArray).foreach((a,e) => assertEqualsDouble(a,e,2e-5))
+      assertEquals(prepared.generateIds(prompt,4),template.generateIds(prompt,4))
+    }
+    if backend=="cuda" then scalatorch.ffm.CudaSession.withDevice() { session => compare(session);assertEquals(session.allocatedBytes,0L) }
+    else compare(scalatorch.cpu.CpuFloatBackend)
+    val cli=BackendTextRun.run(BackendTextRun.parse(Array(backend,dir.toString,"aba","4","--checkpoint",dir.resolve("whole.stb").toString)))
+    assertEquals(cli,loaded.tokenizer.decode(template.generateIds(prompt,4).drop(prompt.size).toArray))
+    Files.writeString(dir.resolve("tokenizer.json"),"\n",java.nio.file.StandardOpenOption.APPEND)
+    intercept[IllegalArgumentException](TrainedLlama.load(dir,dir.resolve("whole.stb")))
   }
   test("CPU CLI trains LoRA and full models with exact data-bound resume") {
     continuation("cpu",false);continuation("cpu",true)
@@ -65,4 +89,12 @@ class TrainRunSuite extends munit.FunSuite:
     intercept[IllegalArgumentException](TrainRun.parse(base.updated(0,"other")))
     intercept[IllegalArgumentException](TrainRun.parse(base.updated(4,"-1")))
     intercept[IllegalArgumentException](TrainRun.parse(Array.empty[String]))
+  }
+  test("inference CLI preserves defaults and rejects ambiguous options") {
+    val base=Array("cpu","model","prompt")
+    assertEquals(BackendTextRun.parse(base).count,32)
+    assert(BackendTextRun.parse(base++Array("--smollm-chat","--checkpoint","saved.stb")).chat)
+    for suffix <- Seq(Seq("--unknown"),Seq("-1"),Seq("--checkpoint"),Seq("--smollm-chat","--smollm-chat"),
+        Seq("--checkpoint","a","--checkpoint","b"),Seq("2","3")) do
+      intercept[IllegalArgumentException](BackendTextRun.parse(base++suffix))
   }

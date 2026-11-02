@@ -82,8 +82,26 @@ object Checkpoint:
       Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
     finally Files.deleteIfExists(temporary)
 
+  /** Bounded header discovery; callers must subsequently validate the complete payload. */
+  private[nn] def adamWConfig(path: Path): AdamWConfig =
+    try Using.resource(new DataInputStream(new BufferedInputStream(Files.newInputStream(path)))) { in =>
+      require(in.readNBytes(magic.length).sameElements(magic),"unsupported checkpoint format")
+      require(in.readLong()>=0,"invalid saved training step")
+      require(readText(in)=="adamw","checkpoint is not AdamW")
+      val names=Vector("learningRate","beta1","beta2","epsilon","weightDecay")
+      require(in.readInt()==names.size,"optimizer setting count mismatch")
+      val values=names.map { name =>
+        require(readText(in)==name,s"optimizer setting mismatch: $name")
+        in.readDouble()
+      }
+      AdamWConfig(values(0),values(1),values(2),values(3),values(4))
+    } catch case error: IOException => throw IllegalArgumentException("invalid or unreadable checkpoint",error)
+
   /** Restores at an optimizer boundary, clears gradients, returns caller-supplied training step. */
-  def load[A: Module](model: A, optimizer: Optimizer, path: Path): Long =
+  def load[A: Module](model: A, optimizer: Optimizer, path: Path): Long = loadInternal(model,optimizer,path,true)
+  private[nn] def loadAdamWWeights[A: Module](model: A,optimizer: AdamW,path: Path): Long =
+    loadInternal(model,optimizer,path,false)
+  private def loadInternal[A: Module](model: A, optimizer: Optimizer, path: Path,retainMoments: Boolean): Long =
     val grouped = groups(model)
     membership(optimizer, grouped)
     val selected = optimizer.optimized.toSet
@@ -119,14 +137,28 @@ object Checkpoint:
             val slot = if in.readBoolean() then
               val counter = in.readLong()
               require(counter > 0, "invalid optimizer counter")
-              val first = Vector.fill(values.length)(in.readDouble())
-              val second = Vector.fill(values.length)(in.readDouble())
+              def readMoments(second: Boolean): Vector[Double] =
+                def value(): Double =
+                  val v=in.readDouble()
+                  require(v.isFinite && (!second || v>=0),"invalid optimizer moments")
+                  v
+                if retainMoments then Vector.fill(values.length)(value())
+                else
+                  var i=0
+                  while i<values.length do
+                    value();i+=1
+                  Vector.empty
+              val first = readMoments(false)
+              val second = readMoments(true)
               Some(OptimizerSlot(counter, first, second))
             else None
             slots(parameter) = slot
         }
         val saved = optimizer.optimized.map(slots)
-        optimizer.validate(saved)
+        if retainMoments then optimizer.validate(saved)
+        else
+          require(saved.forall(_.isEmpty) || saved.forall(_.nonEmpty),"Adam checkpoint moment membership mismatch")
+          require(saved.flatMap(_.map(_.step)).distinct.size<=1,"Adam checkpoint counters differ")
         val actualChecksum = hash.digest()
         stream.on(false)
         val expectedChecksum = in.readNBytes(32)
@@ -138,5 +170,5 @@ object Checkpoint:
     val (step, weights, slots) = staged
     // All format, model and optimizer validation has completed before publishing any state.
     Module.loadStateDict(model, weights)
-    optimizer.restore(slots)
+    if retainMoments then optimizer.restore(slots)
     step

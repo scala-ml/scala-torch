@@ -51,3 +51,12 @@ private[scalatorch] object BackendAdamCheckpoint:
     require(saved.isEmpty || saved.keySet==expected,"Adam checkpoint moment membership mismatch")
     require(saved.values.map(_.step).toSet.size<=1,"Adam checkpoint counters differ")
     Saved(step,Module.stateDict(value),saved)
+
+  /** Discover saved settings and validate/skip moments rather than allocating optimizer arrays. */
+  def loadWeights[A: Module](model: A,path: Path): Saved =
+    val config=Checkpoint.adamWConfig(path)
+    val value=host(model)
+    val step=Checkpoint.loadAdamWWeights(value,optimizer(value,config),path)
+    val weights=Module.stateDict(value)
+    require(weights.values.forall(_.toFloatArray.forall(_.isFinite)),"nonfinite checkpoint weights")
+    Saved(step,weights,Map.empty)
