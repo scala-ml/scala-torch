@@ -71,5 +71,5 @@ with torch.no_grad():
         save(name, tensor)
     save("unet-output-b2", unet(sample2, 500, encoder_hidden_states=context2,
          added_cond_kwargs={"text_embeds": pooled2, "time_ids": time_ids2}).sample)
-(out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+(out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n")
 print(f"Prepared {len(manifest['tensors'])} independent SDXL tensors at {out}")
