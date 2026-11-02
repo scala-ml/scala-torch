@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("geglu","broadcast_add","concat_copy","resize_nearest","groupnorm","conv2d","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
+  private val kernels=Seq("geglu","broadcast_add","concat_copy","resize_nearest","groupnorm","conv2d","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_prepare","attention_output","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -285,13 +285,18 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
         var rowOffset=0L
         while rowOffset<rows do
           val count=math.min(sliceRows,rows-rowOffset)
-          launch(count,kernels("attention")) { arena =>
+          launch(count,kernels(if causal then "attention" else "attention_prepare")) { arena =>
             Seq(query.address,key.address,value.address,result.address,scratch.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
               Seq(count,q(1),k(1),q(2),k(2),q(3),v(3),queryStart.toLong,storageTokens).map(x => arena.allocateFrom(JAVA_INT,x.toInt)) :+
               arena.allocateFrom(JAVA_DOUBLE,1.0/math.sqrt(q(3).toDouble)) :+
               arena.allocateFrom(JAVA_INT,if causal then 1 else 0) :+
               arena.allocateFrom(JAVA_INT,rowOffset.toInt)
           }
+          if !causal then
+            launch(count*v(3),kernels("attention_output")) { arena =>
+              Seq(value.address,scratch.address,result.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
+                Seq(count*v(3),q(1),k(1),q(2),k(2),v(3),storageTokens,rowOffset).map(x => arena.allocateFrom(JAVA_INT,x.toInt))
+            }
           rowOffset+=count
         result
       catch case error: Throwable =>

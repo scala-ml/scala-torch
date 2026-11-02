@@ -61,3 +61,22 @@ At4096 keys the16MiB scratch cap admits512 query rows per slice; this limits
 parallelism. Candidate follow-up: parallel score generation and per-output-channel
 weighted sums while preserving per-dot/reduction arithmetic order and scratch cap.
 This is a code/stack observation, not a completed benchmark or proven speedup.
+## Parallel noncausal attention output channels
+
+Noncausal attention now has a prepare kernel that computes scores, maxima,
+exponentials and probabilities in the previous order, followed by one thread
+per(query row,value channel) for the weighted sum. Each key reduction retains
+serial ordering and Double multiply/add without fusion. Probability division is
+performed once per score instead of once per score/output channel. The same
+bounded scratch buffer is reused; no new activation allocation is introduced.
+The original attention entry is retained unchanged for causal/cache execution
+and as a serial reference with all keys visible. Existing running workers retain
+compatible original entry behavior even if resources are rebuilt for tests.
+
+Tests compare raw Float32 bits against that serial reference for multiple slice
+sizes, batches, GQA, unequal token/value widths, NaN/Infinity and diffusion head
+widths40/80/160. Performance of the new path has not yet been measured in isolation.
+The original512px run remains active (session11471, actual Java PID33796); step2
+and a preview were received. Short GPU regression tests ran concurrently, so its
+wall time is no longer an uncontended baseline. Do not use that time as a clean
+before/after benchmark. Final image correctness is still useful evidence.

@@ -30,7 +30,8 @@ class CudaSlicedAttentionSuite extends munit.FunSuite:
       val q=s.upload(data(Seq(2L,4L,7L,5L),1))
       val k=s.upload(data(Seq(2L,2L,11L,5L),2))
       val v=s.upload(data(Seq(2L,2L,11L,3L),3))
-      val full=s.scaledDotProductAttention(q,k,v,maxWorkspaceBytes=Long.MaxValue)
+      // All keys visible: preserved causal kernel supplies the serial reference.
+      val full=s.causalAttention(q,k,v,queryStart=10)
       val expected=full.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits);full.close()
       val before=s.allocatedBytes
       for rows <- Seq(1,2,5,17,64) do
@@ -45,12 +46,27 @@ class CudaSlicedAttentionSuite extends munit.FunSuite:
       val qn=s.fill(Shape.from(Seq(2L,2L,3L,1L)),1f)
       val kn=s.upload(Tensor.fromFloats(Array(0f,Float.NaN,0f,1f,0f,1f,0f,1f),Shape.from(Seq(2L,2L,2L,1L))))
       val vn=s.upload(Tensor.fromFloats(Array(1f,2f,Float.PositiveInfinity,1f,-0f,0f,3f,4f),kn.shape))
-      val dense=s.scaledDotProductAttention(qn,kn,vn,maxWorkspaceBytes=Long.MaxValue)
+      val dense=s.causalAttention(qn,kn,vn,queryStart=1)
       val sliced=s.scaledDotProductAttention(qn,kn,vn,maxWorkspaceBytes=16)
       assertEquals(sliced.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits),
         dense.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits))
       sliced.close();dense.close();vn.close();kn.close();qn.close()
       assertEquals(s.allocatedBytes,0L)
+    }
+  }
+  test("parallel weighted outputs match serial attention at diffusion head widths") {
+    gpu()
+    CudaSession.withDevice() { s =>
+      for width <- Seq(40L,80L,160L) do
+        val q=s.upload(data(Seq(1L,8L,17L,width),11))
+        val k=s.upload(data(Seq(1L,2L,77L,width),12))
+        val v=s.upload(data(Seq(1L,2L,77L,width),13))
+        val reference=s.causalAttention(q,k,v,queryStart=76)
+        val parallel=s.scaledDotProductAttention(q,k,v,maxWorkspaceBytes=77L*8*3)
+        assertEquals(parallel.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits),
+          reference.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits))
+        parallel.close();reference.close();v.close();k.close();q.close()
+        assertEquals(s.allocatedBytes,0L)
     }
   }
   test("automatic query slicing fits a 64 KiB workspace instead of an 8 MiB score matrix") {

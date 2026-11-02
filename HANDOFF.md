@@ -1,3 +1,27 @@
+## Parallel attention weighted outputs (2026-11-03)
+
+Added attention_prepare / attention_output PTX entries for noncausal attention.
+Preparation preserves prior score/exp/sum order and divides probabilities once.
+Output uses one thread per row/value channel with original ordered Double key
+reduction; bounded scratch unchanged. Original attention entry remains unchanged
+for causal/cache and compatibility with the still-running old worker. Scores are
+still computed serially per row: parallelizing scores is a possible next step.
+No isolated speedup measurement yet; do not claim one from kernel structure alone.
+
+ffm/testOnly * passed54; models/testOnly *Cuda* passed23, zero skips/errors.
+Raw-bit comparison uses preserved causal kernel with queryStart=keys-1 so all
+keys are visible, including GQA/batch/slices/IEEE extremes and head widths40/80/160.
+Public VAE/U-Net/CFG pipeline reference results and memory/cancel tests pass.
+
+STILL RUNNING: session11471, actual Java worker33796 (wrapper508), original
+SD1.5 512x512/20-step job. Step2 plus preview received; last process check alive,
+~9.6GB working set. Current output .superpowers/sd15-512-20/protocol.jsonl.
+Tests briefly used GPU concurrently; baseline wall time is contaminated by that
+contention, though final image correctness remains useful. Poll the existing
+handle, do not restart because of elapsed observation time. Updated jar/kernel
+resources retain the old attention entry semantics for this original process.
+Next: collect image when completed; benchmark new attention separately; continue
+score-stage parallelism/practical throughput and full NUI feature migration.
 ## Contiguous host-copy acceleration and running512px acceptance (2026-11-03)
 
 Tensor.logicalArray now bulk-copies contiguous storage via System.arraycopy,
