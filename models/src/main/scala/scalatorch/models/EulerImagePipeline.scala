@@ -8,10 +8,10 @@ final case class DiffusionImageRequest(prompt: String,negativePrompt: String,wid
     guidanceScale: Float=7.5f,truncatePrompt: Boolean=false,clipSkip: Int=1)
 final case class DiffusionImageProgress(completedSteps: Int,totalSteps: Int,timestep: Float,latents: Tensor[Float])
 
-/** Single-image CPU denoising with explicit Euler/DPM++ schedules and selectable VAE placement. */
+/** Single-image Euler/DPM++ sampling with explicit U-Net and VAE placement. */
 final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder: ClipTextModel,
     val unet: ConditionalUNet2d,val vae: VaeModel,maxImagePixels: Long=16777216L,maxLatentElements: Long=16777216L,
-    val vaeExecution: VaeExecution=VaeExecution.Cpu):
+    val vaeExecution: VaeExecution=VaeExecution.Cpu,val unetExecution: UNetExecution=UNetExecution.Cpu):
   require(maxImagePixels>=0 && maxLatentElements>=0,"negative image pipeline allocation limit")
   require(tokenizer.vocabSize<=textEncoder.tokenEmbedding.weight.data.shape.dims.head &&
     tokenizer.maxLength<=textEncoder.positionEmbedding.weight.data.shape.dims.head,"pipeline tokenizer/text encoder mismatch")
@@ -69,27 +69,23 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
     val scheduler=EulerScheduler(schedule,prediction,maxElements=maxLatentElements)
     val dpmSolver=if dpm then Some(DpmPlusPlus2M(schedule.sigmas,prediction,maxLatentElements)) else None
     var history: Option[Variable]=None
-    for i <- schedule.timesteps.indices do
-      checkCancelled()
-      val input=if dpm then latent else scheduler.scaleModelInput(i,latent)
-      val time=Tensor.fromFloats(Array(schedule.timesteps(i)),Shape.from(Seq(1)))
-      val positive=unet(input,time,conditional)
-      checkCancelled()
-      val predicted=unconditional match
-        case None => positive
-        case Some(context) =>
-          val negative=unet(input,time,context)
-          checkCancelled()
-          ClassifierFreeGuidance.combine(negative,positive,request.guidanceScale)
-      dpmSolver match
-        case Some(solver) =>
-          val result=solver.step(i,predicted,latent,history)
-          latent=result.previous
-          history=Some(result.predictedOriginal)
-        case None => latent=scheduler.step(i,predicted,latent).previous
-      require(latent.data.toFloatArray.forall(_.isFinite),"denoising produced nonfinite latents")
-      checkCancelled()
-      onProgress(DiffusionImageProgress(i+1,schedule.timesteps.size,schedule.timesteps(i),latent.data))
+    unetExecution.withPredictor(unet,conditional.data,unconditional.map(_.data),cancelled) { predict =>
+      for i <- schedule.timesteps.indices do
+        checkCancelled()
+        val input=if dpm then latent else scheduler.scaleModelInput(i,latent)
+        val time=Tensor.fromFloats(Array(schedule.timesteps(i)),Shape.from(Seq(1)))
+        val predicted=Variable(predict(input.data,time,request.guidanceScale),requiresGrad=false)
+        checkCancelled()
+        dpmSolver match
+          case Some(solver) =>
+            val result=solver.step(i,predicted,latent,history)
+            latent=result.previous
+            history=Some(result.predictedOriginal)
+          case None => latent=scheduler.step(i,predicted,latent).previous
+        require(latent.data.toFloatArray.forall(_.isFinite),"denoising produced nonfinite latents")
+        checkCancelled()
+        onProgress(DiffusionImageProgress(i+1,schedule.timesteps.size,schedule.timesteps(i),latent.data))
+    }
     checkCancelled()
     val decoderInput=latent*(1/vae.config.scalingFactor).toFloat
     val image=try

@@ -7,6 +7,8 @@ import scala.util.control.NonFatal
 trait NativeWorkerBackend:
   def supported: Set[String]
   def features: Vector[String]=Vector.empty
+  def device: String="cpu"
+  def usesCuda: Boolean=false
   /** Called on the reader thread; implementations must only read published snapshots. */
   def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot()
   def execute(request: NativeRequest,context: NativeWorkContext): Map[String,NativeJson]
@@ -31,7 +33,7 @@ final class NativeWorker(out: OutputStream,backend: NativeWorkerBackend) extends
     "affected"->Bool(d.affected),"too_late"->Bool(d.tooLate),"protection"->Obj(protection(d.protection)),
     "active_id"->d.activeId.map(Str.apply).getOrElse(Null))
   private val hello=Map("protocol"->Number(BigDecimal(1)),"engine_version"->Str("scala-torch-0.1.0"),
-    "python"->Str(""),"cuda"->Bool(false),"device"->Str("cpu"),"dry_run"->Bool(false),
+    "python"->Str(""),"cuda"->Bool(backend.usesCuda),"device"->Str(backend.device),"dry_run"->Bool(false),
     "features"->Arr(backend.features.map(Str.apply)))
   emitter.emit(hello++Map("id"->Null,"type"->Str("hello")))
   private val worker=new Thread(() => work(),"scala-torch-native-worker")

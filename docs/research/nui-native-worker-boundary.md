@@ -1,3 +1,17 @@
+# CUDA U-Net and VAE desktop checkpoint (2026-11-03)
+
+In addition to CUDA VAE decode, SDFX_SCALATORCH_UNET_DEVICE=cpu|cuda|cuda:<index>
+and SDFX_SCALATORCH_UNET_MAX_BYTES (default1GiB) select resident U-Net prediction
+and CFG across sampling steps. CLIP and scheduler updates remain CPU; latent input
+and guided prediction cross the device boundary each step. Resources release
+before VAE decoding, on completion/cancel/failure. No silent CPU fallback.
+
+Hello and status report U-Net placement and individual component devices. Host
+model loading remains fp32/cpu. Both selections survive VAE replacement. Separate
+Java worker, real NUI EngineClient and the JavaFX desktop passed generation with
+CUDA U-Net+VAE. The screenshot in HANDOFF.md shows Ready cuda:0 and Done1image;
+this uses the noise-like tiny checkpoint, not normal-model quality acceptance.
+The VRAM estimator, full feature parity, memory modes and packaging remain open.
 # Optional CUDA VAE decode (2026-11-03)
 
 NativeWorkerMain supports SDFX_SCALATORCH_VAE_DEVICE=cpu|cuda|cuda:<index> plus

@@ -13,7 +13,7 @@ sealed trait VaeExecution:
 
 object VaeExecution:
   private[models] def checkCancelled(cancelled: () => Boolean): Unit =
-    if cancelled() || Thread.currentThread().isInterrupted then throw new CancellationException("VAE decode cancelled")
+    if cancelled() || Thread.currentThread().isInterrupted then throw new CancellationException("diffusion inference cancelled")
 
   case object Cpu extends VaeExecution:
     val device="cpu"

@@ -1,3 +1,48 @@
+## CUDA U-Net denoising connected to pipeline, worker and desktop (2026-11-03)
+
+UNetExecution (default Cpu) provides a predictor scoped to the entire sampling
+loop. Cuda snapshots U-Net weights and positive/negative contexts once, performs
+resident U-Net/CFG each step, downloads guided predictions for existing CPU
+Euler/DPM schedulers, then releases the session before VAE decode. CLIP and small
+sinusoidal timestep constants remain CPU. This is hybrid execution, not a fully
+GPU-resident scheduler or FP16/offload. No layer activation downloads.
+
+NativeWorkerMain accepts SDFX_SCALATORCH_UNET_DEVICE=cpu|cuda|cuda:<index> and
+SDFX_SCALATORCH_UNET_MAX_BYTES (default1GiB), independently of VAE placement.
+Model load remains fp32/cpu host storage. set_vae retains both execution settings.
+Hello.device/status.device.active reflect configured U-Net placement; hello.cuda
+reflects either CUDA component. Status lists unet/vae/text_encoder/scheduler devices
+and reports hybrid when applicable. CUDA availability is checked at inference;
+no silent fallback. Cancellation/failure tears down session-scoped weights.
+
+Verification:
+- models/testOnly *CudaImagePipelineSuite *PretrainedVaeSuite:19 passed, no skips.
+  Euler/DPM3steps with CFG1/7.5 and CUDA U-Net+VAE match CPU images within max7.45e-7.
+  Cancel after a sampling step then regenerate succeeds; low U-Net memory budget
+  throws outside VaeDecodeFailure. Existing exact-latent VAE recovery still passes.
+- models/testOnly *NativeWorkerProcessSuite *NativeWorkerSuite
+  *NativeDiffusionBackendSuite:7 passed. Separate Java processes cover CPU,
+  CUDA VAE-only, and CUDA U-Net+VAE JSON Lines progress/preview/PNG plus status.
+- NUI engine/testOnly *NativeScalaEngineSuite passed1 in2.636s with both CUDA opts:
+  real EngineClient generation, VAE replacement/restore, typed preview/PNG and status.
+- Actual JavaFX ui/run --autogen --exit-after35 also completed. Inspected screenshot:
+  .superpowers/nui-ui-8389b9ccd0c940b787ecad1783f6d50b/native-ui-cuda-unet.png
+  shows Ready cuda:0, Done1image and gallery. Saved outputs/txt2img/2026-11-03/
+  00001-42.png (64x64,DPM++2M Karras3,CFG7,seed42), SHA256
+  91c346a97e597f19af3d5d90d6e8a98fca9947021ebfe7886ddc1837b498900e
+  equals prior CPU PNG after quantization. Tiny model output is noise-like; no
+  normal-model quality claim. VRAM estimator remains unsupported. ui/run reported
+  success47s; sbt thin-client printed an InterruptedException during shutdown after
+  success, not an inference error.
+
+NUI dedicated branch has updated tests/docs in a separate commit. NUI sbt server
+currently inherits all native launch vars plus UNET_DEVICE=cuda and VAE_DEVICE=cuda;
+scala-torch server stopped. Artifacts/classes updated by tests. Restart server
+with CUDA tests and clip/unet/vae properties for further scala-torch testing.
+
+Next: improve real-model memory/performance (dense quadratic attention, FP32 storage,
+FP16/offload), continue full feature parity and standard checkpoint support. The
+original Python-free NUI goal is still incomplete despite this tiny GPU milestone.
 ## Complete resident CUDA U-Net forward (2026-11-03)
 
 CudaUNet.upload(session, ConditionalUNet2d, cancelled) snapshots the full model.

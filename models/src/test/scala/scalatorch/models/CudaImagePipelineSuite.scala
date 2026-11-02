@@ -53,3 +53,35 @@ class CudaImagePipelineSuite extends munit.FunSuite:
     intercept[IllegalArgumentException](VaeExecution.fromEnvironment(Map("SDFX_SCALATORCH_VAE_DEVICE"->"cuda",
       "SDFX_SCALATORCH_VAE_MAX_BYTES"->"0")))
   }
+  test("resident CUDA U-Net stays available across Euler and DPM steps with classifier-free guidance") {
+    val cpu=pipeline(VaeExecution.Cpu)
+    val gpu=new EulerImagePipeline(cpu.tokenizer,cpu.textEncoder,cpu.unet,cpu.vae,
+      vaeExecution=VaeExecution.Cuda(),unetExecution=UNetExecution.Cuda())
+    val noise=DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true)
+    for dpm <- Seq(false,true); guidance <- Seq(1f,7.5f) do
+      val request=DiffusionImageRequest("a red cat","green trees",10,6,42,guidanceScale=guidance)
+      def run(p: EulerImagePipeline)=
+        if dpm then p.generateDpm(request,DpmSchedule.karras(noise,3)) else p.generate(request,noise.euler(3))
+      val expected=run(cpu);val actual=run(gpu)
+      assertEquals(actual.shape,expected.shape)
+      val error=actual.toFloatArray.zip(expected.toFloatArray).map((a,e) => math.abs(a.toDouble-e)).max
+      println(s"CUDA U-Net pipeline dpm=$dpm cfg=$guidance maxAbsError=$error")
+      assert(error<2e-5)
+    val request=DiffusionImageRequest("a cat","",10,6,43)
+    var cancelled=false
+    intercept[CancellationException] {
+      gpu.generate(request,noise.euler(3),onProgress=_ => cancelled=true,cancelled=() => cancelled)
+    }
+    assert(gpu.generate(request,noise.euler(1)).toFloatArray.forall(_.isFinite))
+    val limited=new EulerImagePipeline(cpu.tokenizer,cpu.textEncoder,cpu.unet,cpu.vae,unetExecution=UNetExecution.Cuda(maxBytes=1))
+    intercept[IllegalArgumentException](limited.generate(request,noise.euler(1)))
+  }
+  test("worker U-Net placement and budget settings reject invalid values") {
+    assertEquals(UNetExecution.fromEnvironment(Map.empty),UNetExecution.Cpu)
+    assertEquals(UNetExecution.fromEnvironment(Map("SDFX_SCALATORCH_UNET_DEVICE"->"cuda")),UNetExecution.Cuda())
+    assertEquals(UNetExecution.fromEnvironment(Map("SDFX_SCALATORCH_UNET_DEVICE"->"cuda:2",
+      "SDFX_SCALATORCH_UNET_MAX_BYTES"->"4096")),UNetExecution.Cuda(2,4096))
+    for device <- Seq("gpu","cuda:-1","cuda:foo") do
+      intercept[IllegalArgumentException](UNetExecution.fromEnvironment(Map("SDFX_SCALATORCH_UNET_DEVICE"->device)))
+    intercept[IllegalArgumentException](UNetExecution.Cuda(maxBytes=0))
+  }

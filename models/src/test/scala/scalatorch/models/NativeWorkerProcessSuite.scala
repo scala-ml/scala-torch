@@ -13,7 +13,11 @@ class NativeWorkerProcessSuite extends munit.FunSuite:
     assume(sys.env.get("SCALATORCH_CUDA_TESTS").contains("1"),"real GPU test disabled")
     runWorker(true)
   }
-  private def runWorker(cuda: Boolean): Unit = {
+  test("public worker subprocess runs CUDA U-Net and VAE with progress and PNG output") {
+    assume(sys.env.get("SCALATORCH_CUDA_TESTS").contains("1"),"real GPU test disabled")
+    runWorker(true,true)
+  }
+  private def runWorker(cuda: Boolean,unetCuda: Boolean=false): Unit = {
     val configured=sys.props.get("scalatorch.clip.dir")
     assume(configured.nonEmpty,"public tiny model required")
     val root=Path.of(configured.get).getParent
@@ -31,6 +35,8 @@ class NativeWorkerProcessSuite extends munit.FunSuite:
     builder.environment().remove("JAVA_TOOL_OPTIONS")
     builder.environment().put("SDFX_SCALATORCH_VAE_DEVICE",if cuda then "cuda" else "cpu")
     builder.environment().remove("SDFX_SCALATORCH_VAE_MAX_BYTES")
+    builder.environment().put("SDFX_SCALATORCH_UNET_DEVICE",if unetCuda then "cuda" else "cpu")
+    builder.environment().remove("SDFX_SCALATORCH_UNET_MAX_BYTES")
     val process=builder.start()
     val input=new java.io.BufferedWriter(new java.io.OutputStreamWriter(process.getOutputStream,UTF_8))
     val lines=new LinkedBlockingQueue[String]()
@@ -57,12 +63,15 @@ class NativeWorkerProcessSuite extends munit.FunSuite:
       val hello=receive()
       assertEquals(hello("type"),Str("hello"))
       assertEquals(hello("python"),Str(""))
+      assertEquals(hello("device"),Str(if unetCuda then "cuda:0" else "cpu"))
+      assertEquals(hello("cuda"),Bool(cuda || unetCuda))
       send("load","load_model",Map("path"->Str(root.toString),"dtype"->Str("fp32"),"vram_mode"->Str("cpu")))
       assertEquals(receive()("type"),Str("result"))
       send("status","system_status")
       val status=receive()("result").asInstanceOf[Obj].fields
       assertEquals(status("model").asInstanceOf[Obj].fields("name"),Str(root.getFileName.toString))
       assertEquals(status("runtime").asInstanceOf[Obj].fields("vae_device"),Str(if cuda then "cuda:0" else "cpu"))
+      assertEquals(status("runtime").asInstanceOf[Obj].fields("unet_device"),Str(if unetCuda then "cuda:0" else "cpu"))
       send("generate","txt2img",Map("output_dir"->Str(temp.toString),"params"->Obj(Map(
         "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(3),
         "seed"->Number(BigDecimal(Long.MaxValue)),"sampler_name"->Str("DPM++ 2M"),"scheduler"->Str("Karras")))))

@@ -6,16 +6,18 @@ import java.util.UUID
 
 final class NativeBackendError(val code: String,message: String) extends RuntimeException(message)
 
-/** CPU Float32 denoising adapter with explicit optional CUDA VAE decoding. */
+/** Host-loaded Float32 models with explicit U-Net/VAE execution placement. */
 final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
-    vaeExecution: VaeExecution=VaeExecution.Cpu) extends NativeWorkerBackend:
+    vaeExecution: VaeExecution=VaeExecution.Cpu,unetExecution: UNetExecution=UNetExecution.Cpu) extends NativeWorkerBackend:
   import NativeJson.*
   private val root=modelRoot.toRealPath()
   private val config=EulerConfig.read(schedulerConfig)
   private var loaded: Option[EulerImagePipeline]=None
   private var keywordState=ModelKeyword.State()
   @volatile private var modelSummary=Map.empty[String,NativeJson]
-  override def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot(modelSummary,vaeExecution.device)
+  override def device: String=unetExecution.device
+  override def usesCuda: Boolean=vaeExecution.device!="cpu" || unetExecution.device!="cpu"
+  override def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot(modelSummary,vaeExecution.device,unetExecution.device)
   private def checkpointHash(context: NativeWorkContext): String=
     val digest=java.security.MessageDigest.getInstance("SHA-256")
     val weights=Vector("text_encoder"->"model.safetensors","unet"->"diffusion_pytorch_model.safetensors",
@@ -137,7 +139,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         keys(p,Set("path","dtype","vram_mode","vae_path","vae_tiling"))
         require(Path.of(str(p,"path",root.toString)).toRealPath()==root,"model path differs from configured checkpoint")
         if str(p,"dtype","fp32")!="fp32" || str(p,"vram_mode","cpu")!="cpu" then
-          unsupported("native adapter currently requires fp32 and cpu")
+          unsupported("native parameter loading requires fp32 and cpu; U-Net/VAE execution placement is configured separately")
         if p.get("vae_tiling").exists(_!=Bool(false)) then unsupported("VAE tiling is not implemented")
         val selectedVae=vaeChoice(p,"vae_path")
         val tokenizer=ClipFastTokenizer.load(root.resolve("tokenizer/vocab.json"),root.resolve("tokenizer/merges.txt"))
@@ -147,7 +149,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val unet=PretrainedUNet.load(root.resolve("unet"))
         context.checkCancelled()
         val (vae,vaeInfo)=readVae(selectedVae,context)
-        val pipeline=new EulerImagePipeline(tokenizer,clip,unet,vae,vaeExecution=vaeExecution)
+        val pipeline=new EulerImagePipeline(tokenizer,clip,unet,vae,vaeExecution=vaeExecution,unetExecution=unetExecution)
         val hash=checkpointHash(context)
         context.beginPublication()
         loaded=Some(pipeline)
@@ -161,7 +163,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         require(vae.config.latentChannels==previous.vae.config.latentChannels &&
           vae.config.channels.size==previous.vae.config.channels.size,"replacement VAE latent geometry differs")
         val replacement=new EulerImagePipeline(previous.tokenizer,previous.textEncoder,previous.unet,vae,
-          vaeExecution=previous.vaeExecution)
+          vaeExecution=previous.vaeExecution,unetExecution=previous.unetExecution)
         context.beginPublication()
         loaded=Some(replacement)
         modelSummary=modelSummary++info++Map("model_token"->Str(UUID.randomUUID().toString))
@@ -280,6 +282,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
 object NativeWorkerMain:
   def main(args: Array[String]): Unit=
     require(args.length==2,"usage: NativeWorkerMain <diffusers-root> <explicit-euler-config.json>")
-    val backend=new NativeDiffusionBackend(Path.of(args(0)),Path.of(args(1)),VaeExecution.fromEnvironment(sys.env))
+    val backend=new NativeDiffusionBackend(Path.of(args(0)),Path.of(args(1)),VaeExecution.fromEnvironment(sys.env),
+      UNetExecution.fromEnvironment(sys.env))
     val worker=new NativeWorker(System.out,backend)
     worker.serve(new java.io.InputStreamReader(System.in,java.nio.charset.StandardCharsets.UTF_8))
