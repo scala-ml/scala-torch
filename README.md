@@ -1,11 +1,37 @@
 # scala-torch
 
-Scala 3でモデルを書き、学習し、実行するための深層学習基盤。Java 25を前提に、PythonなしでLLMと画像生成を扱うことを目指す。
+Deep learning in Scala 3, targeting Java 25 and Python-free LLMs, training, and image generation.
 
-現在は計画段階。Tensor演算や推論が実装済みという意味ではない。
+Requires **Java 25, Scala 3.3.8 LTS, sbt 2.0.10**. Versions are pinned in the build.
 
-- [設計・ロードマップ](docs/superpowers/specs/2026-11-02-scala-torch-design.md)
-- [最初の実装計画](docs/superpowers/plans/2026-11-02-tensor-foundation.md)
-- [既存コードの再利用・置換境界の調査](docs/research/reuse-audit.md)
+Implemented: CPU tensors (Float32/Float64/Int64/Bool), checked shapes and views, slicing, broadcasting, Float32 add/reduction/matrix multiplication, and a numscala GEMM adapter. The FFM module includes host memory scopes and a real CUDA driver memory-copy probe.
 
-PyTorchの全API互換ではなく、Scalaでモデルを簡潔に記述・変更できることと、実モデルをPythonなしで動かせることを成功条件とする。
+Not implemented yet: autograd, GPU tensor operations/GEMM, model loading, LLM generation, or diffusion/NUI migration.
+
+```sh
+sbt 'core / Test / testOnly scalatorch.*'
+sbt 'cpu / Test / testOnly scalatorch.cpu.*'
+sbt 'ffm / Test / testOnly scalatorch.ffm.*'
+# Requires a Linux 64-bit CUDA driver and GPU; fails if unavailable:
+sbt 'ffm / Compile / runMain scalatorch.ffm.CudaProbe'
+# Force the actual GPU test, including when using an existing sbt server:
+sbt ';set ffm / Test / envVars += "SCALATORCH_CUDA_TESTS" -> "1";ffm / Test / testOnly scalatorch.ffm.*'
+```
+
+```scala
+import scalatorch.*
+import scalatorch.cpu.NumscalaBackend
+
+val x = Tensor.fromFloats(Array(1f, 2f, 3f, 4f, 5f, 6f), Shape.from(Seq(2L, 3L)))
+val gram = NumscalaBackend.matmul(x, x.transpose(0, 1))
+assert(gram.toFloatArray.toSeq == Seq(14f, 32f, 32f, 77f))
+```
+
+`reshape` requires a contiguous layout; call `.contiguous` to copy a strided view first. Input and extracted arrays are copied. Operations currently use explicit CPU backends; no implicit device transfers or in-place public mutations.
+
+- [Design and roadmap](docs/superpowers/specs/2026-11-02-scala-torch-design.md)
+- [Initial implementation plan](docs/superpowers/plans/2026-11-02-tensor-foundation.md)
+- [Reuse and migration audit](docs/research/reuse-audit.md)
+- [Implementation evidence and remaining gates](docs/research/implementation-status.md)
+
+The target is concise Scala model authoring and Python-free real-model execution, rather than full PyTorch API compatibility.

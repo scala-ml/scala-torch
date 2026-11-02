@@ -1,6 +1,6 @@
 # scala-torch 設計・ロードマップ
 
-作成日: 2026-11-02。状態: 提案。実装開始前に設計をレビューする。
+作成日: 2026-11-02。状態: ユーザーの `approve` により承認済み。実装進行中。
 
 ## 目的と成功条件
 
@@ -30,7 +30,7 @@ Scalaを深層学習の実装言語にする。Java向けAPIをScalaで包むだ
 
 ## 制約と構成
 
-- Scala 3、Java 25必須。初期Scala候補はnumscalaに合わせ3.3.7。sbt・compiler・JDKの組合せを最初に検証し固定する。
+- Scala 3.3.8 LTS, Java 25, and sbt 2.x are required by the user. The build pins sbt 2.0.10. Earlier references to Scala 3.3.7 describe the inspected numscala build, not this project's selected compiler.
 - Python不要。Scalaが公開APIとモデル実装を所有する。JNI/JavaCPPを標準の境界にしない。
 - `core`: Tensor、shape/stride、dtype、storage所有権、device、dispatch。`cpu`: numscala kernelsとの接続。`ffm`: symbol/layout/error/lifetime。`cuda`: device memory、stream、event、演算。`autograd`、`nn`、`optim`、`io`、`models`、`examples`をその上に分離する。
 - numscalaはCPUの演算資産と相互変換先。NDArrayをGPU Tensorそのものに見立てない。まず明示的copyで接続し、zero-copyは寿命とaliasを検証してから追加する。NumPyとPyTorchの型昇格規則を混同しない。

@@ -6,15 +6,19 @@
 
 **Architecture:** Tensorのmetadataとstorageを分離し、CPU参照実装で意味を固定する。numscalaはCPU kernel adapterから再利用し、FFMは独立spikeでABIと寿命を確認する。
 
-**Tech Stack:** Scala 3（初期候補3.3.7）、Java 25、sbt、MUnit、numscala、FFM。
+**Tech Stack:** Scala 3.3.8 LTS, Java 25, sbt 2.0.10, MUnit, numscala 0.5.0, FFM.
 
 **Spec:** `docs/superpowers/specs/2026-11-02-scala-torch-design.md`
 
-この計画はM0/M1を詳細化する。M2–M6は設計書の必須到達点として残り、それぞれ前段の計測結果から詳細計画を書く。設計は未承認の提案であり、この文書だけで実装開始済みとはしない。
+この計画はM0/M1を詳細化する。M2–M6は設計書の必須到達点として残り、それぞれ前段の計測結果から詳細計画を書く。ユーザーの `approve` により設計は承認済み。実装と検証の進捗は別途記録する。
+
+## Current progress
+
+See [verification evidence](../../research/implementation-status.md). Task 1 is partial (full source/feature audit remains). Tasks 2 and 3 are implemented and tested. Task 4 is partial (reference operations and numscala GEMM verified; benchmarks remain). Task 5 is partial (host lifetime and actual GPU copy verified; native GEMM and async ownership remain). This is not M0/M1 or overall project completion.
 
 ## Global Constraints
 
-- Scala 3、Java 25必須。
+- Scala 3.3.8 LTS, Java 25, sbt 2.x required (pinned to 2.0.10).
 - Python不要。Scalaが公開APIとモデル実装を所有する。JNI/JavaCPPを標準の境界にしない。
 - scalarはrank 0、空次元を認める。shape積・offset計算はLongでoverflowを検査する。
 - device転送を演算が黙って行わない。

@@ -23,4 +23,4 @@
 - sbt launcherの配置versionからプロジェクトのsbt versionを推測しない。numscalaのbuildとの互換性を確認して`project/build.properties`を固定する。
 - `nvidia-smi`の成功はCUDA Toolkit、cuBLAS、FFM bindingの成功を保証しない。native libraryごとにload・symbol・小演算を検証する。
 
-設計レビュー待ちのため、依存導入・ビルド構築・製品コード作成はまだ実施していない。
+The above records the initial environment discovery. Following user approval, the build now uses Scala 3.3.8 and sbt 2.0.10 on Java 25; see [implementation evidence](implementation-status.md) for current verified behavior. Git was initialized on `feat/tensor-foundation`.

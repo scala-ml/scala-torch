@@ -1,9 +1,9 @@
-ThisBuild / scalaVersion := "3.3.7"
-ThisBuild / organization := "com.github.kmizu"
-ThisBuild / version := "0.1.0-SNAPSHOT"
+scalaVersion := "3.3.8"
+organization := "com.github.kmizu"
+version := "0.1.0-SNAPSHOT"
 
 lazy val common = Seq(
-  scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked"),
+  scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-release", "25", "-Yfuture-lazy-vals"),
   libraryDependencies += "org.scalameta" %% "munit" % "1.1.1" % Test,
   Test / fork := true
 )
