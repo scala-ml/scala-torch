@@ -3,6 +3,39 @@
 .target sm_50
 .address_size 64
 
+.visible .entry resize_nearest(
+ .param .u64 input, .param .u64 output, .param .u32 count,
+ .param .u32 ih, .param .u32 iw, .param .u32 oh, .param .u32 ow, .param .u32 exact
+) {
+ .reg .pred p;
+ .reg .b32 r<15>;
+ .reg .b64 d<8>;
+ ld.param.u64 d0,[input]; ld.param.u64 d1,[output];
+ ld.param.u32 r0,[count]; ld.param.u32 r1,[ih]; ld.param.u32 r2,[iw];
+ ld.param.u32 r3,[oh]; ld.param.u32 r4,[ow]; ld.param.u32 r5,[exact];
+ mov.u32 r6,%ctaid.x; mov.u32 r7,%ntid.x; mov.u32 r8,%tid.x;
+ mad.lo.u32 r6,r6,r7,r8;
+ setp.ge.u32 p,r6,r0; @p bra DONE;
+ div.u32 r7,r6,r4; rem.u32 r8,r6,r4;
+ div.u32 r9,r7,r3; rem.u32 r7,r7,r3;
+ // Use integer 64-bit ratios, including large coprime spatial dimensions.
+ cvt.u64.u32 d2,r7; cvt.u64.u32 d3,r8;
+ cvt.u64.u32 d4,r3; cvt.u64.u32 d5,r4;
+ setp.eq.u32 p,r5,0; @p bra COORD;
+ shl.b64 d2,d2,1; add.u64 d2,d2,1;
+ shl.b64 d3,d3,1; add.u64 d3,d3,1;
+ shl.b64 d4,d4,1; shl.b64 d5,d5,1;
+COORD:
+ cvt.u64.u32 d6,r1; mul.lo.u64 d2,d2,d6; div.u64 d2,d2,d4;
+ cvt.u64.u32 d6,r2; mul.lo.u64 d3,d3,d6; div.u64 d3,d3,d5;
+ cvt.u32.u64 r10,d2; cvt.u32.u64 r11,d3;
+ mad.lo.u32 r12,r9,r1,r10; mad.lo.u32 r12,r12,r2,r11;
+ mul.wide.u32 d2,r12,4; add.u64 d2,d0,d2;
+ mul.wide.u32 d3,r6,4; add.u64 d3,d1,d3;
+ ld.global.u32 r14,[d2]; st.global.u32 [d3],r14;
+DONE: ret;
+}
+
 .visible .entry attention_gradient_cast(.param .u64 a, .param .u64 out, .param .u32 count) {
  .reg .pred p;
  .reg .b32 r<5>;

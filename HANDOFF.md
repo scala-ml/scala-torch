@@ -1,3 +1,17 @@
+## Resident CUDA nearest resize (2026-11-03)
+
+CudaSession.resizeNearest2d implements NCHW Floor and Exact nearest resize,
+sharing CPU Resize2d output geometry validation. PTX uses 64-bit integer ratios
+and raw 32-bit value copies, preserving signed zero, infinities and NaN payloads.
+No intermediate host activation transfers or device scratch are required.
+
+Tests cover noninteger up/downsampling, both modes, batches/channels, transposed
+CPU uploads, large coprime widths (65537 -> 65539, overflowing 32-bit products),
+empty batches, bad geometry, released handles and allocation budget cleanup.
+Resident resize -> convolution agrees bit-for-bit with CPU. Actual GPU suite
+ffm/testOnly * passed all48; core/testOnly *Resize* passed2. No end-to-end GPU
+pipeline claim: graph composition, other missing operations and memory strategy
+remain necessary for normal diffusion models.
 ## Resident CUDA noncausal attention (2026-11-03)
 
 CudaSession.scaledDotProductAttention supports noncausal self/cross attention,
