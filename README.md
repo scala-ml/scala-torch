@@ -4,7 +4,7 @@ Deep learning in Scala 3, targeting Java 25 and Python-free LLMs, training, and 
 
 Requires **Java 25, Scala 3.3.8 LTS, sbt 2.0.10**. Versions are pinned in the build.
 
-Published Llama checkpoint inference now runs in Scala: standard config + single-file safetensors loading, differentiable model composition, and greedy token-ID generation. The public tiny-random Llama matches 128000 independent Rust Candle logits with maximum absolute error `5.96e-8`. This verifies architecture interoperability; the random checkpoint is not a useful language model. Tokenization, persistent KV cache and trained-model text generation remain open.
+Published Llama checkpoint inference now runs in Scala: standard config + single-file safetensors loading, differentiable model composition, persistent CPU KV cache, and greedy token-ID generation. The public tiny-random Llama matches 128000 independent Rust Candle logits with maximum absolute error `5.96e-8`; cached chunks also match that reference. This verifies architecture interoperability; the random checkpoint is not a useful language model. Tokenization and useful trained-model text generation remain open.
 
 Implemented: CPU tensors (Float32/Float64/Int64/Bool), checked shapes and views, slicing, broadcasting, Float32 add/reduction/matrix multiplication, and a numscala GEMM adapter. The FFM module includes host memory scopes, a real CUDA memory-copy probe, and a driver-level Float32 GEMM probe with owned stream/event completion.
 
@@ -20,7 +20,7 @@ Safetensors archives can now be indexed and read without Python: F16/BF16/F32→
 
 Differentiable causal grouped-query attention and Llama-style RoPE are available on rank-4 `(batch, heads, tokens, width)` Variables. Attention supports query position offsets for decode chunks and a configurable score-workspace limit. Numerical gradient and masking tests cover these operations.
 
-Not implemented yet: a persistent GPU Tensor backend, cuBLAS acceleration, sharded weights, tokenizer/config variants, persistent KV cache, useful trained-model text generation, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
+Not implemented yet: a persistent GPU Tensor backend, cuBLAS acceleration, sharded weights, tokenizer/config variants, useful trained-model text generation, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
 
 ```sh
 sbt 'core / Test / testOnly scalatorch.*'
@@ -116,7 +116,18 @@ After downloading the pinned tiny checkpoint as documented in the [model guide](
 sbt 'models / Compile / runMain scalatorch.models.LlamaRun .superpowers/models/tiny-llama 1,42,17,321 1'
 ```
 
-It produces `1,42,17,321,16196`. Greedy inference currently recomputes full prefixes and is subject to model/context/logit/workspace limits; it is not an optimized cached decoder.
+It produces `1,42,17,321,16196`. Greedy inference uses a fresh KV cache by default; `useCache=false` retains full-prefix recomputation for comparison. Cache buffers and attention packing are CPU reference implementations; measured speedups or optimized-decoder parity are not claimed.
+
+```scala
+val cache = llama.newCache(batchSize = 1, capacity = 128)
+try
+  val prefill = cache.decode(Tensor.fromLongs(Array(1L,42L), Shape.from(Seq(1L,2L))))
+  val next = cache.decode(Tensor.fromLongs(Array(17L), Shape.from(Seq(1L,1L))))
+  assert(cache.position == 3)
+finally cache.close()
+```
+
+Caches are inference-only, model-bound and budgeted (256MiB by default, configurable). Changed weights reject until reset; failures do not advance position. Returned logits own their data. See [KV-cache evidence](docs/research/kv-cache.md).
 
 - [Design and roadmap](docs/superpowers/specs/2026-11-02-scala-torch-design.md)
 - [Initial implementation plan](docs/superpowers/plans/2026-11-02-tensor-foundation.md)

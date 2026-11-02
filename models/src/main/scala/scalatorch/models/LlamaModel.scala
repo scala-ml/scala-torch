@@ -16,14 +16,23 @@ object LlamaLimits:
 
 final case class LlamaAttention(qProj: Linear, kProj: Linear, vProj: Linear, oProj: Linear) derives Module:
   def apply(input: Variable, config: LlamaConfig, maxScores: Long): Variable =
+    run(input,config,maxScores,0,None)
+  private[models] def cached(input: Variable, config: LlamaConfig, maxScores: Long,
+      position: Int, cache: LlamaCache.Layer): Variable = run(input,config,maxScores,position,Some(cache))
+  private def run(input: Variable, config: LlamaConfig, maxScores: Long,
+      position: Int, cache: Option[LlamaCache.Layer]): Variable =
     val b = input.data.shape.dims(0); val t = input.data.shape.dims(1)
     val flat = input.reshape(Shape.from(Seq(b * t, config.hiddenSize.toLong)))
     def heads(layer: Linear, count: Int): Variable = layer(flat)
       .reshape(Shape.from(Seq(b,t,count.toLong,config.headDim.toLong))).transpose(1,2)
-    val q = heads(qProj, config.numAttentionHeads).rope(theta = config.ropeTheta)
-    val k = heads(kProj, config.numKeyValueHeads).rope(theta = config.ropeTheta)
-    val v = heads(vProj, config.numKeyValueHeads)
-    val attended = q.causalAttention(k, v, maxScoreElements = maxScores).transpose(1,2)
+    val q = heads(qProj, config.numAttentionHeads).rope(positionStart=position,theta=config.ropeTheta)
+    val freshKey = heads(kProj, config.numKeyValueHeads).rope(positionStart=position,theta=config.ropeTheta)
+    val freshValue = heads(vProj, config.numKeyValueHeads)
+    val (k,v) = cache.fold((freshKey,freshValue)) { layer =>
+      val (key,value) = layer.append(freshKey.data,freshValue.data,position)
+      (Variable(key,false),Variable(value,false))
+    }
+    val attended = q.causalAttention(k, v, queryStart=position,maxScoreElements=maxScores).transpose(1,2)
       .reshape(Shape.from(Seq(b*t, config.hiddenSize.toLong)))
     oProj(attended).reshape(input.data.shape)
 
@@ -36,6 +45,10 @@ final case class LlamaMLP(gateProj: Linear, upProj: Linear, downProj: Linear) de
 final case class LlamaBlock(inputNorm: RMSNorm, attention: LlamaAttention, postNorm: RMSNorm, mlp: LlamaMLP) derives Module:
   def apply(input: Variable, config: LlamaConfig, maxScores: Long): Variable =
     val h = input + attention(inputNorm(input), config, maxScores)
+    h + mlp(postNorm(h))
+  private[models] def cached(input: Variable, config: LlamaConfig, maxScores: Long,
+      position: Int, cache: LlamaCache.Layer): Variable =
+    val h = input + attention.cached(inputNorm(input),config,maxScores,position,cache)
     h + mlp(postNorm(h))
 
 final case class LlamaModel(config: LlamaConfig, embedding: Embedding, layers: Vector[LlamaBlock], norm: RMSNorm,
@@ -50,20 +63,29 @@ final case class LlamaModel(config: LlamaConfig, embedding: Embedding, layers: V
     val normalized = norm(hidden).reshape(Shape.from(Seq(b*t, config.hiddenSize.toLong)))
     lmHead(normalized).reshape(shape)
   def logits(tokens: Tensor[Long]): Tensor[Float] = Autograd.noGrad { forward(tokens).data }
-  def generateIds(prompt: Seq[Long], maxNewTokens: Int): Vector[Long] =
+  def newCache(batchSize: Int = 1, capacity: Int = config.maxPositions, maxBytes: Long = 268435456L): LlamaCache =
+    new LlamaCache(this,batchSize,capacity,maxBytes)
+  def generateIds(prompt: Seq[Long], maxNewTokens: Int, useCache: Boolean = true): Vector[Long] =
     require(prompt.nonEmpty && maxNewTokens >= 0 && prompt.length.toLong + maxNewTokens <= config.maxPositions, "invalid generation length")
     require(prompt.forall(id => id >= 0 && id < config.vocabSize), "generation token outside vocabulary")
     var ids = prompt.toVector
+    if maxNewTokens == 0 then return ids
     var generated = 0
     var stopped = false
-    while generated < maxNewTokens && !stopped do
-      val input = Tensor.fromLongs(ids.toArray, Shape.from(Seq(1L,ids.length.toLong)))
-      val scores = logits(input).slice(1, ids.length - 1L, ids.length.toLong).toFloatArray
-      require(scores.forall(_.isFinite), "nonfinite generation logits")
-      val next = scores.indices.maxBy(scores).toLong
-      ids = ids :+ next
-      generated += 1
-      stopped = config.eosTokenIds.contains(next)
+    val cache = if useCache then Some(newCache(capacity=prompt.length+maxNewTokens)) else None
+    try
+      var chunk = ids.toArray
+      while generated < maxNewTokens && !stopped do
+        val input = Tensor.fromLongs(chunk, Shape.from(Seq(1L,chunk.length.toLong)))
+        val result = cache.fold(logits(input))(_.decode(input))
+        val scores = result.slice(1,chunk.length-1L,chunk.length.toLong).toFloatArray
+        require(scores.forall(_.isFinite), "nonfinite generation logits")
+        val next = scores.indices.maxBy(scores).toLong
+        ids = ids :+ next
+        generated += 1
+        stopped = config.eosTokenIds.contains(next)
+        chunk = if useCache then Array(next) else ids.toArray
+    finally cache.foreach(_.close())
     ids
   def namedWeights: Vector[(String, Parameter)] =
     val base = Vector("model.embed_tokens.weight" -> embedding.weight, "model.norm.weight" -> norm.weight, "lm_head.weight" -> lmHead.weight)
