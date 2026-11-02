@@ -1,5 +1,30 @@
 # SD1.5 native acceptance work (2026-11-03)
 
+## Native img2img smoke
+
+After CUDA encoder implementation, the same standard FP32 SD1.5 checkpoint
+completed64x64 img2img,4scheduled/2active DPM++2M Karras steps,strength0.5,seed42,
+CFG7.5. Input was the previous64x64 txt2img smoke PNG. Both VAE encoder/decoder
+and U-Net use CUDA weight offload; posterior sampling,CLIP,scheduler stay CPU.
+Reported generation time40.1588288s includes concurrent original512px GPU work,
+so it is not an isolated benchmark. Process exited0 with empty stderr.
+Output: .superpowers/sd15-img2img-64-4/native-e6b913c1-1134-46cf-aa9a-0f2715d21db1.png
+SHA256:464c7367ee56f2d95886bd568e4de8d20458364aea24a7aa367c7890a1fac14e.
+Visually inspected: green/cyan/blue/black blobs, not recognizable apple content.
+This proves the normal-checkpoint execution path, not image quality.
+
+Reproducible direct-Java harness: scripts/run-native-diffusion.ps1, requiring
+ModelRoot,ClasspathFile,SchedulerConfig,OutputDirectory; optional InputImage
+switches to img2img, Strength defaults0.5. Side/Steps default512/20.
+It preserves request.json,protocol.jsonl,stderr.txt in a required-new output
+directory. CUDA offload1GiB per component and134217728 attention score work
+are explicit. No timeout/restart and no Python invocation. Supply an explicit
+compatible scheduler config; the harness does not claim PNDM support.
+
+Original512x512/20step txt2img is still active; no final-image acceptance yet.
+
+## Checkpoint and initial txt2img work
+
 Source: https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5
 Pinned revision:451f4fe16113bff5a5d2269ed5ad43b0592e9a14 (public SD1.5 mirror).
 The model card identifies CreativeML OpenRAIL-M. This local test does not publish

@@ -1,3 +1,26 @@
+## Generator replay and real SD1.5 img2img smoke (2026-11-03)
+
+NUI NativeGeneratorSuite passed1 in8.373s with actual AppServices/Generator,
+isolated home without python dir,native Java worker,CUDA offload16MiB.
+Catalog/load→txt2img→img2img→PNG metadata read→parsed-params replay matches
+pixels exactly given the same explicit source. Covers prompt/negative/seed/
+steps/strength/resize mode/output folder; not GUI/extension/SDXL acceptance.
+NUI test/docs changes remain on feat/scala-torch-native-engine.
+
+Added scripts/run-native-diffusion.ps1 reusable directJava real-model harness.
+Requires explicit model/classpath/scheduler/newoutputdir; optional InputImage
+and Strength enableimg2img. Saves request/protocol/stderr; noPython, no timeout.
+Actual SD1.5 64x64img2img4scheduled/2active steps completed session12746exit0,
+40.1588288s,empty stderr. Uses previous64pxsmoke as source. PNG inspected:
+green/cyan/blue/black blobs, not quality acceptance. SHA/path/params in
+docs/research/sd15-native-acceptance.md. Full CUDA encoder path now tested with
+real weights; concurrent originalGPUjob means timing not clean benchmark.
+
+Original512px20step txt2img session11471 Java33796 remains live,lateststep17/20.
+Next poll same handle,inspect final512PNG; use that source for512img2img once
+available. NUI sbt stilllive with CUDAoffload16MiB; scala-torch sbt stopped.
+Goal not complete: SDXL,GUI/fullreplay/extensions/inpainting/packaging remain.
+
 ## CUDA VAE encoder and img2img integration (2026-11-03)
 
 CudaVaeEncoder implements full encoder raw moments using shared CUDA runtime.
