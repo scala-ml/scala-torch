@@ -21,7 +21,7 @@ final class CudaTensor private[ffm] (private[ffm] val session: CudaSession,
 
 /** Thread-confined device storage and synchronous packed GEMM execution. */
 final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
-    val deviceName: String, val driverVersion: Int, val maxBytes: Long) extends TrainingBackend[CudaTensor]:
+    val deviceName: String, val driverVersion: Int, val maxBytes: Long) extends AdamWBackend[CudaTensor]:
   private val owner=Thread.currentThread()
   private var closed=false
   private var used=0L
@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
+  private val kernels=Seq("adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -98,6 +98,75 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       }
       body(buffer.address)
     }
+
+  private final class ResidentAdamState(val belongsTo: CudaSession,val buffer: CudaTensor,
+      originalShape: Shape,counter: Long) extends AdamWState[CudaTensor]:
+    def shape: Shape = { validate(buffer);originalShape }
+    def step: Long = { validate(buffer);counter }
+    def snapshot(): AdamWMoments =
+      validate(buffer)
+      val pairs=Using.resource(Arena.ofConfined()) { arena =>
+        val bytes=originalShape.numel*16
+        val host=arena.allocate(bytes,8)
+        if bytes>0 then driver.call("cuMemcpyDtoH_v2",Seq(ADDRESS,JAVA_LONG,JAVA_LONG),host,Long.box(buffer.address),Long.box(bytes))
+        host.toArray(JAVA_DOUBLE)
+      }
+      val n=originalShape.numel.toInt
+      AdamWMoments(counter,Tensor.fromDoubles(Array.tabulate(n)(i => pairs(i*2)),originalShape),
+        Tensor.fromDoubles(Array.tabulate(n)(i => pairs(i*2+1)),originalShape))
+    def close(): Unit = buffer.close()
+
+  def restoreAdamW(saved: AdamWMoments): AdamWState[CudaTensor] =
+    check();saved.validate()
+    require(saved.shape.numel*4<=Int.MaxValue,"Adam Double state exceeds Int indexing")
+    val buffer=allocate(Shape.from(Seq(saved.shape.numel,4L)))
+    try
+      if saved.shape.numel>0 then Using.resource(Arena.ofConfined()) { arena =>
+        val first=saved.first.toDoubleArray;val second=saved.second.toDoubleArray
+        val pairs=new Array[Double](first.length*2)
+        first.indices.foreach(i => { pairs(i*2)=first(i);pairs(i*2+1)=second(i) })
+        val host=arena.allocateFrom(JAVA_DOUBLE,pairs*)
+        driver.copyHostToDevice(buffer.address,host,saved.shape.numel*16)
+      }
+      new ResidentAdamState(this,buffer,saved.shape,saved.step)
+    catch case error: Throwable =>
+      try buffer.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
+  def adamW(weight: CudaTensor,gradient: CudaTensor,previous: Option[AdamWState[CudaTensor]],config: AdamWConfig): AdamWUpdate[CudaTensor] =
+    validate(weight);validate(gradient)
+    require(weight.shape==gradient.shape,"Adam gradient shape mismatch")
+    val old=previous.map {
+      case state: ResidentAdamState if state.belongsTo eq this =>
+        require(state.shape==weight.shape,"Adam state shape mismatch")
+        state
+      case _ => throw IllegalArgumentException("Adam state belongs to another backend/session")
+    }
+    val step=Math.addExact(old.fold(0L)(_.step),1L)
+    val n=weight.shape.numel
+    require(n*4<=Int.MaxValue,"Adam Double state exceeds Int indexing")
+    require(math.max(n*16,1L)+math.max(n*4,1L)+4<=maxBytes-used,"Adam update allocation budget exceeded")
+    var moments: CudaTensor=null
+    var result: CudaTensor=null
+    try
+      moments=allocate(Shape.from(Seq(n,4L)))
+      result=allocate(weight.shape)
+      Using.resource(fill(Shape.from(Seq.empty),0f)) { status =>
+        launch(n,kernels("adamw_update")) { arena =>
+          Seq(weight.address,gradient.address,old.fold(0L)(_.buffer.address),result.address,moments.address,status.address)
+            .map(x => arena.allocateFrom(JAVA_LONG,x)) ++ Seq(arena.allocateFrom(JAVA_INT,n.toInt)) ++
+            Seq(config.learningRate,config.beta1,config.beta2,config.epsilon,config.weightDecay,
+              1.0-math.pow(config.beta1,step.toDouble),1.0-math.pow(config.beta2,step.toDouble))
+              .map(x => arena.allocateFrom(JAVA_DOUBLE,x))
+        }
+        require(download(status).toFloatArray.head==0f,"nonfinite Adam input/update")
+      }
+      AdamWUpdate(result,new ResidentAdamState(this,moments,weight.shape,step))
+    catch case error: Throwable =>
+      Seq(result,moments).filter(_!=null).foreach { value =>
+        try value.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      }
+      throw error
 
   def allFinite(value: CudaTensor): Boolean =
     validate(value)

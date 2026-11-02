@@ -833,3 +833,53 @@ DONE: ret;
  @p atom.global.or.b32 r5,[d1],1;
 DONE: ret;
 }
+
+// Float32 weights/gradients with immutable interleaved Double (first,second) moments.
+.visible .entry adamw_update(
+ .param .u64 aw_weight,.param .u64 aw_gradient,.param .u64 aw_previous,
+ .param .u64 aw_output,.param .u64 aw_moments,.param .u64 aw_status,.param .u32 aw_count,
+ .param .f64 aw_rate,.param .f64 aw_beta1,.param .f64 aw_beta2,.param .f64 aw_epsilon,
+ .param .f64 aw_decay,.param .f64 aw_correction1,.param .f64 aw_correction2
+) {
+ .reg .pred p;
+ .reg .b32 r<7>;
+ .reg .b64 d<11>;
+ .reg .f32 f<3>;
+ .reg .f64 g<20>;
+ ld.param.u64 d0,[aw_weight]; ld.param.u64 d1,[aw_gradient]; ld.param.u64 d2,[aw_previous];
+ ld.param.u64 d3,[aw_output]; ld.param.u64 d4,[aw_moments]; ld.param.u64 d5,[aw_status];
+ ld.param.u32 r0,[aw_count];
+ ld.param.f64 g0,[aw_rate]; ld.param.f64 g1,[aw_beta1]; ld.param.f64 g2,[aw_beta2];
+ ld.param.f64 g3,[aw_epsilon]; ld.param.f64 g4,[aw_decay];
+ ld.param.f64 g5,[aw_correction1]; ld.param.f64 g6,[aw_correction2];
+ mov.u32 r1,%tid.x; mov.u32 r2,%ctaid.x; mov.u32 r3,%ntid.x;
+ mad.lo.u32 r4,r2,r3,r1; setp.ge.u32 p,r4,r0; @p bra DONE;
+ mul.wide.u32 d6,r4,4; add.u64 d7,d0,d6; add.u64 d8,d1,d6;
+ ld.global.f32 f0,[d7]; ld.global.f32 f1,[d8];
+ abs.f32 f2,f0; setp.gtu.f32 p,f2,0f7F7FFFFF; @p bra INVALID;
+ abs.f32 f2,f1; setp.gtu.f32 p,f2,0f7F7FFFFF; @p bra INVALID;
+ cvt.f64.f32 g7,f0; cvt.f64.f32 g8,f1;
+ mov.f64 g9,0d0000000000000000; mov.f64 g10,0d0000000000000000;
+ mul.wide.u32 d9,r4,16; setp.eq.u64 p,d2,0; @p bra MOMENTS;
+ add.u64 d10,d2,d9; ld.global.f64 g9,[d10]; ld.global.f64 g10,[d10+8];
+MOMENTS:
+ // Explicit round-to-nearest operations match CPU evaluation order without FMA contraction.
+ sub.rn.f64 g11,0d3FF0000000000000,g1; mul.rn.f64 g11,g11,g8;
+ mul.rn.f64 g9,g1,g9; add.rn.f64 g9,g9,g11;
+ sub.rn.f64 g11,0d3FF0000000000000,g2; mul.rn.f64 g11,g11,g8; mul.rn.f64 g11,g11,g8;
+ mul.rn.f64 g10,g2,g10; add.rn.f64 g10,g10,g11;
+ abs.f64 g11,g9; setp.gtu.f64 p,g11,0d7FEFFFFFFFFFFFFF; @p bra INVALID;
+ abs.f64 g11,g10; setp.gtu.f64 p,g11,0d7FEFFFFFFFFFFFFF; @p bra INVALID;
+ div.rn.f64 g11,g9,g5; mul.rn.f64 g11,g0,g11;
+ div.rn.f64 g12,g10,g6; sqrt.rn.f64 g12,g12; add.rn.f64 g12,g12,g3;
+ div.rn.f64 g11,g11,g12;
+ mul.rn.f64 g12,g0,g4; sub.rn.f64 g12,0d3FF0000000000000,g12;
+ mul.rn.f64 g12,g7,g12; sub.rn.f64 g12,g12,g11;
+ cvt.rn.f32.f64 f0,g12; abs.f32 f2,f0; setp.gtu.f32 p,f2,0f7F7FFFFF; @p bra INVALID;
+ add.u64 d7,d3,d6; st.global.f32 [d7],f0;
+ add.u64 d10,d4,d9; st.global.f64 [d10],g9; st.global.f64 [d10+8],g10;
+ bra DONE;
+INVALID:
+ atom.global.or.b32 r5,[d5],1;
+DONE: ret;
+}

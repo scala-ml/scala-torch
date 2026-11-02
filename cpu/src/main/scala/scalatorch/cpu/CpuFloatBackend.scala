@@ -3,7 +3,10 @@ package scalatorch.cpu
 import scalatorch.*
 
 /** Immutable CPU Float32 inference backend; release is a no-op for GC-owned storage. */
-object CpuFloatBackend extends TrainingBackend[Tensor[Float]]:
+object CpuFloatBackend extends AdamWBackend[Tensor[Float]]:
+  def adamW(weight: Tensor[Float],gradient: Tensor[Float],previous: Option[AdamWState[Tensor[Float]]],config: AdamWConfig): AdamWUpdate[Tensor[Float]] =
+    CpuAdamW.update(weight,gradient,previous,config)
+  def restoreAdamW(saved: AdamWMoments): AdamWState[Tensor[Float]] = CpuAdamW.restore(saved)
   def allFinite(value: Tensor[Float]): Boolean = value.toFloatArray.forall(_.isFinite)
   def crossEntropy(logits: Tensor[Float],targets: Tensor[Long],reduction: LossReduction = LossReduction.Mean,ignoreIndex: Long = -100L): Tensor[Float] =
     CpuCrossEntropy.forward(logits,targets,reduction,ignoreIndex)

@@ -183,10 +183,12 @@ Backend rotary positions and causal grouped-query attention now run on CPU or CU
 
 [Resident backend KV caches](docs/research/backend-kv-cache.md) now make cached CPU/CUDA generation the default. Device K/V buffers stay at fixed capacity, cached SmolLM2 logits match Candle, and rejected decodes leave the committed position unchanged.
 
-[Scoped backend autodiff](docs/research/backend-autograd.md) now differentiates matrix/layout, basic arithmetic, SiLU, RMSNorm, rotary-position, embedding, causal GQA and cross-entropy operations on CPU or CUDA. Resident regression, gated-MLP, tied embedding/projection and rotary-attention training tests match CPU gradients or analytical targets and restore their allocation baseline after every step. Full-model training is described below; backend AdamW/checkpoint integration remains open. Enable the separate real-GPU autograd gate with:
+[Scoped backend autodiff](docs/research/backend-autograd.md) now differentiates matrix/layout, basic arithmetic, SiLU, RMSNorm, rotary-position, embedding, causal GQA and cross-entropy operations on CPU or CUDA. Resident regression, gated-MLP, tied embedding/projection and rotary-attention training tests match CPU gradients or analytical targets and restore their allocation baseline after every step. Full-model training is described below; resident AdamW and checkpoint continuation are described below. Enable the separate real-GPU autograd gate with:
 
 ```sh
 sbt --server -Dsbt.io.virtual=false -Dsbt.server.autostart=false -batch ';set autograd / Test / envVars += "SCALATORCH_CUDA_TESTS" -> "1";autograd / Test / testOnly scalatorch.autograd.*'
 ```
 
-[Resident Llama training](docs/research/backend-llama-training.md) now composes complete CPU/CUDA graphs with tied/frozen weights and LoRA. Scoped steps stage validated SGD updates before publication. A full synthetic model reduces loss **2.1858 → 0.01204**; pretrained SmolLM2 LoRA reduces synthetic-token loss **20.8623 → 10.1143** with CPU-reference gradients and stable resident allocations. Backend AdamW and checkpoint continuation remain open.
+[Resident Llama training](docs/research/backend-llama-training.md) now composes complete CPU/CUDA graphs with tied/frozen weights and LoRA. Scoped steps stage validated SGD updates before publication. A full synthetic model reduces loss **2.1858 → 0.01204**; pretrained SmolLM2 LoRA reduces synthetic-token loss **20.8623 → 10.1143** with CPU-reference gradients and stable resident allocations. Resident AdamW and checkpoint continuation are described below.
+
+[Resident AdamW and checkpoints](docs/research/backend-adamw.md) now preserve Double moments and stage complete model updates. Pretrained SmolLM2 LoRA reduces synthetic-token loss **20.8623 → 4.8635** over30GPU steps;15steps plus save/load and15resumed steps exactly match uninterrupted training. Checkpoints bind model configuration and validate checksums before atomic state publication.

@@ -10,11 +10,13 @@ import scala.util.Using
   * A fresh scoped Step owns each graph. Plain SGD stages all replacements before publication.
   */
 final class BackendLlamaTraining[T] private (model: LlamaModel,val backend: TrainingBackend[T],
-    weights: mutable.Map[Parameter,T],resources: BackendScope[T]) extends AutoCloseable:
+    weights: mutable.Map[Parameter,T],resources: BackendScope[T],
+    adam: Option[(AdamWBackend[T],AdamWConfig)]) extends AutoCloseable:
   private val owner=Thread.currentThread()
   private val named=Module.namedParameters(model)
   private val parameters=Module.parameters(model)
   private val snapshot=parameters.map(p => p -> p.value)
+  private val moments=mutable.Map.empty[Parameter,AdamWState[T]]
   private val steps=mutable.LinkedHashSet.empty[Step]
   private var generation=0L
   private var closed=false
@@ -29,6 +31,47 @@ final class BackendLlamaTraining[T] private (model: LlamaModel,val backend: Trai
     check()
     val downloaded=parameters.map(p => p -> backend.download(weights(p))).toMap
     named.map((name,p) => name -> downloaded(p)).toMap
+  /** Explicit host export of optimizer slots, including tied-name aliases. */
+  def optimizerState(): Map[String,AdamWMoments] =
+    check()
+    val saved=moments.iterator.map((p,state) => p -> state.snapshot()).toMap
+    named.flatMap((name,p) => saved.get(p).map(name -> _)).toMap
+  /** Explicit full-model transfer to an atomic, architecture-bound AdamW checkpoint. */
+  def saveCheckpoint(path: java.nio.file.Path,step: Long,maxBytes: Long = 4294967296L): Unit =
+    check()
+    val (_,config)=adam.getOrElse(throw IllegalArgumentException("checkpoint requires AdamW training"))
+    require(step>=0,"negative training step")
+    BackendLlamaCheckpoint.save(model,stateDict(),optimizerState(),config,path,step,maxBytes)
+  /** Validates on the host, stages all device allocations, then publishes one new generation. */
+  def loadCheckpoint(path: java.nio.file.Path,maxBytes: Long = 4294967296L): Long =
+    check()
+    require(generation<Long.MaxValue,"training generation overflow")
+    val (engine,config)=adam.getOrElse(throw IllegalArgumentException("checkpoint requires AdamW training"))
+    val saved=BackendLlamaCheckpoint.load(model,config,path,maxBytes)
+    require(saved.weights.values.forall(_.toFloatArray.forall(_.isFinite)),"nonfinite checkpoint weights")
+    val aliases=named.groupMap(_._2)(_._1)
+    Using.Manager { use =>
+      val staged=use(new BackendScope(backend))
+      val pending=mutable.ArrayBuffer.empty[AdamWState[T]]
+      use(new AutoCloseable {
+        def close(): Unit = Using.Manager { cleanup => pending.foreach(s => cleanup(s));() }.get
+      })
+      val newWeights=parameters.map(p => p -> staged.keep(backend.upload(saved.weights(aliases(p).head))))
+      val newMoments=parameters.flatMap { p => saved.moments.get(aliases(p).head).map { host =>
+        val state=engine.restoreAdamW(host);pending+=state;p -> state
+      }}
+      val oldWeights=weights.values.toVector;val oldMoments=moments.values.toVector
+      newWeights.foreach((p,w) => weights(p)=resources.keep(staged.take(w)))
+      moments.clear();moments++=newMoments
+      pending.clear();generation+=1
+      Using.Manager { cleanup =>
+        oldMoments.foreach(s => cleanup(s))
+        oldWeights.foreach(w => cleanup(new AutoCloseable { def close(): Unit = resources.release(w) }))
+        ()
+      }.get
+      saved.step
+    }.get
+
   def newStep(): Step =
     check()
     val step=new Step(generation)
@@ -88,6 +131,7 @@ final class BackendLlamaTraining[T] private (model: LlamaModel,val backend: Trai
       */
     def sgd(learningRate: Float): Unit =
       valid()
+      require(adam.isEmpty,"this training model is configured for AdamW")
       require(learningRate.isFinite && learningRate>0,"invalid SGD learning rate")
       require(generation<Long.MaxValue,"training generation overflow")
       val trainable=parameters.filter(_.trainable)
@@ -111,6 +155,42 @@ final class BackendLlamaTraining[T] private (model: LlamaModel,val backend: Trai
         generation+=1
         old.foreach(resources.release)
       }
+    /** Publish all new weights and Double moments only after every update succeeds. */
+    def adamW(): Unit =
+      valid()
+      val (engine,config)=adam.getOrElse(throw IllegalArgumentException("this training model is not configured for AdamW"))
+      require(generation<Long.MaxValue,"training generation overflow")
+      val trainable=parameters.filter(_.trainable)
+      require(trainable.nonEmpty,"no trainable parameters")
+      val gradients=trainable.map { p =>
+        p -> leaves(p).grad.getOrElse(throw IllegalArgumentException("missing parameter gradient; run backward first"))
+      }
+      Using.Manager { use =>
+        val staged=use(new BackendScope(backend))
+        val pending=mutable.ArrayBuffer.empty[AdamWState[T]]
+        use(new AutoCloseable {
+          def close(): Unit = Using.Manager { cleanup => pending.foreach(s => cleanup(s));() }.get
+        })
+        val replacements=gradients.map { (p,g) =>
+          val update=engine.adamW(weights(p),g,moments.get(p),config)
+          staged.keep(update.value);pending+=update.state
+          p -> update
+        }
+        val oldWeights=replacements.map((p,_) => weights(p))
+        val oldMoments=replacements.flatMap((p,_) => moments.get(p))
+        replacements.foreach { (p,next) =>
+          weights(p)=resources.keep(staged.take(next.value))
+          moments(p)=next.state
+        }
+        pending.clear();generation+=1
+        // Cleanup failures cannot roll back a published generation.
+        Using.Manager { cleanup =>
+          oldMoments.foreach(s => cleanup(s))
+          oldWeights.foreach(w => cleanup(new AutoCloseable { def close(): Unit = resources.release(w) }))
+          ()
+        }.get
+      }.get
+
     def close(): Unit =
       threadCheck()
       if !finished then
@@ -123,12 +203,16 @@ final class BackendLlamaTraining[T] private (model: LlamaModel,val backend: Trai
       closed=true
       Using.Manager { use =>
         use(resources)
+        moments.values.foreach(state => use(state))
         steps.toVector.foreach(step => use(step))
         ()
       }.get
 
 object BackendLlamaTraining:
-  def prepare[T](model: LlamaModel,backend: TrainingBackend[T]): BackendLlamaTraining[T] =
+  def prepare[T](model: LlamaModel,backend: TrainingBackend[T]): BackendLlamaTraining[T] = build(model,backend,None)
+  def prepareAdamW[T](model: LlamaModel,backend: AdamWBackend[T],config: AdamWConfig = AdamWConfig()): BackendLlamaTraining[T] =
+    build(model,backend,Some(backend -> config))
+  private def build[T](model: LlamaModel,backend: TrainingBackend[T],adam: Option[(AdamWBackend[T],AdamWConfig)]): BackendLlamaTraining[T] =
     require(model.layers.size==model.config.numLayers && model.layers.size<=model.limits.maxLayers,"Llama layer count/limit mismatch")
     val projections=model.layers.flatMap { l => Vector(l.attention.qProj,l.attention.kProj,l.attention.vProj,l.attention.oProj,
       l.mlp.gateProj,l.mlp.upProj,l.mlp.downProj) } :+ model.lmHead
@@ -138,7 +222,7 @@ object BackendLlamaTraining:
     val resources=new BackendScope(backend)
     try
       val weights=mutable.Map.from(parameters.map(p => p -> resources.keep(backend.upload(p.data))))
-      new BackendLlamaTraining(model,backend,weights,resources)
+      new BackendLlamaTraining(model,backend,weights,resources,adam)
     catch case error: Throwable =>
       try resources.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
