@@ -38,7 +38,15 @@ final class BackendLlama[T] private (private[models] val model: LlamaModel,priva
     if closed then throw IllegalStateException("prepared Llama is closed")
     require(snapshot.forall((p,v) => p.value eq v),"model weights changed; prepare again")
   private def weight(p: Parameter,transposed: Boolean = false): T = weights((p,transposed))
-  private def linear(input: T,layer: Linear): T = backend.matmul(input,weight(layer.weight,true))
+  private def linear(input: T,layer: Linear): T = layer.lora match
+    case None => backend.matmul(input,weight(layer.weight,true))
+    case Some(adapter) => Using.resource(new BackendScope(backend)) { scope =>
+      val base=scope.keep(backend.matmul(input,weight(layer.weight,true)))
+      val low=scope.keep(backend.matmul(input,weight(adapter.a,true)))
+      val delta=scope.keep(backend.matmul(low,weight(adapter.b,true)))
+      val scaled=scope.keep(backend.scale(delta,(adapter.alpha/adapter.a.data.shape.dims(0)).toFloat))
+      scope.take(scope.keep(backend.add(base,scaled)))
+    }
   private def norm(input: T,layer: RMSNorm): T = backend.rmsNorm(input,weight(layer.weight),layer.epsilon)
 
   private def attention(input: T,layer: LlamaAttention,b: Long,t: Long,position: Int,cache: Option[AttentionCache[T]]): T =
@@ -146,7 +154,7 @@ object BackendLlama:
     require(model.layers.size==model.config.numLayers && model.layers.size<=model.limits.maxLayers,"Llama layer count/limit mismatch")
     val projections=model.layers.flatMap { l => Vector(l.attention.qProj,l.attention.kProj,l.attention.vProj,l.attention.oProj,
       l.mlp.gateProj,l.mlp.upProj,l.mlp.downProj) } :+ model.lmHead
-    require(projections.forall(p => p.bias.isEmpty && p.lora.isEmpty),"prepared Llama currently requires bias-free projections without adapters")
+    require(projections.forall(_.bias.isEmpty),"prepared Llama currently requires bias-free projections")
     require(Module.parameters(model).map(p => BigInt(p.data.shape.numel)).sum<=model.limits.maxParameters,"Llama parameter limit exceeded")
     val resources=new BackendScope(backend)
     val weights=mutable.Map.empty[(Parameter,Boolean),T]
@@ -156,7 +164,10 @@ object BackendLlama:
     try
       upload(model.embedding.weight);upload(model.norm.weight)
       model.layers.foreach(l => { upload(l.inputNorm.weight);upload(l.postNorm.weight) })
-      projections.foreach(p => upload(p.weight,true))
+      projections.foreach { p =>
+        upload(p.weight,true)
+        p.lora.foreach { adapter => upload(adapter.a,true);upload(adapter.b,true) }
+      }
       new BackendLlama(model,backend,weights.toMap,resources)
     catch case error: Throwable =>
       try resources.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)

@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("binary","silu","rmsnorm","transpose","embedding","rope","attention","cache_append").map { name =>
+  private val kernels=Seq("binary","scale","silu","rmsnorm","transpose","embedding","rope","attention","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -250,6 +250,12 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     }
   def add(a: CudaTensor,b: CudaTensor): CudaTensor = binary(a,b,0)
   def multiply(a: CudaTensor,b: CudaTensor): CudaTensor = binary(a,b,1)
+  def scale(value: CudaTensor,scalar: Float): CudaTensor =
+    validate(value)
+    execute(value.shape,value.shape.numel,kernels("scale")) { (arena,result) =>
+      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+        Seq(arena.allocateFrom(JAVA_INT,value.shape.numel.toInt),arena.allocateFrom(JAVA_FLOAT,scalar))
+    }
   def silu(value: CudaTensor): CudaTensor =
     validate(value)
     execute(value.shape,value.shape.numel,kernels("silu")) { (arena,result) =>

@@ -42,6 +42,38 @@ class LlamaLoRASuite extends munit.FunSuite:
       assertEquals(Module.parameters(restored).map(_.data.toFloatArray.toVector),
         Module.parameters(adapted).map(_.data.toFloatArray.toVector))
       assert(java.nio.file.Files.size(path) < 200000)
+      if sys.env.get("SCALATORCH_CUDA_TESTS").contains("1") then
+        val expected=restored.model.logits(input).toFloatArray
+        scala.util.Using.resource(BackendLlama.prepare(restored.model,scalatorch.cpu.CpuFloatBackend)) { prepared =>
+          val actual=prepared.logits(input).toFloatArray
+          assertEquals(actual.toVector,expected.toVector)
+        }
+        scalatorch.ffm.CudaSession.withDevice() { session =>
+          scala.util.Using.resource(BackendLlama.prepare(restored.model,session)) { prepared =>
+            val resident=session.allocatedBytes
+            def compare(actual: Array[Float],reference: Array[Float]): Double =
+              assertEquals(actual.length,reference.length)
+              actual.zip(reference).map { (a,e) =>
+                val error=math.abs(a.toDouble-e)
+                assert(error<=2e-4*(1+math.abs(e.toDouble)),clues(a,e,error))
+                error
+              }.max
+            val error=compare(prepared.logits(input).toFloatArray,expected)
+            assertEquals(session.allocatedBytes,resident)
+            scala.util.Using.resource(prepared.newCache(capacity=4)) { cache =>
+              val cached=session.allocatedBytes
+              var maximum=0.0
+              for position <- 0 until 4 do
+                val chunk=Tensor.fromLongs(Array(input.toLongArray(position)),Shape.from(Seq(1L,1L)))
+                val width=restored.model.config.vocabSize
+                maximum=math.max(maximum,compare(cache.decode(chunk).toFloatArray,expected.slice(position*width,(position+1)*width)))
+                assertEquals(session.allocatedBytes,cached)
+              println(s"CUDA restored LoRA SmolLM2 max absolute error: full=$error cached=$maximum residentBytes=$resident")
+            }
+            assertEquals(session.allocatedBytes,resident)
+          }
+          assertEquals(session.allocatedBytes,0L)
+        }
     finally java.nio.file.Files.deleteIfExists(path)
   }
 

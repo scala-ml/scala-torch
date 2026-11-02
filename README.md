@@ -20,7 +20,7 @@ Safetensors archives can now be indexed and read without Python: F16/BF16/F32→
 
 Differentiable causal grouped-query attention and Llama-style RoPE are available on rank-4 `(batch, heads, tokens, width)` Variables. Attention supports query position offsets for decode chunks and a configurable score-workspace limit. Numerical gradient and masking tests cover these operations.
 
-Not implemented yet: a persistent GPU Tensor backend, cuBLAS acceleration, broader tokenizer/config variants, LoRA tuning, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
+Not implemented yet: GPU autograd/training, cuBLAS acceleration, broader tokenizer/config variants, or diffusion/NUI migration. Persistent GPU inference and CPU LoRA training are described below. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
 
 ```sh
 sbt 'core / Test / testOnly scalatorch.*'
@@ -173,12 +173,12 @@ Causal language-model training now composes `model.forward(input).crossEntropy(t
 
 The [persistent CUDA storage layer](docs/research/native-backends.md#persistent-device-storage) supports explicit Float32 upload/download and chained GEMM with intermediates kept on device. Scoped ownership, per-session allocation budgets and individual buffer release are implemented. General Tensor/autograd dispatch remains pending; prepared model GPU execution is described below.
 
-[`FloatBackend[T]`](docs/research/float-backends.md) provides shared CPU/CUDA inference operations: GEMM, equal-shape add/multiply, SiLU and last-axis RMSNorm, with explicit transfer and release. The same generic gated MLP/residual computation is tested on both backends. Prepared transformer GPU execution is described below.
+[`FloatBackend[T]`](docs/research/float-backends.md) provides shared CPU/CUDA inference operations: GEMM, equal-shape add/multiply, scalar multiplication, SiLU and last-axis RMSNorm, with explicit transfer and release. The same generic gated MLP/residual computation is tested on both backends. Prepared transformer GPU execution is described below.
 
 Backend embedding and layout operations now gather validated Long token IDs, reshape CUDA tensors with shared allocation ownership, and transpose arbitrary axis pairs into packed device outputs. Activations and embedding tables stay on the GPU; integer metadata transfers are explicit implementation work covered by the allocation budget.
 
 Backend rotary positions and causal grouped-query attention now run on CPU or CUDA, including offset queries and bounded score workspace. CPU forward results match existing autograd; real-GPU tests cover numerical agreement and causal masking. Prepared full-model GPU integration is now verified below.
 
-[Prepared Llama inference](docs/research/backend-llama.md) now runs complete models with resident CPU or CUDA weights. The native CUDA CLI generates **The capital of France is Paris.** from pinned SmolLM2 weights, and all196608 independent Candle reference logits pass the existing tolerance. GPU adapters and training remain pending; resident KV caching is described below.
+[Prepared Llama inference](docs/research/backend-llama.md) now runs complete models with resident CPU or CUDA weights, including LoRA factors. The native CUDA CLI generates **The capital of France is Paris.** from pinned SmolLM2 weights, and all196608 independent Candle reference logits pass the existing tolerance. GPU training remains pending; resident KV caching is described below.
 
 [Resident backend KV caches](docs/research/backend-kv-cache.md) now make cached CPU/CUDA generation the default. Device K/V buffers stay at fixed capacity, cached SmolLM2 logits match Candle, and rejected decodes leave the committed position unchanged.

@@ -7,9 +7,9 @@
   .param .u32 m, .param .u32 n, .param .u32 k
 ) {
   .reg .pred p;
-  .reg .b32 r<14>;
+  .reg .b32 r<16>;
   .reg .b64 d<10>;
-  .reg .f32 f<4>;
+  .reg .f32 f<7>;
   ld.param.u64 d0, [a];
   ld.param.u64 d1, [b];
   ld.param.u64 d2, [c];
@@ -27,6 +27,10 @@
   rem.u32 r9, r6, r1;
   mov.u32 r10, 0;
   mov.f32 f0, 0f00000000;
+  mov.f32 f4, 0f00000000;
+  mov.f32 f5, 0f00000000;
+  mov.f32 f6, 0f00000000;
+  and.b32 r14,r2,0xfffffffc;
 LOOP:
   setp.ge.u32 p, r10, r2;
   @p bra STORE;
@@ -39,10 +43,20 @@ LOOP:
   ld.global.f32 f1, [d5];
   ld.global.f32 f2, [d6];
   mul.rn.f32 f3, f1, f2;
-  add.rn.f32 f0, f0, f3;
+  // Four partial sums match Numscala's transposed-right linear projections.
+  // A final incomplete group accumulates into the first sum.
+  and.b32 r15,r10,3;
+  setp.ge.u32 p,r10,r14; @p mov.u32 r15,0;
+  setp.eq.u32 p,r15,0; @p add.rn.f32 f0,f0,f3;
+  setp.eq.u32 p,r15,1; @p add.rn.f32 f4,f4,f3;
+  setp.eq.u32 p,r15,2; @p add.rn.f32 f5,f5,f3;
+  setp.eq.u32 p,r15,3; @p add.rn.f32 f6,f6,f3;
   add.u32 r10, r10, 1;
   bra LOOP;
 STORE:
+  add.rn.f32 f0,f0,f4;
+  add.rn.f32 f5,f5,f6;
+  add.rn.f32 f0,f0,f5;
   mul.wide.u32 d7, r6, 4;
   add.u64 d8, d2, d7;
   st.global.f32 [d8], f0;

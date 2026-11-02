@@ -25,10 +25,15 @@ Inputs remain unchanged, operation results are independently releasable, and the
 | shape/release | Backend metadata and ownership lifecycle |
 | matmul | Rank-2 Float32 matrices |
 | add/multiply | Exact matching shapes; no implicit broadcasting |
+| scale | Elementwise Float32 scalar multiplication, preserving IEEE nonfinite behavior |
 | silu | Stable sign-based sigmoid; negative infinity maps to negative zero |
 | rmsNorm | Positive final-axis width, matching rank-1 weight, finite positive Double epsilon |
 
-CPU GEMM uses Numscala. CPU SiLU uses Double exponential, while CUDA uses `ex2.approx.f32` on the nonpositive exponent `-abs(x)*log2(e)` and Float32 arithmetic. Transcendental outputs are therefore compared with a fixed tolerance, not asserted bitwise equal. CUDA RMSNorm accumulates squares and computes the inverse RMS in Double, then applies scaling in Double before conversion; this avoids overflowing Float32 squares for finite large inputs. The reference kernel assigns one thread to each row and is not a performance implementation. PTX behavior follows NVIDIA's [instruction reference](https://docs.nvidia.com/cuda/parallel-thread-execution/).
+CPU GEMM uses Numscala. CUDA GEMM now uses four Float32 partial sums, with incomplete groups accumulated into the first sum, matching Numscala's transposed-right linear projection reduction order. Other CPU layouts can use different reduction orders; general bitwise GEMM equivalence is not promised.
+
+CPU SiLU uses Double exponential. CUDA now computes `exp(-abs(x))` with Double range reduction, split ln(2), and a degree-12 Taylor polynomial on `[-ln(2)/2, ln(2)/2]`. Two normal power-of-two factors preserve subnormal exponential results. Sigmoid and the final product use Double before Float32 conversion. This replaced the Float32 exponential approximation after trained adapter logits exposed accumulated error. A 20,010-value real-GPU regression checks agreement within two Float32 ULPs, including tiny values and extremes; it is fixture evidence, not a correctly-rounded guarantee for every input. NaN, infinities and signed zero remain covered separately.
+
+CUDA RMSNorm accumulates squares and computes the inverse RMS in Double, then applies scaling in Double before conversion; this avoids overflowing Float32 squares for finite large inputs. The reference kernel assigns one thread to each row and is not a performance implementation. PTX behavior, including required rounding modifiers on integer-to-float conversions, follows NVIDIA's [instruction reference](https://docs.nvidia.com/cuda/parallel-thread-execution/).
 
 Evidence includes hand-calculated CPU arithmetic/normalization, SiLU sign/infinity/NaN cases, CPU/CUDA comparisons across kernel blocks, strided inputs, maximum finite Float32 normalization, empty tensors/rows, invalid dimensions/epsilon and budget/lifetime rejection. A shared generic gated MLP/residual program matches at `2e-6 * max(1, abs(expected))`; its CUDA allocation count returns to zero after releasing all intermediates.
 

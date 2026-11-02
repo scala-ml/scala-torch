@@ -4,6 +4,68 @@ import scalatorch.*
 import scalatorch.cpu.CpuFloatBackend
 
 class CudaOpsSuite extends munit.FunSuite:
+  test("CUDA dot products match Numscala linear reduction for complete groups and tails") {
+    gpu()
+    CudaSession.withDevice() { session =>
+      for width <- Seq(1,2,3,4,5,6,7,576,577,578,579) do
+        val random=new java.util.Random(width)
+        val input=tensor(Array.fill(3*width)((random.nextGaussian()*3).toFloat),3,width.toLong)
+        val weight=tensor(Array.fill(5*width)((random.nextGaussian()*3).toFloat),5,width.toLong).transpose(0,1)
+        val a=session.upload(input);val b=session.upload(weight)
+        val result=session.matmul(a,b)
+        assertEquals(result.toCpu.toFloatArray.toVector,CpuFloatBackend.matmul(input,weight).toFloatArray.toVector)
+        result.close();b.close();a.close()
+      assertEquals(session.allocatedBytes,0L)
+    }
+  }
+  test("CUDA SiLU stays within two Float32 ULPs across its range") {
+    gpu()
+    val values=Array.tabulate(20001)(i => (i-10000)/100f) ++
+      Array(-746f,-745f,-710f,-104f,-103f,Float.MinPositiveValue,-Float.MinPositiveValue,Float.MaxValue,-Float.MaxValue)
+    val input=tensor(values,values.length.toLong)
+    val expected=CpuFloatBackend.silu(input).toFloatArray
+    CudaSession.withDevice() { session =>
+      val actual=session.silu(session.upload(input)).toCpu.toFloatArray
+      actual.zip(expected).foreach { (a,e) =>
+        assert(math.abs(a.toDouble-e)<=2.0*math.ulp(e).toDouble,clues(a,e,math.ulp(e)))
+      }
+    }
+  }
+  test("CUDA scalar multiplication preserves IEEE values and independent ownership") {
+    gpu()
+    CudaSession.withDevice() { session =>
+      val values=Array.tabulate(137)(i => (i-68)/3f) ++ Array(-0f,0f,Float.NaN,Float.PositiveInfinity,Float.NegativeInfinity,Float.MinPositiveValue)
+      val source=tensor(values,values.length.toLong)
+      val x=session.upload(source)
+      val resident=session.allocatedBytes
+      for scalar <- Seq(-2f,0f,Float.PositiveInfinity,Float.NaN) do
+        val result=session.scale(x,scalar)
+        val expected=values.map(_*scalar)
+        val actual=result.toCpu.toFloatArray
+        actual.zip(expected).foreach { (a,e) =>
+          if e.isNaN then assert(a.isNaN)
+          else assertEquals(java.lang.Float.floatToRawIntBits(a),java.lang.Float.floatToRawIntBits(e))
+        }
+        result.close()
+        assertEquals(session.allocatedBytes,resident)
+      val result=session.scale(x,2f)
+      x.close()
+      closeEnough(result.toCpu.toFloatArray,values.map(_*2f))
+      result.close()
+      val empty=session.upload(tensor(Array.emptyFloatArray,0,2))
+      val scaled=session.scale(empty,2f)
+      assertEquals(scaled.shape,empty.shape)
+      scaled.close();empty.close()
+      assertEquals(session.allocatedBytes,0L)
+    }
+    CudaSession.withDevice(maxBytes=4) { session =>
+      val x=session.upload(tensor(Array(2f),1))
+      intercept[IllegalArgumentException](session.scale(x,3f))
+      assertEquals(session.allocatedBytes,4L)
+      x.close()
+      intercept[IllegalStateException](session.scale(x,3f))
+    }
+  }
   private def gpu(): Unit = assume(sys.env.get("SCALATORCH_CUDA_TESTS").contains("1"),"real GPU test disabled")
   private def closeEnough(actual: Array[Float], expected: Array[Float], tolerance: Double = 2e-6): Unit =
     assertEquals(actual.length,expected.length)

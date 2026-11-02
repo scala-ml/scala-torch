@@ -36,6 +36,8 @@ object CpuFloatBackend extends FloatBackend[Tensor[Float]]:
     require(a.shape==b.shape,"backend multiply requires equal shapes")
     val x=a.toFloatArray;val y=b.toFloatArray
     Tensor.fromFloats(x.indices.map(i => x(i)*y(i)).toArray,a.shape)
+  def scale(value: Tensor[Float], scalar: Float): Tensor[Float] =
+    Tensor.fromFloats(value.toFloatArray.map(_ * scalar),value.shape)
   def silu(value: Tensor[Float]): Tensor[Float] =
     val out=value.toFloatArray.map { x =>
       val v=x.toDouble

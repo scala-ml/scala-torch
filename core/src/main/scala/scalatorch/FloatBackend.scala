@@ -16,6 +16,8 @@ trait FloatBackend[T]:
   def matmul(a: T, b: T): T
   def add(a: T, b: T): T
   def multiply(a: T, b: T): T
+  /** Elementwise Float32 scalar multiplication, including IEEE nonfinite values. */
+  def scale(value: T, scalar: Float): T
   def silu(value: T): T
   def rmsNorm(value: T, weight: T, epsilon: Double = 1e-6): T
   def rope(value: T, positionStart: Int = 0, theta: Double = 10000.0): T

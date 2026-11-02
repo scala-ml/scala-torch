@@ -56,8 +56,6 @@ class BackendLlamaSuite extends munit.FunSuite:
       }
       prepared.close()
       intercept[IllegalStateException](prepared.logits(input))
-    val adapted=LlamaLoRA.attach(LlamaModel.init(config,1),2,4,0)
-    intercept[IllegalArgumentException](BackendLlama.prepare(adapted.model,CpuFloatBackend))
   }
 
   test("CUDA prepared models retain only weights between forwards and clean failures") {

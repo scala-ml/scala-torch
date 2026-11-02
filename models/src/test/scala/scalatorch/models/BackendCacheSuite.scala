@@ -83,7 +83,7 @@ class BackendCacheSuite extends munit.FunSuite:
       }
     }
     class FailedDownload extends FloatBackend[Tensor[Float]]:
-      export CpuFloatBackend.{upload,shape,release,reshape,transpose,embedding,matmul,add,multiply,silu,rmsNorm,rope,causalAttention,attentionCache}
+      export CpuFloatBackend.{upload,shape,release,reshape,transpose,embedding,matmul,add,multiply,scale,silu,rmsNorm,rope,causalAttention,attentionCache}
       private var fail=true
       def download(value: Tensor[Float]): Tensor[Float] =
         if fail then

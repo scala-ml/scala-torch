@@ -3,6 +3,23 @@
 .target sm_50
 .address_size 64
 
+.visible .entry scale(.param .u64 a, .param .u64 out, .param .u32 count, .param .f32 scalar) {
+ .reg .pred p;
+ .reg .b32 r<5>;
+ .reg .b64 d<5>;
+ .reg .f32 f<3>;
+ ld.param.u64 d0,[a]; ld.param.u64 d1,[out]; ld.param.u32 r0,[count];
+ ld.param.f32 f1,[scalar];
+ mov.u32 r1,%tid.x; mov.u32 r2,%ctaid.x; mov.u32 r3,%ntid.x;
+ mad.lo.u32 r4,r2,r3,r1;
+ setp.ge.u32 p,r4,r0; @p bra DONE;
+ mul.wide.u32 d2,r4,4; add.u64 d3,d0,d2; add.u64 d4,d1,d2;
+ ld.global.f32 f0,[d3]; mul.rn.f32 f2,f0,f1;
+ st.global.f32 [d4],f2;
+DONE:
+ ret;
+}
+
 .visible .entry binary(
  .param .u64 a, .param .u64 b, .param .u64 out, .param .u32 count, .param .u32 op
 ) {
@@ -30,9 +47,10 @@ DONE:
 
 .visible .entry silu(.param .u64 a, .param .u64 out, .param .u32 count) {
  .reg .pred p;
- .reg .b32 r<5>;
- .reg .b64 d<5>;
+ .reg .b32 r<8>;
+ .reg .b64 d<7>;
  .reg .f32 f<5>;
+ .reg .f64 g<8>;
  ld.param.u64 d0,[a]; ld.param.u64 d1,[out]; ld.param.u32 r0,[count];
  mov.u32 r1,%tid.x; mov.u32 r2,%ctaid.x; mov.u32 r3,%ntid.x;
  mad.lo.u32 r4,r2,r3,r1;
@@ -40,16 +58,49 @@ DONE:
  mul.wide.u32 d2,r4,4; add.u64 d3,d0,d2; add.u64 d4,d1,d2;
  ld.global.f32 f0,[d3];
  setp.eq.f32 p,f0,0fFF800000; @p bra NEG_INF;
- abs.f32 f1,f0;
- mul.rn.f32 f1,f1,0fBFB8AA3B; // -log2(e)
- ex2.approx.f32 f1,f1;
- add.rn.f32 f2,f1,0f3F800000;
+ cvt.f64.f32 g0,f0;
+ setp.nan.f64 p,g0,g0; @p bra NAN_VALUE;
+ abs.f64 g1,g0; neg.f64 g1,g1;
+ setp.lt.f64 p,g1,0dC087500000000000; @p bra EXP_ZERO;
+ // exp(x), x=-abs(input): x = n*ln(2) + r, |r| <= ln(2)/2.
+ // Split ln(2) avoids cancellation; degree-12 Taylor evaluated in Double.
+ mul.rn.f64 g2,g1,0d3FF71547652B82FE;
+ cvt.rni.s32.f64 r5,g2; cvt.rn.f64.s32 g3,r5;
+ mul.rn.f64 g2,g3,0d3FE62E42FEE00000; sub.rn.f64 g2,g1,g2;
+ mul.rn.f64 g3,g3,0d3DEA39EF35793C76; sub.rn.f64 g2,g2,g3;
+ mov.f64 g4,0d3E21EED8EFF8D898;
+ fma.rn.f64 g4,g4,g2,0d3E5AE64567F544E4;
+ fma.rn.f64 g4,g4,g2,0d3E927E4FB7789F5C;
+ fma.rn.f64 g4,g4,g2,0d3EC71DE3A556C734;
+ fma.rn.f64 g4,g4,g2,0d3EFA01A01A01A01A;
+ fma.rn.f64 g4,g4,g2,0d3F2A01A01A01A01A;
+ fma.rn.f64 g4,g4,g2,0d3F56C16C16C16C17;
+ fma.rn.f64 g4,g4,g2,0d3F81111111111111;
+ fma.rn.f64 g4,g4,g2,0d3FA5555555555555;
+ fma.rn.f64 g4,g4,g2,0d3FC5555555555555;
+ fma.rn.f64 g4,g4,g2,0d3FE0000000000000;
+ fma.rn.f64 g4,g4,g2,0d3FF0000000000000;
+ fma.rn.f64 g4,g4,g2,0d3FF0000000000000;
+ // Split the power of two into normal Double factors, including subnormal exp(x).
+ shr.s32 r6,r5,1; sub.s32 r7,r5,r6;
+ add.s32 r6,r6,1023; add.s32 r7,r7,1023;
+ cvt.u64.u32 d5,r6; cvt.u64.u32 d6,r7;
+ shl.b64 d5,d5,52; shl.b64 d6,d6,52;
+ mov.b64 g5,d5; mov.b64 g6,d6;
+ mul.rn.f64 g4,g4,g5; mul.rn.f64 g4,g4,g6;
+ bra SIGMOID;
+EXP_ZERO:
+ mov.f64 g4,0d0000000000000000;
+SIGMOID:
+ add.rn.f64 g5,g4,0d3FF0000000000000;
  setp.lt.f32 p,f0,0f00000000; @p bra NEGATIVE;
- div.rn.f32 f3,0f3F800000,f2; bra PRODUCT;
+ div.rn.f64 g6,0d3FF0000000000000,g5; bra PRODUCT;
 NEGATIVE:
- div.rn.f32 f3,f1,f2;
+ div.rn.f64 g6,g4,g5;
 PRODUCT:
- mul.rn.f32 f4,f0,f3; bra STORE;
+ mul.rn.f64 g7,g0,g6; cvt.rn.f32.f64 f4,g7; bra STORE;
+NAN_VALUE:
+ mov.f32 f4,f0; bra STORE;
 NEG_INF:
  mov.f32 f4,0f80000000;
 STORE:

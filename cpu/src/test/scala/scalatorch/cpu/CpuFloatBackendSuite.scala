@@ -3,6 +3,14 @@ package scalatorch.cpu
 import scalatorch.*
 
 class CpuFloatBackendSuite extends munit.FunSuite:
+  test("scalar multiplication preserves logical view order and IEEE values") {
+    val x=Tensor.fromFloats(Array(1f,-2f,0f,-0f),Shape.from(Seq(2L,2L))).transpose(0,1)
+    val result=CpuFloatBackend.scale(x,-2f).toFloatArray
+    assertEquals(result.map(java.lang.Float.floatToRawIntBits).toVector,
+      Vector(-2f,-0f,4f,0f).map(java.lang.Float.floatToRawIntBits))
+    assert(CpuFloatBackend.scale(x,Float.NaN).toFloatArray.forall(_.isNaN))
+    assertEquals(CpuFloatBackend.scale(Tensor.fromFloats(Array.emptyFloatArray,Shape.from(Seq(0L,2L))),2f).shape,Shape.from(Seq(0L,2L)))
+  }
   private def tensor(values: Float*) = Tensor.fromFloats(values.toArray,Shape.from(Seq(2L,2L)))
   test("backend arithmetic and stable normalization match hand calculations") {
     val backend: FloatBackend[Tensor[Float]]=CpuFloatBackend

@@ -4,9 +4,11 @@ Updated 2026-11-02. The design was approved by the user. Subsequent explicit req
 
 ## Verified checkpoint
 
-Full verification: **163 passed, 0 failed, 0 skipped** (core 10, CPU 12, autograd 27, tensorio 17, nn 33, models 43, FFM 21), with public single/sharded tiny-Llama, trained SmolLM2, SmolLM2 tokenizer and both model/FFM CUDA tests explicitly enabled. Run the module test commands from README; enable public model properties and both models/FFM Test/envVars CUDA settings as documented in backend-llama.md. Scala's runtime dependencies still emit an Unsafe deprecation warning on Java 25; warning-free runtime compatibility is not claimed.
+Full verification: **170 passed, 0 failed, 0 skipped** (core 10, CPU 13, autograd 27, tensorio 17, nn 33, models 46, FFM 24), with public single/sharded tiny-Llama, trained SmolLM2, SmolLM2 tokenizer and both model/FFM CUDA tests explicitly enabled. Run the module test commands from README; enable public model properties and both models/FFM Test/envVars CUDA settings as documented in backend-llama.md. Scala's runtime dependencies still emit an Unsafe deprecation warning on Java 25; warning-free runtime compatibility is not claimed.
 
 The [NUI migration inventory](nui-migration-audit.md) now pins revision8823aa4 and enumerates47 requests,117 standard plugins,97 parameter fields and135 Python modules. All NUI migration rows remain open; this is static source evidence, not new runtime coverage.
+
+Resident LoRA inference now runs through prepared CPU/CUDA Llama, including cached decoding and checkpoint-restored factors. The trained SmolLM2 gate exposed accumulated CUDA numerical error: matching Numscala's four-partial-sum linear reduction and evaluating SiLU in Double removed the discrepancy without loosening the `2e-4` logit tolerance. Full/cached trained-adapter maxabs is **1.10626220703125e-4**, with **651,336,960 bytes** of resident weights/factors. Updated independent tiny/SmolLM2 Candle maxabs values are **5.960464477539063e-8** and **5.7220458984375e-5**. GPU training, optimized kernels and diffusion/NUI migration remain open.
 
 - Java 25.0.1, Scala 3.3.8, sbt 2.0.10 compile the core, CPU, and FFM modules.
 - Storage tests cover defensive copies, scalar and empty shapes, negative dimensions, checked Long size overflow, and primitive Float32/Float64/Int64/Bool preservation.
