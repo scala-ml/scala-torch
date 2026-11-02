@@ -18,7 +18,7 @@ Run the public gate with:
 sbt -batch ';set models / Test / javaOptions += "-Dscalatorch.smollm.dir=/absolute/path/to/smollm2-135m";models / Test / testOnly scalatorch.models.TokenizerSuite'
 ```
 
-Only `tokenizer.json` is required for this test. Chat formatting, tokenizer-config defaults, streaming text decoding, SentencePiece/Unigram and trained-model generation remain subsequent work.
+Only `tokenizer.json` is required for this test. Explicit SmolLM2 chat formatting and [trained-model generation](trained-text-generation.md) now compose this tokenizer. General chat templates, tokenizer-config defaults, streaming text decoding and SentencePiece/Unigram remain subsequent work.
 
 Review found no blocking defects. Minor deferred schema validation: decoder flags (`add_prefix_space`, `trim_offsets`, `use_regex`) are accepted as metadata without checking their value types; they have no effect on ByteLevel decoding. The distinct file-byte/string-unit bounds above are deliberate documented limits of the current parser, not identical memory budgets.
 

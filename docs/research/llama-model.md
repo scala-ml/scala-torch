@@ -10,7 +10,7 @@ Bounded duplicate-free JSON with exact integer dimensions; standard model_type=l
 
 Layer/parameter/logit/score limits are configurable through LlamaLimits, and safetensors materialization limits apply separately. Defaults are at most 512 layers, 1 billion logical unique parameters, 16777216 logit elements and 16777216 attention-score elements. These bound specific allocations/counts, not total process memory. CPU Float32 execution is currently supported.
 
-`generateIds(prompt,maxNewTokens)` uses a persistent CPU KV cache by default (`useCache=false` retains full-prefix recomputation), selects the lowest ID on equal logits and stops on configured EOS IDs. The complete requested length must fit the configured context. A [native byte-level BPE tokenizer](byte-bpe-tokenizer.md) is available separately. Chat formatting, padding masks, stochastic sampling and sharded loading are not implemented yet.
+`generateIds(prompt,maxNewTokens)` uses a persistent CPU KV cache by default (`useCache=false` retains full-prefix recomputation), selects the lowest ID on equal logits and stops on configured EOS IDs. The complete requested length must fit the configured context. A [native byte-level BPE tokenizer](byte-bpe-tokenizer.md) is available separately. Explicit SmolLM2 chat formatting and [trained text generation](trained-text-generation.md) are implemented. Padding masks, stochastic sampling and sharded loading remain open.
 
 ## Public checkpoint verification
 
@@ -41,4 +41,4 @@ Without this property, the public model test reports a skip; synthetic model tes
 
 ## Remaining gates
 
-Tokenizer/config variants, useful trained-model text generation, sharded weights, broader persistent KV-cache model references, broader GQA model references, sampling, CUDA model execution/performance, diffusion and complete NUI Python removal remain required. Synthetic tests verify GQA composition and gradients, ties, initialization, EOS/tie behavior, empty inputs and loader rejection; they do not replace those public-model gates.
+Tokenizer/config variants, broader trained-model text generation, sharded weights, broader persistent KV-cache model references, broader GQA model references, sampling, CUDA model execution/performance, diffusion and complete NUI Python removal remain required. Synthetic tests verify GQA composition and gradients, ties, initialization, EOS/tie behavior, empty inputs and loader rejection; they do not replace those public-model gates.

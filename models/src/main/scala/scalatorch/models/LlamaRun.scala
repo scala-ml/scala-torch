@@ -2,7 +2,7 @@ package scalatorch.models
 
 import java.nio.file.Path
 
-/** Minimal token-ID inference entrypoint; text tokenization is a separate upcoming component. */
+/** Minimal token-ID inference entrypoint; use TextRun for text prompts. */
 object LlamaRun:
   def main(args: Array[String]): Unit =
     require(args.length >= 2 && args.length <= 3,

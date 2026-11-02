@@ -4,7 +4,7 @@ Deep learning in Scala 3, targeting Java 25 and Python-free LLMs, training, and 
 
 Requires **Java 25, Scala 3.3.8 LTS, sbt 2.0.10**. Versions are pinned in the build.
 
-Published Llama checkpoint inference now runs in Scala: standard config + single-file safetensors loading, differentiable model composition, persistent CPU KV cache, and greedy token-ID generation. The public tiny-random Llama matches 128000 independent Rust Candle logits with maximum absolute error `5.96e-8`; cached chunks also match that reference. This verifies architecture interoperability; the random checkpoint is not a useful language model. A native byte-level BPE tokenizer now matches the pinned SmolLM2 tokenizer reference. Useful trained-model text generation remains open.
+Published Llama checkpoint inference now runs in Scala: standard config + single-file safetensors loading, differentiable model composition, persistent CPU KV cache, and greedy token-ID generation. The public tiny-random Llama matches 128000 independent Rust Candle logits with maximum absolute error `5.96e-8`; cached chunks also match that reference. This verifies architecture interoperability; the random checkpoint is not a useful language model. A native byte-level BPE tokenizer now matches the pinned SmolLM2 tokenizer reference. The trained SmolLM2-135M-Instruct model now generates text offline, matching independent Candle logits and greedy output.
 
 Implemented: CPU tensors (Float32/Float64/Int64/Bool), checked shapes and views, slicing, broadcasting, Float32 add/reduction/matrix multiplication, and a numscala GEMM adapter. The FFM module includes host memory scopes, a real CUDA memory-copy probe, and a driver-level Float32 GEMM probe with owned stream/event completion.
 
@@ -20,7 +20,7 @@ Safetensors archives can now be indexed and read without Python: F16/BF16/F32→
 
 Differentiable causal grouped-query attention and Llama-style RoPE are available on rank-4 `(batch, heads, tokens, width)` Variables. Attention supports query position offsets for decode chunks and a configurable score-workspace limit. Numerical gradient and masking tests cover these operations.
 
-Not implemented yet: a persistent GPU Tensor backend, cuBLAS acceleration, sharded weights, tokenizer/config variants, useful trained-model text generation, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
+Not implemented yet: a persistent GPU Tensor backend, cuBLAS acceleration, sharded weights, broader tokenizer/config variants, stochastic sampling, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
 
 ```sh
 sbt 'core / Test / testOnly scalatorch.*'
@@ -145,3 +145,11 @@ val text = tokenizer.decode(ids)
 ```
 
 It inserts no BOS/EOS or chat template. SmolLM2 omits some byte symbols, so arbitrary input is not guaranteed to roundtrip. See [supported semantics and public-reference test](docs/research/byte-bpe-tokenizer.md).
+
+Offline trained-model text generation (original SmolLM2-135M-Instruct `config.json`, `tokenizer.json`, `model.safetensors`):
+
+```sh
+sbt -batch ';set models / Compile / run / javaOptions += "-Xmx3g";models / Compile / runMain scalatorch.models.TextRun /absolute/path/to/smollm2-135m "What is the capital of France?" 16 --smollm-chat'
+```
+
+Verified output: `The capital of France is Paris.` Omit `--smollm-chat` for raw prompt mode. This flag explicitly chooses the pinned SmolLM2 template; arbitrary model chat templates are not interpreted. The CLI prints only the continuation. See [trained-model evidence and public test](docs/research/trained-text-generation.md).
