@@ -64,6 +64,12 @@ final class Variable private (
     Variable.result(Resize2d.nearest(data,height,width,mode),Vector(
       this -> ((g: Tensor[Float]) => Resize2d.backward(data,g,height,width,mode))))
 
+  /** Normalize each logical final-axis row independently using biased variance. */
+  def layerNorm(epsilon: Double = 1e-5): Variable =
+    require(data.shape.rank>=1 && data.shape.dims.last>0,"LayerNorm requires a positive final dimension")
+    val width=data.shape.dims.last
+    reshape(Shape.from(Seq(data.shape.numel/width,width))).groupNorm(1,epsilon).reshape(data.shape)
+
   def groupNorm(groups: Int,epsilon: Double = 1e-5): Variable =
     Variable.result(GroupNormOps.forward(data,groups,epsilon),Vector(
       this -> ((g: Tensor[Float]) => GroupNormOps.backward(data,g,groups,epsilon))))
