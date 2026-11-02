@@ -96,3 +96,55 @@ OUTPUT:
 DONE:
  ret;
 }
+
+// Metadata contains output dimensions followed by corresponding input strides.
+.visible .entry transpose(
+ .param .u64 a, .param .u64 out, .param .u64 metadata,
+ .param .u32 count, .param .u32 rank
+) {
+ .reg .pred p;
+ .reg .b32 r<14>;
+ .reg .b64 d<9>;
+ .reg .b32 value;
+ ld.param.u64 d0,[a]; ld.param.u64 d1,[out]; ld.param.u64 d2,[metadata];
+ ld.param.u32 r0,[count]; ld.param.u32 r1,[rank];
+ mov.u32 r2,%tid.x; mov.u32 r3,%ctaid.x; mov.u32 r4,%ntid.x;
+ mad.lo.u32 r5,r3,r4,r2;
+ setp.ge.u32 p,r5,r0; @p bra DONE;
+ mov.u32 r6,r5; sub.u32 r7,r1,1; mov.u32 r8,0;
+AXIS:
+ mul.wide.u32 d3,r7,4; add.u64 d4,d2,d3;
+ ld.global.u32 r9,[d4];
+ rem.u32 r10,r6,r9; div.u32 r6,r6,r9;
+ add.u32 r11,r7,r1; mul.wide.u32 d3,r11,4; add.u64 d4,d2,d3;
+ ld.global.u32 r12,[d4]; mad.lo.u32 r8,r10,r12,r8;
+ sub.u32 r7,r7,1; setp.ge.s32 p,r7,0; @p bra AXIS;
+ mul.wide.u32 d5,r8,4; add.u64 d6,d0,d5;
+ mul.wide.u32 d7,r5,4; add.u64 d8,d1,d7;
+ ld.global.b32 value,[d6]; st.global.b32 [d8],value;
+DONE:
+ ret;
+}
+
+.visible .entry embedding(
+ .param .u64 table, .param .u64 out, .param .u64 ids,
+ .param .u32 count, .param .u32 width
+) {
+ .reg .pred p;
+ .reg .b32 r<10>;
+ .reg .b64 d<9>;
+ .reg .b32 value;
+ ld.param.u64 d0,[table]; ld.param.u64 d1,[out]; ld.param.u64 d2,[ids];
+ ld.param.u32 r0,[count]; ld.param.u32 r1,[width];
+ mov.u32 r2,%tid.x; mov.u32 r3,%ctaid.x; mov.u32 r4,%ntid.x;
+ mad.lo.u32 r5,r3,r4,r2;
+ setp.ge.u32 p,r5,r0; @p bra DONE;
+ div.u32 r6,r5,r1; rem.u32 r7,r5,r1;
+ mul.wide.u32 d3,r6,4; add.u64 d4,d2,d3; ld.global.u32 r8,[d4];
+ mad.lo.u32 r9,r8,r1,r7;
+ mul.wide.u32 d5,r9,4; add.u64 d6,d0,d5;
+ mul.wide.u32 d7,r5,4; add.u64 d8,d1,d7;
+ ld.global.b32 value,[d6]; st.global.b32 [d8],value;
+DONE:
+ ret;
+}

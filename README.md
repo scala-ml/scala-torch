@@ -174,3 +174,5 @@ Causal language-model training now composes `model.forward(input).crossEntropy(t
 The [persistent CUDA storage layer](docs/research/native-backends.md#persistent-device-storage) supports explicit Float32 upload/download and chained GEMM with intermediates kept on device. Scoped ownership, per-session allocation budgets and individual buffer release are implemented. General Tensor/backend dispatch and model GPU execution remain pending.
 
 [`FloatBackend[T]`](docs/research/float-backends.md) provides shared CPU/CUDA inference operations: GEMM, equal-shape add/multiply, SiLU and last-axis RMSNorm, with explicit transfer and release. The same generic gated MLP/residual computation is tested on both backends. Full transformer GPU execution remains pending.
+
+Backend embedding and layout operations now gather validated Long token IDs, reshape CUDA tensors with shared allocation ownership, and transpose arbitrary axis pairs into packed device outputs. Activations and embedding tables stay on the GPU; integer metadata transfers are explicit implementation work covered by the allocation budget.

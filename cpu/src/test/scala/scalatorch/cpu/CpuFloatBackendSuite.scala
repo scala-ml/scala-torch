@@ -34,3 +34,22 @@ class CpuFloatBackendSuite extends munit.FunSuite:
       intercept[IllegalArgumentException](CpuFloatBackend.rmsNorm(a,w,epsilon))
     intercept[IllegalArgumentException](CpuFloatBackend.rmsNorm(a,a,1e-6))
   }
+
+  test("embedding gathers repeated scalar and batched IDs with checked bounds") {
+    val table=Tensor.fromFloats(Array(1f,2f,3f,4f,5f,6f),Shape.from(Seq(3L,2L)))
+    val ids=Tensor.fromLongs(Array(2L,0L,2L,1L),Shape.from(Seq(2L,2L)))
+    val result=CpuFloatBackend.embedding(table,ids)
+    assertEquals(result.shape,Shape.from(Seq(2L,2L,2L)))
+    assertEquals(result.toFloatArray.toVector,Vector(5f,6f,1f,2f,5f,6f,3f,4f))
+    assertEquals(CpuFloatBackend.embedding(table,Tensor.fromLongs(Array(1L),Shape.from(Seq.empty))).toFloatArray.toVector,Vector(3f,4f))
+    for id <- Seq(-1L,3L,Long.MaxValue) do
+      intercept[IllegalArgumentException](CpuFloatBackend.embedding(table,Tensor.fromLongs(Array(id),Shape.from(Seq(1L)))))
+  }
+
+  test("backend reshape follows logical transpose order and rejects size changes") {
+    val value=Tensor.fromFloats(Array(1f,2f,3f,4f,5f,6f),Shape.from(Seq(2L,3L)))
+    val transposed=CpuFloatBackend.transpose(value,0,1)
+    val result=CpuFloatBackend.reshape(transposed,Shape.from(Seq(6L)))
+    assertEquals(result.toFloatArray.toVector,Vector(1f,4f,2f,5f,3f,6f))
+    intercept[IllegalArgumentException](CpuFloatBackend.reshape(value,Shape.from(Seq(5L))))
+  }

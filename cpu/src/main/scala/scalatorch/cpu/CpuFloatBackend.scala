@@ -8,6 +8,19 @@ object CpuFloatBackend extends FloatBackend[Tensor[Float]]:
   def download(value: Tensor[Float]): Tensor[Float] = value
   def shape(value: Tensor[Float]): Shape = value.shape
   def release(value: Tensor[Float]): Unit = ()
+  def reshape(value: Tensor[Float], shape: Shape): Tensor[Float] = value.contiguous.reshape(shape)
+  def transpose(value: Tensor[Float], dim0: Int, dim1: Int): Tensor[Float] = value.transpose(dim0,dim1)
+  def embedding(table: Tensor[Float], indices: Tensor[Long]): Tensor[Float] =
+    require(table.shape.rank==2 && table.shape.dims(1)>0,"embedding requires a matrix with positive width")
+    val ids=indices.toLongArray
+    require(ids.forall(id => id>=0 && id<table.shape.dims(0)),"embedding token ID out of bounds")
+    val output=Shape.from(indices.shape.dims :+ table.shape.dims(1))
+    require(output.numel<=Int.MaxValue,"embedding output exceeds Int indexing")
+    val source=table.toFloatArray
+    val width=table.shape.dims(1).toInt
+    val values=new Array[Float](output.numel.toInt)
+    ids.indices.foreach(i => System.arraycopy(source,ids(i).toInt*width,values,i*width,width))
+    Tensor.fromFloats(values,output)
   def matmul(a: Tensor[Float], b: Tensor[Float]): Tensor[Float] = NumscalaBackend.matmul(a,b)
   def add(a: Tensor[Float], b: Tensor[Float]): Tensor[Float] =
     require(a.shape==b.shape,"backend add requires equal shapes")

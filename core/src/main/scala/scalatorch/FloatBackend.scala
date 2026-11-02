@@ -9,6 +9,10 @@ trait FloatBackend[T]:
   def download(value: T): Tensor[Float]
   def shape(value: T): Shape
   def release(value: T): Unit
+  def reshape(value: T, shape: Shape): T
+  def transpose(value: T, dim0: Int, dim1: Int): T
+  /** IDs are explicitly host-side Int64 tensors; output appends the table width. */
+  def embedding(table: T, indices: Tensor[Long]): T
   def matmul(a: T, b: T): T
   def add(a: T, b: T): T
   def multiply(a: T, b: T): T

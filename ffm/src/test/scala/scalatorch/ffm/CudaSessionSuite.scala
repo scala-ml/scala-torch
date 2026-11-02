@@ -48,7 +48,8 @@ class CudaSessionSuite extends munit.FunSuite:
       val thread=new Thread(() => { try a.toCpu catch case t: Throwable => error.set(t); () })
       thread.start();thread.join()
       assert(error.get().isInstanceOf[IllegalStateException])
-      a
+      // Both the original and this shared-allocation view must close at scope exit.
+      session.reshape(a,Shape.from(Seq(1L)))
     }
     intercept[IllegalStateException](escaped.toCpu)
     escaped.close()

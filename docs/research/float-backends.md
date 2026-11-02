@@ -32,4 +32,16 @@ CPU GEMM uses Numscala. CPU SiLU uses Double exponential, while CUDA uses `ex2.a
 
 Evidence includes hand-calculated CPU arithmetic/normalization, SiLU sign/infinity/NaN cases, CPU/CUDA comparisons across kernel blocks, strided inputs, maximum finite Float32 normalization, empty tensors/rows, invalid dimensions/epsilon and budget/lifetime rejection. A shared generic gated MLP/residual program matches at `2e-6 * max(1, abs(expected))`; its CUDA allocation count returns to zero after releasing all intermediates.
 
-Remaining work: pretrained transformer integration and independent model references on CUDA; embedding, rotary and attention kernels; broadcasting/views; general Tensor/autograd dispatch; cuBLAS/optimized kernels, mixed precision and performance measurements. Existing full model inference and training still use the CPU implementation.
+Remaining work: pretrained transformer integration and independent model references on CUDA; rotary and attention kernels; broadcasting and general strided CUDA views; general Tensor/autograd dispatch; cuBLAS/optimized kernels, mixed precision and performance measurements. Existing full model inference and training still use the CPU implementation.
+
+## Embedding and layout operations
+
+The shared interface now also includes `embedding(table, indices)`, `reshape(value, shape)` and `transpose(value, dim0, dim1)`.
+
+Embedding requires a rank-2 table with positive width and CPU Long indices. IDs are checked against the table vocabulary before narrowing; scalar IDs produce one embedding vector, and arbitrary index shapes append the embedding width. CUDA transfers validated integer IDs and gathers directly from the persistent table without downloading it. The CPU implementation respects logical table/index layouts.
+
+Reshape preserves logical element order and requires unchanged element count. CPU packs a noncontiguous input when needed. CUDA tensors are packed, so reshape creates another handle over the same device allocation without copying or charging the budget twice. Closing one handle does not invalidate another; the final close frees storage. Scope exit releases all remaining handles, including shared views.
+
+Transpose accepts any valid pair of axes. CPU uses an immutable strided view. CUDA writes a packed device output using output dimensions and permuted input strides. Transposing an axis with itself retains a handle. Empty outputs skip coordinate arithmetic, avoiding overflow for otherwise enormous zero-sized shapes. The packed output can be reshaped and passed directly to existing GEMM/normalization kernels.
+
+Temporary CUDA index/layout buffers count toward the session budget and are released after synchronized execution, including rejected output allocation. Tests cover both reshape close orders, nested handles, escaped views, repeated/scalar/empty/invalid IDs, all axis pairs on rank-2/3/4 tensors, huge empty dimensions and budget rollback. These operations provide transformer data movement; rotary/attention kernels and complete pretrained GPU execution remain pending.

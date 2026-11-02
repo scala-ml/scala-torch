@@ -7,9 +7,13 @@ import java.nio.charset.StandardCharsets.UTF_8
 import scala.collection.mutable
 import scala.util.Using
 
-/** Owned packed Float32 device allocation; valid only inside its session scope. */
+private[ffm] final class CudaAllocation(val address: Long,val bytes: Long):
+  var references=1L
+
+/** Independently releasable packed Float32 handle; reshape may share an allocation. */
 final class CudaTensor private[ffm] (private[ffm] val session: CudaSession,
-    val shape: Shape, private[ffm] val address: Long, private[ffm] val bytes: Long) extends AutoCloseable:
+    val shape: Shape, private[ffm] val allocation: CudaAllocation) extends AutoCloseable:
+  private[ffm] def address: Long = allocation.address
   private[ffm] var released=false
   def toCpu: Tensor[Float] = session.download(this)
   def matmul(other: CudaTensor): CudaTensor = session.matmul(this,other)
@@ -36,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("binary","silu","rmsnorm").map { name =>
+  private val kernels=Seq("binary","silu","rmsnorm","transpose","embedding").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -71,9 +75,62 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       driver.call("cuMemAlloc_v2",Seq(ADDRESS,JAVA_LONG),result,Long.box(bytes))
       result.get(JAVA_LONG,0)
     }
-    val tensor=new CudaTensor(this,shape,address,bytes)
+    val tensor=new CudaTensor(this,shape,new CudaAllocation(address,bytes))
     live+=tensor;used+=bytes
     tensor
+
+  def reshape(value: CudaTensor,shape: Shape): CudaTensor =
+    validate(value)
+    require(value.shape.numel==shape.numel,"reshape changes element count")
+    val view=new CudaTensor(this,shape,value.allocation)
+    value.allocation.references+=1
+    live+=view
+    view
+
+  /** Private integer staging allocation, charged to the same device byte budget. */
+  private def withInts[A](values: Array[Int])(body: Long => A): A =
+    val buffer=allocate(Shape.from(Seq(values.length.toLong)))
+    Using.resource(buffer) { _ =>
+      Using.resource(Arena.ofConfined()) { arena =>
+        if values.nonEmpty then
+          val host=arena.allocateFrom(JAVA_INT,values*)
+          driver.call("cuMemcpyHtoD_v2",Seq(JAVA_LONG,ADDRESS,JAVA_LONG),Long.box(buffer.address),host,Long.box(values.length.toLong*4))
+      }
+      body(buffer.address)
+    }
+
+  def transpose(value: CudaTensor,dim0: Int,dim1: Int): CudaTensor =
+    validate(value)
+    val dims=value.shape.dims
+    require(dim0>=0 && dim0<dims.size && dim1>=0 && dim1<dims.size,"transpose dimension out of range")
+    if dim0==dim1 then return reshape(value,value.shape)
+    def swap[A](v: Vector[A]) = v.updated(dim0,v(dim1)).updated(dim1,v(dim0))
+    val output=Shape.from(swap(dims))
+    if output.numel==0 then return allocate(output)
+    // Nonempty allocated tensors have Int-bounded dimensions and contiguous strides.
+    val strides=dims.scanRight(1L)(_ * _).tail
+    val metadata=(output.dims ++ swap(strides)).map(_.toInt).toArray
+    withInts(metadata) { address =>
+      execute(output,output.numel,kernels("transpose")) { (arena,result) =>
+        Seq(value.address,result.address,address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+          Seq(output.numel.toInt,dims.size).map(v => arena.allocateFrom(JAVA_INT,v))
+      }
+    }
+
+  def embedding(table: CudaTensor,indices: Tensor[Long]): CudaTensor =
+    validate(table)
+    require(table.shape.rank==2 && table.shape.dims(1)>0,"embedding requires a matrix with positive width")
+    val ids=indices.toLongArray
+    require(ids.forall(id => id>=0 && id<table.shape.dims(0)),"embedding token ID out of bounds")
+    val output=Shape.from(indices.shape.dims :+ table.shape.dims(1))
+    require(output.numel<=Int.MaxValue,"embedding output exceeds Int indexing")
+    if output.numel==0 then return allocate(output)
+    withInts(ids.map(_.toInt)) { address =>
+      execute(output,output.numel,kernels("embedding")) { (arena,result) =>
+        Seq(table.address,result.address,address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+          Seq(output.numel.toInt,table.shape.dims(1).toInt).map(v => arena.allocateFrom(JAVA_INT,v))
+      }
+    }
 
   def upload(source: Tensor[Float]): CudaTensor =
     val result=allocate(source.shape)
@@ -158,8 +215,11 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     require(tensor.session eq this,"tensor belongs to another CUDA session")
     if !tensor.released then
       validate(tensor)
-      driver.call("cuMemFree_v2",Seq(JAVA_LONG),Long.box(tensor.address))
-      tensor.released=true;live-=tensor;used-=tensor.bytes
+      if tensor.allocation.references==1 then
+        driver.call("cuMemFree_v2",Seq(JAVA_LONG),Long.box(tensor.address))
+        used-=tensor.allocation.bytes
+      tensor.allocation.references-=1
+      tensor.released=true;live-=tensor
 
   private def shutdown(): Unit =
     threadCheck()
