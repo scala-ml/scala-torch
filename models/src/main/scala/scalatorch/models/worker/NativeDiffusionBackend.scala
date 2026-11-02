@@ -174,7 +174,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         val g=p.get("params") match
           case Some(Obj(fields)) => fields
           case _ => throw IllegalArgumentException("params must be an object")
-        keys(NativeGenerationDefaults.strip(g,NativeGenerationDefaults.generation),Set("prompt","negative_prompt","width","height","steps","seed","subseed","cfg_scale","sampler_name","scheduler","clip_skip","n_iter","checkpoint","vae"))
+        keys(NativeGenerationDefaults.strip(g,NativeGenerationDefaults.generation),Set("prompt","negative_prompt","width","height","steps","seed","subseed","cfg_scale","sampler_name","scheduler","clip_skip","n_iter","checkpoint","vae","extra"))
+        val prediction=NativeGenerationMetadata.prediction(g.get("extra"),config.prediction)
         g.get("checkpoint") match
           case None | Some(Null) => ()
           case Some(Str(name)) =>
@@ -228,10 +229,10 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
             val image=try
               if sampler=="DPM++ 2M" then
                 val layout=if schedule=="Karras" then DpmSchedule.karras(config.noise,steps) else DpmSchedule.uniform(config.noise,steps)
-                pipeline.generateDpm(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=config.prediction)
+                pipeline.generateDpm(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=prediction)
               else
                 val layout=if schedule=="Karras" then config.noise.karrasEuler(steps) else config.noise.euler(steps,config.spacing,config.stepsOffset)
-                pipeline.generate(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=config.prediction)
+                pipeline.generate(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=prediction)
             catch
               case failure: VaeDecodeFailure =>
                 context.checkCancelled()

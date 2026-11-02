@@ -1,3 +1,35 @@
+## Generation metadata and desktop hook boundary (2026-11-03)
+
+Confirmed prior commit 250fc2f. New NativeGenerationMetadata accepts the NUI string
+infotext map (retained by NUI for PNG metadata), validates all values are strings,
+and interprets prediction_type epsilon/v_prediction/sample per request. Both Euler
+and DPM++2M receive the override; checkpoint config remains unchanged. Explicit rng
+selection is rejected because current Java Gaussian noise is not PyTorch/NV noise.
+Default native seed noise still has that compatibility gap.
+
+Metadata suite 2 tests and defaults suite 1 passed. Backend suite 2 passed WITH tiny
+model properties: both samplers change output for v_prediction, explicit epsilon
+plus metadata matches default exactly, later default generation matches original.
+An earlier run skipped both backend tests due to server env; that was corrected by
+restarting scala-torch sbt with JAVA_TOOL_OPTIONS and rerunning (2 actual passes).
+
+Actual UI screenshots in the same isolated home:
+- native-ui-envelope-fixed.png: previous fixes worked; rejected nonempty extra.
+- native-ui-metadata-fixed.png: extra acceptance works; now rejects hooks.
+The UI defaults enable model_keyword; hookFields plus _base_prompt/_mapping_dir
+are supplied by Generator. NEXT implement model_keyword behavior, not discard it.
+Python reference base.py generation_keyword_plan/_model_keyword_plan and
+model_keyword.py contain mapping/choice/placement semantics. Note legacy_hash
+currently expects a checkpoint file, whereas native uses Diffusers directories;
+need deliberate directory identity semantics, no silent bypass. UI also includes
+disabled ControlNet units (not accepted yet). vram_estimator banner remains.
+No desktop generation success yet. NUI tree remains clean on its dedicated branch.
+
+NUI sbt 2.0.12 server deadlocked during shutdown in
+VirtualTerminal.cancelRequests -> ArrayBlockingQueue.put (jcmd confirmed twice).
+Stopped only owned server PIDs 31872 and 35532, then restarted and reran UI.
+Current NUI sbt server idle after successful screenshot run; scala server stopped.
+Old thin-client sessions 2580/53254 may remain disconnected; no live work there.
 ## Desktop envelope and VAE recovery (2026-11-03)
 
 Native backend now accepts vae_recovery_dir and uses it on VAE decode failure.

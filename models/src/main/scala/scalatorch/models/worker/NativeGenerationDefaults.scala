@@ -10,7 +10,7 @@ private[worker] object NativeGenerationDefaults:
   val generation: Map[String,NativeJson]=Map("subseed_strength"->Number(0),
     "batch_size"->Number(1),"eta"->Null,"hires"->hires,
     "img2img"->Null,"loras"->Arr(Vector.empty),"controlnet"->Arr(Vector.empty),"hooks"->Obj(Map.empty),
-    "styles"->Arr(Vector.empty),"extra"->Obj(Map.empty))
+    "styles"->Arr(Vector.empty))
   val envelope: Map[String,NativeJson]=Map("lora_paths"->Obj(Map.empty),"embedding_paths"->Arr(Vector.empty),
     "controlnet_paths"->Obj(Map.empty),"upscaler_paths"->Obj(Map.empty),"lbw_presets"->Obj(Map.empty),
     "system_info_fields"->Arr(Vector.empty),

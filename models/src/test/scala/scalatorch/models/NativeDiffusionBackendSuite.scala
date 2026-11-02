@@ -82,6 +82,20 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       val image=javax.imageio.ImageIO.read(path.toFile)
       assertEquals(image.getWidth,10);assertEquals(image.getHeight,6)
       assertEquals(events.toVector,Vector("progress","progress"))
+      // Exercise the public request boundary, not only metadata parsing: overrides
+      // must reach both samplers and must not mutate the checkpoint configuration.
+      for sampler <- Vector("Euler","DPM++ 2M") do
+        def pixels(extra: Map[String,NativeJson]): Vector[Int]=
+          val generated=run("txt2img",Map("output_dir"->Str(output.toString),"params"->Obj(Map(
+            "prompt"->Str("cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(2),
+            "seed"->Number(42),"sampler_name"->Str(sampler),"extra"->Obj(extra)))))
+          val file=generated("images").asInstanceOf[Arr].values.head.asInstanceOf[Obj].fields("path").asInstanceOf[Str].value
+          val decoded=javax.imageio.ImageIO.read(Path.of(file).toFile)
+          decoded.getRGB(0,0,10,6,null,0,10).toVector
+        val baseline=pixels(Map.empty)
+        assertEquals(pixels(Map("Model keyword settings"->Str("{}"),"prediction_type"->Str("epsilon"))),baseline)
+        assert(pixels(Map("prediction_type"->Str("v_prediction")))!=baseline)
+        assertEquals(pixels(Map.empty),baseline)
       val uniform=run("txt2img",Map("output_dir"->Str(output.toString),"params"->Obj(Map(
         "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(2),
         "seed"->Number(42),"clip_skip"->Number(2),"sampler_name"->Str("DPM++ 2M"),"scheduler"->Str("Uniform")))))
