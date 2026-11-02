@@ -2,6 +2,19 @@
 
 ## Windows continuation (2026-11-03)
 
+`NativeWorker` now connects JSON envelopes and NativeJobControl to an injected
+`NativeWorkerBackend`: bounded Reader framing, immediate ping/protection/interrupt/
+restart-authorization/shutdown handling, and serialized backend work on a daemon
+thread. Backend contexts expose cancellation, event emission and atomic publication
+admission. Final results acquire publication admission too; histories/cancellation
+remain job-local. EOF/shutdown cancel active work and discard pending work. Close
+waits up to five seconds for cooperative completion; it cannot forcibly interrupt
+a running numerical kernel. Tests use a blocking injected backend to prove ping
+responsiveness, owned cancellation and recovery, plus malformed stream recovery,
+protection and shutdown. This is not yet the real-model adapter or a subprocess
+entry point: connect model listing/loading/txt2img and typed backend errors next,
+then test the actual NUI EngineProcess on a dedicated NUI branch.
+
 Native JSON transport primitives now exist in `worker/NativeProtocol.scala`:
 bounded/depth-limited duplicate-rejecting JSON, exact BigDecimal values (including
 64-bit seeds), validated request IDs/owners/object params, and synchronized UTF-8
