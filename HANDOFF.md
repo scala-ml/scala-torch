@@ -1,3 +1,28 @@
+## Resident CUDA GroupNorm/LayerNorm (2026-11-03)
+
+CudaSession.groupNorm supports (N,C,...) groups with independently optional
+resident per-channel weight and bias. PTX one thread/group computes Double mean
+and biased variance in CPU reference order, casts normalized result to Float32,
+then separate FP32 multiply/add (matches nn.GroupNorm without FMA contraction).
+Core GroupNormOps.width(Shape,...) shared for identical geometry validation.
+CudaSession.layerNorm uses retained reshape views and GroupNorm(groups=1), matching
+Variable.layerNorm final-axis semantics; temporary handles closed on all paths.
+
+Hardware tests passed5 new tests: groups1/2/4, rank2/rank4, empty batch, all4 affine
+combinations, noncontiguous upload, extreme/NaN/Inf values, lifetime/budget errors,
+LayerNorm shape/ownership, resident convolution -> GroupNorm -> SiLU chain. Exact
+CPU equality for normalization; SiLU chain tolerance2 Float32 ULPs as existing GPU
+SiLU contract. No intermediate downloads in composed GPU chain, final output only.
+Core GroupNormSuite2 passed. ffm/test ran38 due sbt incremental selection, so then
+explicit ffm/testOnly * ran ALL43 passed with SCALATORCH_CUDA_TESTS=1. Use testOnly *
+for whole-suite claims, ordinary test may select only impacted suites. This also
+clarifies prior conv wave's ffm/test36 was its selected set, not every FFM test.
+
+Still not full GPU image generation: EulerImagePipeline and nn model objects
+remain CPU. Next noncausal attention, concat/nearest resize/spatial padding and
+GEGLU, then resident U-Net/VAE model composition and parameter lifetime/offload.
+Normal-model/GPU performance and fp16 remain unverified. No Python or nvcc used.
+Current sbt scala-torch with CUDA_TESTS=1, no running tests. NUI unchanged.
 ## Resident CUDA convolution for diffusion (2026-11-03)
 
 Added CudaSession.conv2d on resident CudaTensor inputs/output, NCHW/OIHW grouped

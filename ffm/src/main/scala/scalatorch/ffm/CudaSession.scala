@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("conv2d","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
+  private val kernels=Seq("groupnorm","conv2d","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -475,6 +475,36 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       execute(g.shape,g.shape.numel,kernels("conv2d")) { (arena,result) =>
         Seq(input.address,weight.address,result.address,geometry).map(v => arena.allocateFrom(JAVA_LONG,v)) :+
           arena.allocateFrom(JAVA_INT,g.shape.numel.toInt)
+      }
+    }
+
+  /** GroupNorm with independently optional per-channel scale/bias; Float32 affine rounding. */
+  def groupNorm(input: CudaTensor,groups: Int,epsilon: Double=1e-5,
+      weight: Option[CudaTensor]=None,bias: Option[CudaTensor]=None): CudaTensor =
+    validate(input)
+    val width=GroupNormOps.width(input.shape,groups,epsilon)
+    val channels=input.shape.dims(1)
+    val spatial=Shape.from(input.shape.dims.drop(2)).numel
+    Seq(weight,bias).flatten.foreach { value =>
+      validate(value)
+      require(value.shape==Shape.from(Seq(channels)),"GroupNorm affine shape mismatch")
+    }
+    val rows=input.shape.numel/width
+    execute(input.shape,rows,kernels("groupnorm")) { (arena,result) =>
+      Seq(input.address,weight.fold(0L)(_.address),bias.fold(0L)(_.address),result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+        Seq(rows.toInt,width,channels.toInt,spatial.toInt).map(v => arena.allocateFrom(JAVA_INT,v)) :+
+        arena.allocateFrom(JAVA_DOUBLE,epsilon)
+    }
+
+  /** Final-axis normalization, with temporary reshape handles released on every path. */
+  def layerNorm(input: CudaTensor,epsilon: Double=1e-5,
+      weight: Option[CudaTensor]=None,bias: Option[CudaTensor]=None): CudaTensor =
+    validate(input)
+    require(input.shape.rank>=1 && input.shape.dims.last>0,"LayerNorm requires a positive final dimension")
+    val width=input.shape.dims.last
+    Using.resource(reshape(input,Shape.from(Seq(input.shape.numel/width,width)))) { flat =>
+      Using.resource(groupNorm(flat,1,epsilon,weight,bias)) { normalized =>
+        reshape(normalized,input.shape)
       }
     }
 

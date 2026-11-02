@@ -941,3 +941,54 @@ C_STORE:
  cvt.rn.f32.f64 result,sum; mul.wide.u32 offset,idx,4; add.u64 addr,pout,offset; st.global.f32 [addr],result;
 C_DONE: ret;
 }
+
+// One thread owns each sample/channel group; biased variance and separate FP32 affine steps.
+.visible .entry groupnorm(.param .u64 gn_x,.param .u64 gn_weight,.param .u64 gn_bias,.param .u64 gn_out,
+ .param .u32 gn_rows,.param .u32 gn_width,.param .u32 gn_channels,.param .u32 gn_spatial,.param .f64 gn_eps) {
+ .reg .pred p;
+ .reg .u32 rows,width,channels,spatial,gidx,tmp,start,i,index,channel;
+ .reg .u64 px,pw,pb,po,offset,addr;
+ .reg .f32 x,result,affine;
+ .reg .f64 mean,variance,value,centered,product,denom,inverse,eps;
+ ld.param.u64 px,[gn_x]; ld.param.u64 pw,[gn_weight]; ld.param.u64 pb,[gn_bias]; ld.param.u64 po,[gn_out];
+ ld.param.u32 rows,[gn_rows]; ld.param.u32 width,[gn_width]; ld.param.u32 channels,[gn_channels];
+ ld.param.u32 spatial,[gn_spatial]; ld.param.f64 eps,[gn_eps];
+ mov.u32 gidx,%ctaid.x; mov.u32 tmp,%ntid.x; mul.lo.u32 gidx,gidx,tmp;
+ mov.u32 tmp,%tid.x; add.u32 gidx,gidx,tmp; setp.ge.u32 p,gidx,rows; @p bra GN_DONE;
+ mul.lo.u32 start,gidx,width; cvt.rn.f64.u32 denom,width;
+ mov.f64 mean,0d0000000000000000; mov.u32 i,0;
+GN_MEAN:
+ setp.ge.u32 p,i,width; @p bra GN_VARIANCE_START;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; cvt.f64.f32 value,x; add.rn.f64 mean,mean,value;
+ add.u32 i,i,1; bra GN_MEAN;
+GN_VARIANCE_START:
+ div.rn.f64 mean,mean,denom; mov.f64 variance,0d0000000000000000; mov.u32 i,0;
+GN_VARIANCE:
+ setp.ge.u32 p,i,width; @p bra GN_OUTPUT_START;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; cvt.f64.f32 value,x; sub.rn.f64 centered,value,mean;
+ mul.rn.f64 product,centered,centered; add.rn.f64 variance,variance,product;
+ add.u32 i,i,1; bra GN_VARIANCE;
+GN_OUTPUT_START:
+ div.rn.f64 variance,variance,denom; add.rn.f64 variance,variance,eps;
+ sqrt.rn.f64 inverse,variance; div.rn.f64 inverse,0d3FF0000000000000,inverse;
+ mov.u32 i,0;
+GN_OUTPUT:
+ setp.ge.u32 p,i,width; @p bra GN_DONE;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; cvt.f64.f32 value,x; sub.rn.f64 centered,value,mean;
+ mul.rn.f64 value,centered,inverse; cvt.rn.f32.f64 result,value;
+ div.u32 channel,index,spatial; rem.u32 channel,channel,channels;
+ setp.eq.u64 p,pw,0; @p bra GN_BIAS;
+ mul.wide.u32 offset,channel,4; add.u64 addr,pw,offset; ld.global.f32 affine,[addr];
+ mul.rn.f32 result,result,affine;
+GN_BIAS:
+ setp.eq.u64 p,pb,0; @p bra GN_STORE;
+ mul.wide.u32 offset,channel,4; add.u64 addr,pb,offset; ld.global.f32 affine,[addr];
+ add.rn.f32 result,result,affine;
+GN_STORE:
+ mul.wide.u32 offset,index,4; add.u64 addr,po,offset; st.global.f32 [addr],result;
+ add.u32 i,i,1; bra GN_OUTPUT;
+GN_DONE: ret;
+}
