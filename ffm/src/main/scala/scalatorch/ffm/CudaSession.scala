@@ -2,7 +2,7 @@ package scalatorch.ffm
 
 import scalatorch.*
 import java.lang.foreign.{Arena, MemorySegment}
-import java.lang.foreign.ValueLayout.{ADDRESS, JAVA_FLOAT, JAVA_INT, JAVA_LONG}
+import java.lang.foreign.ValueLayout.{ADDRESS, JAVA_DOUBLE, JAVA_FLOAT, JAVA_INT, JAVA_LONG}
 import java.nio.charset.StandardCharsets.UTF_8
 import scala.collection.mutable
 import scala.util.Using
@@ -17,7 +17,7 @@ final class CudaTensor private[ffm] (private[ffm] val session: CudaSession,
 
 /** Thread-confined device storage and synchronous packed GEMM execution. */
 final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
-    val deviceName: String, val driverVersion: Int, val maxBytes: Long):
+    val deviceName: String, val driverVersion: Int, val maxBytes: Long) extends FloatBackend[CudaTensor]:
   private val owner=Thread.currentThread()
   private var closed=false
   private var used=0L
@@ -30,6 +30,15 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   private val module=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(ptx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),module) }
   private val function=driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),module,driver.arena.allocateFrom("gemm"))
+  private val opsPtx=Using.resource(getClass.getResourceAsStream("/scalatorch/transformer.ptx")) { input =>
+    require(input != null,"transformer PTX resource missing")
+    new String(input.readAllBytes(),UTF_8)
+  }
+  private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
+  driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
+  private val kernels=Seq("binary","silu","rmsnorm").map { name =>
+    name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
+  }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
   driver.cleanup { driver.call("cuStreamDestroy_v2",Seq(ADDRESS),stream) }
   driver.cleanup { shutdown() }
@@ -50,6 +59,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     require(tensor.session eq this,"tensor belongs to another CUDA session")
     if tensor.released then throw IllegalStateException("CUDA tensor is closed")
   def allocatedBytes: Long = { check();used }
+  def shape(value: CudaTensor): Shape = { validate(value);value.shape }
 
   private def allocate(shape: Shape): CudaTensor =
     check()
@@ -77,7 +87,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
 
-  private[ffm] def download(tensor: CudaTensor): Tensor[Float] =
+  def download(tensor: CudaTensor): Tensor[Float] =
     validate(tensor)
     val values=Using.resource(Arena.ofConfined()) { arena =>
       val host=arena.allocate(tensor.shape.numel*4,4)
@@ -87,20 +97,54 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     }
     Tensor.fromFloats(values,tensor.shape)
 
-  private[ffm] def matmul(a: CudaTensor,b: CudaTensor): CudaTensor =
+  def matmul(a: CudaTensor,b: CudaTensor): CudaTensor =
     validate(a);validate(b)
     require(a.shape.rank==2 && b.shape.rank==2 && a.shape.dims(1)==b.shape.dims(0),"CUDA GEMM shape mismatch")
     val m=a.shape.dims(0);val k=a.shape.dims(1);val n=b.shape.dims(1)
     require(Seq(m,n,k).forall(_ <= Int.MaxValue),"CUDA GEMM dimension exceeds Int indexing")
-    val result=allocate(Shape.from(Seq(m,n)))
+    val output=Shape.from(Seq(m,n))
+    execute(output,output.numel,function) { (arena,result) =>
+      Seq(a.address,b.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+        Seq(m,n,k).map(v => arena.allocateFrom(JAVA_INT,v.toInt))
+    }
+
+  private def binary(a: CudaTensor,b: CudaTensor,op: Int): CudaTensor =
+    validate(a);validate(b)
+    require(a.shape==b.shape,"backend arithmetic requires equal shapes")
+    execute(a.shape,a.shape.numel,kernels("binary")) { (arena,result) =>
+      Seq(a.address,b.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+        Seq(a.shape.numel.toInt,op).map(v => arena.allocateFrom(JAVA_INT,v))
+    }
+  def add(a: CudaTensor,b: CudaTensor): CudaTensor = binary(a,b,0)
+  def multiply(a: CudaTensor,b: CudaTensor): CudaTensor = binary(a,b,1)
+  def silu(value: CudaTensor): CudaTensor =
+    validate(value)
+    execute(value.shape,value.shape.numel,kernels("silu")) { (arena,result) =>
+      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) :+
+        arena.allocateFrom(JAVA_INT,value.shape.numel.toInt)
+    }
+  def rmsNorm(value: CudaTensor,weight: CudaTensor,epsilon: Double = 1e-6): CudaTensor =
+    validate(value);validate(weight)
+    require(epsilon.isFinite && epsilon>0,"invalid RMSNorm epsilon")
+    require(value.shape.rank>0 && value.shape.dims.last>0 && weight.shape==Shape.from(Seq(value.shape.dims.last)),"invalid RMSNorm shapes")
+    val width=value.shape.dims.last
+    val rows=value.shape.numel/width
+    execute(value.shape,rows,kernels("rmsnorm")) { (arena,result) =>
+      Seq(value.address,weight.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+        Seq(rows.toInt,width.toInt).map(v => arena.allocateFrom(JAVA_INT,v)) :+
+        arena.allocateFrom(JAVA_DOUBLE,epsilon)
+    }
+
+  private def execute(output: Shape,count: Long,kernel: MemorySegment)
+      (arguments: (Arena,CudaTensor) => Seq[MemorySegment]): CudaTensor =
+    val result=allocate(output)
     try
-      if result.shape.numel > 0 then Using.resource(Arena.ofConfined()) { arena =>
-        val args=Seq(a.address,b.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
-          Seq(m,n,k).map(v => arena.allocateFrom(JAVA_INT,v.toInt))
-        val params=arena.allocate(ADDRESS,6)
+      if count > 0 then Using.resource(Arena.ofConfined()) { arena =>
+        val args=arguments(arena,result)
+        val params=arena.allocate(ADDRESS,args.size.toLong)
         args.zipWithIndex.foreach((arg,i) => params.setAtIndex(ADDRESS,i.toLong,arg))
         driver.call("cuLaunchKernel",Seq(ADDRESS) ++ Seq.fill(7)(JAVA_INT) ++ Seq.fill(3)(ADDRESS),
-          function,Int.box(((result.shape.numel+63)/64).toInt),Int.box(1),Int.box(1),
+          kernel,Int.box(((count+63)/64).toInt),Int.box(1),Int.box(1),
           Int.box(64),Int.box(1),Int.box(1),Int.box(0),stream,params,MemorySegment.NULL)
         driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
       }
@@ -109,8 +153,9 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
 
-  private[ffm] def release(tensor: CudaTensor): Unit =
+  def release(tensor: CudaTensor): Unit =
     threadCheck()
+    require(tensor.session eq this,"tensor belongs to another CUDA session")
     if !tensor.released then
       validate(tensor)
       driver.call("cuMemFree_v2",Seq(JAVA_LONG),Long.box(tensor.address))

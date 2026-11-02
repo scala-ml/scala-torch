@@ -12,7 +12,7 @@ lazy val core = project.settings(common)
 lazy val cpu = project.dependsOn(core).settings(common).settings(
   libraryDependencies += "com.github.kmizu" %% "numscala" % "0.5.0"
 )
-lazy val ffm = project.dependsOn(core).settings(common).settings(
+lazy val ffm = project.dependsOn(core, cpu % "test->compile").settings(common).settings(
   Test / javaOptions += "--enable-native-access=ALL-UNNAMED",
   Compile / run / fork := true,
   Compile / run / javaOptions += "--enable-native-access=ALL-UNNAMED"

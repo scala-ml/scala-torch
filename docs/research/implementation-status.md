@@ -4,7 +4,7 @@ Updated 2026-11-02. The design was approved by the user. Subsequent explicit req
 
 ## Verified checkpoint
 
-Full verification: **137 passed, 0 failed, 0 skipped** (core 10, CPU 5, autograd 26, tensorio 17, nn 33, models 36, FFM 10), with public single/sharded tiny-Llama, trained SmolLM2, SmolLM2 tokenizer and CUDA tests explicitly enabled. Run the module test commands from README; enable the public model gate with the documented models Test/javaOptions property and CUDA with the documented Test/envVars command. Scala's runtime dependencies still emit an Unsafe deprecation warning on Java 25; warning-free runtime compatibility is not claimed.
+Full verification: **144 passed, 0 failed, 0 skipped** (core 10, CPU 8, autograd 26, tensorio 17, nn 33, models 36, FFM 14), with public single/sharded tiny-Llama, trained SmolLM2, SmolLM2 tokenizer and CUDA tests explicitly enabled. Run the module test commands from README; enable the public model gate with the documented models Test/javaOptions property and CUDA with the documented Test/envVars command. Scala's runtime dependencies still emit an Unsafe deprecation warning on Java 25; warning-free runtime compatibility is not claimed.
 
 The [NUI migration inventory](nui-migration-audit.md) now pins revision8823aa4 and enumerates47 requests,117 standard plugins,97 parameter fields and135 Python modules. All NUI migration rows remain open; this is static source evidence, not new runtime coverage.
 
@@ -33,6 +33,8 @@ The [NUI migration inventory](nui-migration-audit.md) now pins revision8823aa4 a
 - Real CUDA copy and GEMM tests passed on the GTX 1650 SUPER using `libcuda.so.1` and Java FFM. GEMM loads bundled PTX, launches on an owned stream, records and waits for an event, copies results, and releases resources after draining work. No Python, JNI shim, or CUDA Toolkit is needed for these driver-only probes. This does **not** prove a production CUDA Tensor backend or cuBLAS performance. See [native backend evidence](native-backends.md).
 
 - [Persistent CUDA storage](native-backends.md#persistent-device-storage) now keeps owned Float32 allocations across chained GEMMs in a thread-confined scope. Explicit upload/download, individual release, byte budgets, operation-local host staging and reused module/stream are implemented. Five real GPU tests cover chained computation, logical views, budget reuse, scope/exception/foreign-session/thread lifetime checks, empty/zero-inner dimensions and cleanup after external context changes. The context-cleanup regression was reproduced before fixing. General Tensor dispatch, model GPU execution and optimized kernels remain open.
+
+- [Float32 inference backends](float-backends.md) provide explicit CPU/CUDA dispatch for GEMM, equal-shape add/multiply, SiLU and final-axis RMSNorm. CUDA kernels operate on persistent buffers; RMSNorm uses Double accumulation, and SiLU uses a stable sign branch. CPU analytical tests, GPU numerical/extreme/empty/lifetime tests and a common gated MLP/residual program pass. Independent review found no correctness issues. Full pretrained transformer execution and autograd remain CPU-only.
 
 Each feature suite was first run before its API existed and failed compilation, then passed after implementation. The oversized-empty reduction regression specifically failed with NegativeArraySizeException before the guard was added.
 
