@@ -17,7 +17,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
   @volatile private var modelSummary=Map.empty[String,NativeJson]
   override def device: String=unetExecution.device
   override def usesCuda: Boolean=vaeExecution.device!="cpu" || unetExecution.device!="cpu"
-  override def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot(modelSummary,vaeExecution.device,unetExecution.device)
+  override def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot(modelSummary,vaeExecution.device,unetExecution.device,
+    vaeExecution.offloadWeights,unetExecution.offloadWeights)
   private def checkpointHash(context: NativeWorkContext): String=
     val digest=java.security.MessageDigest.getInstance("SHA-256")
     val weights=Vector("text_encoder"->"model.safetensors","unet"->"diffusion_pytorch_model.safetensors",

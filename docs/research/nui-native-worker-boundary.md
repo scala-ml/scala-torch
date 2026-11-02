@@ -1,3 +1,22 @@
+# CUDA weight offload through native worker (2026-11-03)
+
+With CUDA placement selected, SDFX_SCALATORCH_UNET_OFFLOAD_WEIGHTS=true and
+SDFX_SCALATORCH_VAE_OFFLOAD_WEIGHTS=true independently enable operation-scoped
+weight transfers. Both default to false; CUDA configuration accepts only literal
+true/false. CPU placement ignores CUDA-specific settings. Existing MAX_BYTES
+limits still apply to allocations tracked by each session, not total GPU usage.
+
+UNetExecution.Cuda and VaeExecution.Cuda expose offloadWeights=false. U-Net host
+snapshots live across sampling steps; GPU contexts/activations remain resident.
+VAE snapshots live for each decode. Arithmetic remains FP32 CUDA and default
+behavior remains resident. There is no automatic fallback or host-memory saving.
+Transfers may reduce throughput. Status runtime exposes unet_offload_weights and
+vae_offload_weights; existing device and host-loading vram_mode fields retain
+meaning. VAE replacement carries the immutable execution configuration forward.
+
+Tiny Euler and DPM++/Karras pipelines at2MiB per session match resident output
+exactly. This is not a standard-model memory/performance claim. Normal-resolution
+attention work limits, standard-model acceptance and full NUI parity remain open.
 # CUDA U-Net and VAE desktop checkpoint (2026-11-03)
 
 In addition to CUDA VAE decode, SDFX_SCALATORCH_UNET_DEVICE=cpu|cuda|cuda:<index>

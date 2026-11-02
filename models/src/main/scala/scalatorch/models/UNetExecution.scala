@@ -12,6 +12,7 @@ private[models] trait UNetPredictor:
   * CPU schedulers exchange only latent inputs and guided predictions each step.
   */
 sealed trait UNetExecution:
+  def offloadWeights: Boolean=false
   def device: String
   private[models] def withPredictor[A](model: ConditionalUNet2d,conditional: Tensor[Float],
       unconditional: Option[Tensor[Float]],cancelled: () => Boolean)(body: UNetPredictor => A): A
@@ -37,7 +38,7 @@ object UNetExecution:
         }
       )
 
-  final case class Cuda(deviceIndex: Int=0,maxBytes: Long=1073741824L) extends UNetExecution:
+  final case class Cuda(deviceIndex: Int=0,maxBytes: Long=1073741824L,override val offloadWeights: Boolean=false) extends UNetExecution:
     require(deviceIndex>=0 && maxBytes>0,"invalid CUDA U-Net device or memory budget")
     val device=s"cuda:$deviceIndex"
     private[models] def withPredictor[A](model: ConditionalUNet2d,conditional: Tensor[Float],
@@ -45,7 +46,7 @@ object UNetExecution:
       VaeExecution.checkCancelled(cancelled)
       CudaSession.withDevice(deviceIndex,maxBytes) { session =>
         Using.Manager { use =>
-          val unet=use(CudaUNet.upload(session,model,cancelled))
+          val unet=use(CudaUNet.upload(session,model,cancelled,offloadWeights))
           val positiveContext=use(session.upload(conditional))
           val negativeContext=unconditional.map(x => use(session.upload(x)))
           body(new UNetPredictor:
@@ -78,7 +79,8 @@ object UNetExecution:
 
   def fromEnvironment(environment: Map[String,String]): UNetExecution =
     val device=environment.getOrElse("SDFX_SCALATORCH_UNET_DEVICE","cpu")
-    def cuda(index: Int)=Cuda(index,environment.get("SDFX_SCALATORCH_UNET_MAX_BYTES").fold(1073741824L)(_.toLong))
+    def cuda(index: Int)=Cuda(index,environment.get("SDFX_SCALATORCH_UNET_MAX_BYTES").fold(1073741824L)(_.toLong),
+      VaeExecution.offloadFromEnvironment(environment,"SDFX_SCALATORCH_UNET_OFFLOAD_WEIGHTS"))
     device match
       case "cpu" => Cpu
       case "cuda" => cuda(0)

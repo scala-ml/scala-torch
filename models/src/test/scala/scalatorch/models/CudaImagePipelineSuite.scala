@@ -85,3 +85,23 @@ class CudaImagePipelineSuite extends munit.FunSuite:
       intercept[IllegalArgumentException](UNetExecution.fromEnvironment(Map("SDFX_SCALATORCH_UNET_DEVICE"->device)))
     intercept[IllegalArgumentException](UNetExecution.Cuda(maxBytes=0))
   }
+  test("offload environment settings reach complete low-budget CUDA generation") {
+    val env=Map("SDFX_SCALATORCH_UNET_DEVICE"->"cuda","SDFX_SCALATORCH_VAE_DEVICE"->"cuda",
+      "SDFX_SCALATORCH_UNET_OFFLOAD_WEIGHTS"->"true","SDFX_SCALATORCH_VAE_OFFLOAD_WEIGHTS"->"true",
+      "SDFX_SCALATORCH_UNET_MAX_BYTES"->"2097152","SDFX_SCALATORCH_VAE_MAX_BYTES"->"2097152")
+    assertEquals(UNetExecution.fromEnvironment(env),UNetExecution.Cuda(maxBytes=2097152,offloadWeights=true))
+    assertEquals(VaeExecution.fromEnvironment(env),VaeExecution.Cuda(maxBytes=2097152,offloadWeights=true))
+    for value <- Seq("yes","1","") do
+      intercept[IllegalArgumentException](UNetExecution.fromEnvironment(env.updated("SDFX_SCALATORCH_UNET_OFFLOAD_WEIGHTS",value)))
+      intercept[IllegalArgumentException](VaeExecution.fromEnvironment(env.updated("SDFX_SCALATORCH_VAE_OFFLOAD_WEIGHTS",value)))
+    val cpu=pipeline(VaeExecution.Cpu)
+    val resident=new EulerImagePipeline(cpu.tokenizer,cpu.textEncoder,cpu.unet,cpu.vae,
+      vaeExecution=VaeExecution.Cuda(),unetExecution=UNetExecution.Cuda())
+    val offloaded=new EulerImagePipeline(cpu.tokenizer,cpu.textEncoder,cpu.unet,cpu.vae,
+      vaeExecution=VaeExecution.fromEnvironment(env),unetExecution=UNetExecution.fromEnvironment(env))
+    val request=DiffusionImageRequest("a cat","green trees",10,6,42,guidanceScale=7.5f)
+    val noise=DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true)
+    for dpm <- Seq(false,true) do
+      def run(p: EulerImagePipeline)=if dpm then p.generateDpm(request,DpmSchedule.karras(noise,2)) else p.generate(request,noise.euler(2))
+      assertEquals(run(offloaded).toFloatArray.toVector,run(resident).toFloatArray.toVector)
+  }

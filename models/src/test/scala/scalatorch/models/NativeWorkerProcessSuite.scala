@@ -17,7 +17,11 @@ class NativeWorkerProcessSuite extends munit.FunSuite:
     assume(sys.env.get("SCALATORCH_CUDA_TESTS").contains("1"),"real GPU test disabled")
     runWorker(true,true)
   }
-  private def runWorker(cuda: Boolean,unetCuda: Boolean=false): Unit = {
+  test("public worker offloads CUDA weights under a two MiB allocation budget") {
+    assume(sys.env.get("SCALATORCH_CUDA_TESTS").contains("1"),"real GPU test disabled")
+    runWorker(true,true,true)
+  }
+  private def runWorker(cuda: Boolean,unetCuda: Boolean=false,offload: Boolean=false): Unit = {
     val configured=sys.props.get("scalatorch.clip.dir")
     assume(configured.nonEmpty,"public tiny model required")
     val root=Path.of(configured.get).getParent
@@ -37,6 +41,9 @@ class NativeWorkerProcessSuite extends munit.FunSuite:
     builder.environment().remove("SDFX_SCALATORCH_VAE_MAX_BYTES")
     builder.environment().put("SDFX_SCALATORCH_UNET_DEVICE",if unetCuda then "cuda" else "cpu")
     builder.environment().remove("SDFX_SCALATORCH_UNET_MAX_BYTES")
+    for component <- Seq("UNET","VAE") do
+      builder.environment().put(s"SDFX_SCALATORCH_${component}_OFFLOAD_WEIGHTS",offload.toString)
+      if offload then builder.environment().put(s"SDFX_SCALATORCH_${component}_MAX_BYTES","2097152")
     val process=builder.start()
     val input=new java.io.BufferedWriter(new java.io.OutputStreamWriter(process.getOutputStream,UTF_8))
     val lines=new LinkedBlockingQueue[String]()
@@ -72,6 +79,8 @@ class NativeWorkerProcessSuite extends munit.FunSuite:
       assertEquals(status("model").asInstanceOf[Obj].fields("name"),Str(root.getFileName.toString))
       assertEquals(status("runtime").asInstanceOf[Obj].fields("vae_device"),Str(if cuda then "cuda:0" else "cpu"))
       assertEquals(status("runtime").asInstanceOf[Obj].fields("unet_device"),Str(if unetCuda then "cuda:0" else "cpu"))
+      assertEquals(status("runtime").asInstanceOf[Obj].fields("unet_offload_weights"),Bool(offload))
+      assertEquals(status("runtime").asInstanceOf[Obj].fields("vae_offload_weights"),Bool(offload))
       send("generate","txt2img",Map("output_dir"->Str(temp.toString),"params"->Obj(Map(
         "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(3),
         "seed"->Number(BigDecimal(Long.MaxValue)),"sampler_name"->Str("DPM++ 2M"),"scheduler"->Str("Karras")))))

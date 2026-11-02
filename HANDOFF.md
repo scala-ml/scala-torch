@@ -1,3 +1,31 @@
+## CUDA offload connected to pipeline, worker and NUI (2026-11-03)
+
+UNetExecution.Cuda / VaeExecution.Cuda now expose offloadWeights=false and pass
+it to runtime snapshots. CUDA environment accepts independent literal true/false
+SDFX_SCALATORCH_UNET_OFFLOAD_WEIGHTS and SDFX_SCALATORCH_VAE_OFFLOAD_WEIGHTS.
+CPU ignores CUDA-specific options. Status exposes runtime.unet_offload_weights
+and vae_offload_weights; device/host-load semantics and defaults remain unchanged.
+No silent fallback, FP16 or whole-process GPU memory accounting is implied.
+
+Verification on real GPU:
+- models/testOnly *CudaImagePipelineSuite:6 passed. Environment parsing rejects
+  invalid values; offloaded Euler/DPM CFG output exactly equals resident at2MiB
+  per-session budgets for10x6 tiny images.
+- NativeWorkerProcessSuite/NativeWorkerSuite/NativeDiffusionBackendSuite:8 passed.
+  Four separate Java process modes include offloaded U-Net+VAE at2MiB, status,
+  progress, preview and PNG with no Python launch.
+- NUI engine/testOnly *NativeScalaEngineSuite:1 passed2.838s, both offload options,
+ 16MiB per session,64x64 tiny output, keyword mapping and VAE replacement/restore.
+  Initial2MiB run failed VAE decode and wrote recovery latents. Test cleanup hid
+  that with DirectoryNotEmptyException; recursive cleanup now preserves primary
+  errors. Repeating2MiB confirmed vae_decode_failed;16MiB then passed. No claim
+  of standard-model throughput or total GPU usage at these limits.
+
+NUI dedicated branch commit826356b updates test/docs. Scala-torch sbt stopped;
+NUI sbt currently has both CUDA/offload options and16MiB limits, plus native
+integration classpath/model variables. Restart servers when changing env.
+Next: standard model memory/performance, attention work limits and remaining
+Python-free feature parity. Full objective remains incomplete.
 ## Per-operation CUDA weight offload (2026-11-03)
 
 CudaUNet.upload and CudaVaeDecoder.upload accept offloadWeights=false by default.

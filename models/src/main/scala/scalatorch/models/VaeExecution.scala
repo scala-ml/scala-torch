@@ -8,10 +8,17 @@ import java.util.concurrent.CancellationException
 
 /** Explicit decoder placement. CUDA resources are scoped to each decode on its calling thread. */
 sealed trait VaeExecution:
+  def offloadWeights: Boolean=false
   def device: String
   def decode(model: VaeDecoder,input: Tensor[Float],cancelled: () => Boolean): Tensor[Float]
 
 object VaeExecution:
+  private[models] def offloadFromEnvironment(environment: Map[String,String],key: String): Boolean =
+    environment.getOrElse(key,"false") match
+      case "false" => false
+      case "true" => true
+      case _ => throw IllegalArgumentException(s"$key must be true or false")
+
   private[models] def checkCancelled(cancelled: () => Boolean): Unit =
     if cancelled() || Thread.currentThread().isInterrupted then throw new CancellationException("diffusion inference cancelled")
 
@@ -23,7 +30,7 @@ object VaeExecution:
       checkCancelled(cancelled)
       result
 
-  final case class Cuda(deviceIndex: Int=0,maxBytes: Long=1073741824L) extends VaeExecution:
+  final case class Cuda(deviceIndex: Int=0,maxBytes: Long=1073741824L,override val offloadWeights: Boolean=false) extends VaeExecution:
     require(deviceIndex>=0 && maxBytes>0,"invalid CUDA VAE device or memory budget")
     val device=s"cuda:$deviceIndex"
     def decode(model: VaeDecoder,input: Tensor[Float],cancelled: () => Boolean): Tensor[Float] =
@@ -31,7 +38,7 @@ object VaeExecution:
       model.preflight(input.shape)
       CudaSession.withDevice(deviceIndex,maxBytes) { session =>
         Using.Manager { use =>
-          val decoder=use(CudaVaeDecoder.upload(session,model,cancelled))
+          val decoder=use(CudaVaeDecoder.upload(session,model,cancelled,offloadWeights))
           checkCancelled(cancelled)
           val latent=use(session.upload(input))
           val output=use(decoder(latent))
@@ -44,7 +51,8 @@ object VaeExecution:
 
   def fromEnvironment(environment: Map[String,String]): VaeExecution =
     val device=environment.getOrElse("SDFX_SCALATORCH_VAE_DEVICE","cpu")
-    def cuda(index: Int)=Cuda(index,environment.get("SDFX_SCALATORCH_VAE_MAX_BYTES").fold(1073741824L)(_.toLong))
+    def cuda(index: Int)=Cuda(index,environment.get("SDFX_SCALATORCH_VAE_MAX_BYTES").fold(1073741824L)(_.toLong),
+      VaeExecution.offloadFromEnvironment(environment,"SDFX_SCALATORCH_VAE_OFFLOAD_WEIGHTS"))
     device match
       case "cpu" => Cpu
       case "cuda" => cuda(0)
