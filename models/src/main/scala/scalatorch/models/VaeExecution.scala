@@ -6,10 +6,11 @@ import scalatorch.ffm.CudaSession
 import scala.util.Using
 import java.util.concurrent.CancellationException
 
-/** Explicit decoder placement. CUDA resources are scoped to each decode on its calling thread. */
+/** Explicit encoder/decoder placement. CUDA resources are scoped to each call on its calling thread. */
 sealed trait VaeExecution:
   def offloadWeights: Boolean=false
   def device: String
+  def encode(model: VaeEncoder,input: Tensor[Float],cancelled: () => Boolean): Tensor[Float]
   def decode(model: VaeDecoder,input: Tensor[Float],cancelled: () => Boolean): Tensor[Float]
 
 object VaeExecution:
@@ -24,6 +25,11 @@ object VaeExecution:
 
   case object Cpu extends VaeExecution:
     val device="cpu"
+    def encode(model: VaeEncoder,input: Tensor[Float],cancelled: () => Boolean): Tensor[Float] =
+      checkCancelled(cancelled)
+      val result=Autograd.noGrad(model(Variable(input))).data
+      checkCancelled(cancelled)
+      result
     def decode(model: VaeDecoder,input: Tensor[Float],cancelled: () => Boolean): Tensor[Float] =
       checkCancelled(cancelled)
       val result=Autograd.noGrad(model(Variable(input))).data
@@ -33,6 +39,21 @@ object VaeExecution:
   final case class Cuda(deviceIndex: Int=0,maxBytes: Long=1073741824L,override val offloadWeights: Boolean=false) extends VaeExecution:
     require(deviceIndex>=0 && maxBytes>0,"invalid CUDA VAE device or memory budget")
     val device=s"cuda:$deviceIndex"
+    def encode(model: VaeEncoder,input: Tensor[Float],cancelled: () => Boolean): Tensor[Float] =
+      checkCancelled(cancelled)
+      model.preflight(input.shape)
+      CudaSession.withDevice(deviceIndex,maxBytes) { session =>
+        Using.Manager { use =>
+          val encoder=use(CudaVaeEncoder.upload(session,model,cancelled,offloadWeights))
+          checkCancelled(cancelled)
+          val image=use(session.upload(input))
+          val output=use(encoder(image))
+          checkCancelled(cancelled)
+          val result=output.toCpu
+          checkCancelled(cancelled)
+          result
+        }.get
+      }
     def decode(model: VaeDecoder,input: Tensor[Float],cancelled: () => Boolean): Tensor[Float] =
       checkCancelled(cancelled)
       model.preflight(input.shape)

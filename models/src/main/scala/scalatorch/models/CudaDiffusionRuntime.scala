@@ -273,6 +273,29 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       hidden
     }
 
+  def encode(input: CudaTensor,model: VaeEncoder): CudaTensor =
+    check()
+    model.preflight(session.shape(input))
+    scope { use =>
+      var hidden=use(conv(input,model.convIn))
+      def next(value: CudaTensor): Unit =
+        val owned=use(value)
+        hidden.close();hidden=owned
+        check()
+      model.downBlocks.foreach { block =>
+        block.layers.foreach(r => next(resnet(hidden,r,None)))
+        block.downsample.foreach(d => next(downsample(hidden,d)))
+      }
+      next(resnet(hidden,model.midBlock.first,None))
+      model.midBlock.attention.foreach(a => next(vaeAttention(hidden,a)))
+      next(resnet(hidden,model.midBlock.second,None))
+      next(norm(hidden,model.normOut))
+      next(session.silu(hidden))
+      next(conv(hidden,model.convOut))
+      model.quantConv.foreach(c => next(conv(hidden,c)))
+      hidden
+    }
+
   def decode(input: CudaTensor,model: VaeDecoder): CudaTensor =
     check()
     model.preflight(session.shape(input))

@@ -1,3 +1,28 @@
+## CUDA VAE encoder and img2img integration (2026-11-03)
+
+CudaVaeEncoder implements full encoder raw moments using shared CUDA runtime.
+VaeEncoder preflight now shared CPU/CUDA. VaeExecution adds encode, CPU/CUDA;
+EulerImagePipeline uses it before posterior sampling and scaling on CPU.
+Existing VAE_DEVICE/MAX_BYTES/OFFLOAD_WEIGHTS govern encoder and decoder.
+Encode session closes before U-Net session; no simultaneous component weights.
+Candle6checks (3shapes x2placements) maxabs9.54e-7, tolerance2e-5.
+Cancellation cleanup/reuse,invalid shape,budget failure,optional quant/attention
+and full img2img CPU/GPU comparison pass. Initial affected4suites passed21tests;
+after extra optional/budget test, encoder+img2img passed4. No skipped GPU tests.
+models/package rebuilt jars. Scala-torch sbt server shut down afterwards.
+
+NUI existing NativeScalaEngineSuite passed1 in6.354s with CUDA U-Net/VAE,
+both offload flags true and16MiB per session.64x64 tiny txt2img→img2img,
+actual typed request/results/progress/seed/keyword; not real-model acceptance.
+NUI sbt currently live with these environment variables (restart for env changes).
+NUI docs updated on dedicated feat/scala-torch-native-engine branch.
+
+OriginalSD1.5 512px20step process is still live in session11471,Java33796,
+lateststep16/20. GPU tests added contention: do not call it clean timing.
+Poll same handle; inspect actual final PNG when ready. Next real SD1.5img2img,
+SDXL support/acceptance,desktop metadata/replay,inpainting/extensions/packaging.
+The full Python-removal goal remains open.
+
 ## Native worker img2img and file decoding (2026-11-03)
 
 NativeDiffusionBackend now accepts img2img using existing shared generation path:

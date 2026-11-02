@@ -55,7 +55,7 @@ final case class VaeEncoder(convIn: Conv2d,downBlocks: Vector[VaeDownBlock],midB
   VaeGraph.preserving(convOut,3,Some(current))
   quantConv.foreach(c => VaeGraph.projection(c,outputChannels))
 
-  def apply(input: Variable): Variable =
+  private[models] def preflight(input: Shape): Unit =
     var shape=VaeGraph.input(input,convIn,maxFeatureElements)
     shape=VaeGraph.convShape(convIn,shape,maxFeatureElements)
     downBlocks.foreach { b =>
@@ -65,6 +65,9 @@ final case class VaeEncoder(convIn: Conv2d,downBlocks: Vector[VaeDownBlock],midB
     shape=VaeGraph.midShape(midBlock,shape,maxFeatureElements)
     shape=VaeGraph.convShape(convOut,shape,maxFeatureElements)
     quantConv.foreach(c => shape=VaeGraph.convShape(c,shape,maxFeatureElements))
+
+  def apply(input: Variable): Variable =
+    preflight(input.data.shape)
     var hidden=convIn(input)
     downBlocks.foreach { b =>
       b.layers.foreach(r => hidden=r(hidden))

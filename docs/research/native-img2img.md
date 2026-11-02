@@ -7,7 +7,7 @@ the suffix of max(1,floor(totalSteps*strength)) steps, matching existing NUI
 python/sdfx/params.py img2img_steps (including the minimum-one-step behavior).
 Progress counts only those active steps. No input-file resizing is implicit.
 
-VAE encoder currently runs on CPU. The diagonal posterior is sampled, then scaled
+VAE encoder follows VaeExecution (CPU or CUDA). The diagonal posterior is sampled on CPU, then scaled
 once into diffusion latents. Optional posteriorNoise and existing diffusion noise
 allow exact replay; absent noise uses one java.util.Random seeded from request,
 posterior draws before diffusion draws. This does not reproduce Torch RNG.
@@ -23,7 +23,7 @@ Scala tensors, VAE posterior and schedulers, with no Python runtime calls.
 
 The worker now accepts img2img, but complete NUI img2img support is not established.
 Remaining work: NUI cross-repository request/metadata/replay acceptance;
-CUDA VAE encode for practical full-size performance; real
+practical full-size performance; real
 SD1.5/SDXL acceptance and inpainting. The complete migration goal remains open.
 ## RGB resizing foundation
 
@@ -72,6 +72,28 @@ color profile, bit depth or older Pillow version is identical. Malformed files,
 out-of-bounds EXIF and allocation limits are tested. The optional oracle script
 scripts/reference_image_input.py takes the NUI repo path; normal tests and
 runtime do not invoke Python. Source provenance is the same images.py hash above.
+
+## CUDA encoder
+
+CudaVaeEncoder returns raw mean/log-variance moments using the shared diffusion
+runtime: conv, residual blocks, asymmetric zero-padded downsampling, middle
+attention and optional quant projection. CPU and CUDA use the same allocation
+preflight. GPU activation storage stays resident through encoding; host/device
+transfer happens at input and raw moments. The encoder session closes before
+U-Net sampling, and VAE decoding opens its own session afterwards.
+SDFX_SCALATORCH_VAE_DEVICE, VAE_MAX_BYTES and VAE_OFFLOAD_WEIGHTS now govern both
+encoder and decoder. Defaults remain CPU. Posterior sampling, CLIP and scheduler
+remain CPU, so this is hybrid execution with no Python runtime dependency.
+
+Independent Candle encoder fixtures cover even/odd rectangular inputs and batch2.
+Resident and offloaded CUDA moments have max absolute error9.54e-7 (limit2e-5).
+Tests also verify cancellation cleanup/reuse, invalid channels, allocation failure,
+omitted middle attention/quant projection, and CPU/CUDA end-to-end img2img parity.
+The existing VAE decoder and pretrained VAE suites passed with this change.
+NUI NativeScalaEngineSuite passed with CUDA U-Net and VAE, offload enabled,
+16MiB per session: actual typed64x64 txt2img and img2img requests in6.354s.
+That timing includes the tiny-model integration suite and concurrent SD1.5 work;
+it is not a clean performance benchmark or normal-model acceptance.
 
 NativeImg2ImgSuite exercises real tiny checkpoint weights through the worker API:
 Euler/DPM++ generation, seeded replay, differing resize modes, strength-based

@@ -71,7 +71,8 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
     def randomNoise(): Tensor[Float]=Tensor.fromFloats(Array.fill(latentShape.numel.toInt)(random.nextGaussian().toFloat),latentShape)
     val clean=source.map { value =>
       checkCancelled()
-      val posterior=vae.encode(Variable(value.image,requiresGrad=false))
+      val moments=vaeExecution.encode(vae.encoder,value.image,cancelled)
+      val posterior=VaePosterior(Variable(moments,requiresGrad=false))
       checkCancelled()
       val latent=vae.toDiffusionLatents(posterior.sample(value.posteriorNoise.getOrElse(randomNoise())))
       require(latent.data.toFloatArray.forall(_.isFinite),"VAE encoder produced nonfinite latents")
