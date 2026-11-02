@@ -1,3 +1,29 @@
+## First actual native desktop run (2026-11-03)
+
+Ran NUI JavaFX Launcher with --home isolated under scala-torch/.superpowers,
+--autogen, --screenshot and --exit-after. Exact retained home:
+C:/Users/Mizushima/dev/scala-torch/.superpowers/nui-ui-8389b9ccd0c940b787ecad1783f6d50b
+Pointer: .superpowers/latest-native-ui-home.txt. Settings fp32/cpu, last_model and
+checkpoint dirs tiny-sd-pipe; UI params cat/64x64/3 steps/seed42. No normal settings
+changed. CIM observed Java UI plus Java native worker, no python.exe.
+
+Found real UI bug: VramModes.normalizeSettings maps legacy cpu to sequential_offload.
+Fixed in NUI native branch: optional nativeEngine preserves explicit cpu; legacy
+Python mapping unchanged. Round2Suite 3 passed. SdfxApp supplies native selection.
+Latest screenshot native-ui-native-fixed.png confirms Ready cpu, loaded tiny-sd-pipe,
+Python-free startup. GENERATION STILL FAILS: unsupported non-default option
+vae_recovery_dir. UI Generator always supplies real output directory, unlike the
+EngineClient integration fixture. Also visible unsupported vram_estimator banner.
+No generated output PNG exists. Next implement actual Generator envelope semantics
+(including vae_recovery_dir; likely checkpoint/vae/extra next), then rerun desktop.
+Do not claim desktop generation works based on prior EngineClient integration.
+
+Second screenshot native-ui-cpu-fixed.png is an accidental Python bootstrap run:
+SDFX_SCALATORCH_* env were omitted on that invocation. sbt run does not reliably
+inherit prior client env: SET ALL THREE NATIVE VARIABLES on EVERY ui/run invocation.
+No Python installation was performed. Third run explicitly supplied variables and
+confirmed fixed CPU load. Use euler-demo.json in tiny root for scheduler env.
+Current sbt server NUI, UI/worker processes exited after screenshots. Full goal active.
 ## Native VAE selection (2026-11-03)
 
 set_vae now stages a replacement VAE and pipeline before publication; failure or
