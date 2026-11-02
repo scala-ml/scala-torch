@@ -3,7 +3,7 @@ package scalatorch.models
 import scalatorch.*
 import scalatorch.autograd.{Autograd, Variable}
 import scalatorch.nn.*
-import scalatorch.io.{ReadLimits, SafeDType, SafeTensors}
+import scalatorch.io.{ReadLimits, SafeDType, SafeTensorSet, ShardLimits}
 import java.nio.file.{Files, Path}
 import scala.util.Using
 
@@ -156,12 +156,10 @@ object LlamaModel:
     }
 
   def load(directory: Path, trainable: Boolean = false, limits: LlamaLimits = LlamaLimits(),
-      readLimits: ReadLimits = ReadLimits()): LlamaModel =
+      readLimits: ReadLimits = ReadLimits(), shardLimits: ShardLimits = ShardLimits()): LlamaModel =
     val c = LlamaConfig.read(directory.resolve("config.json"))
     validate(c, limits)
-    val path = directory.resolve("model.safetensors")
-    require(Files.isRegularFile(path), "single model.safetensors required; sharded indexes are not yet supported")
-    Using.resource(SafeTensors.open(path, readLimits)) { archive =>
+    Using.resource(SafeTensorSet.open(directory, readLimits, shardLimits)) { archive =>
       val expected = shapes(c).toMap
       val optional = if c.tieWordEmbeddings then Set("lm_head.weight") else Set.empty[String]
       require((expected.keySet -- optional).subsetOf(archive.tensors.keySet) && archive.tensors.keySet.subsetOf(expected.keySet), "Llama weight names mismatch")

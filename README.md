@@ -4,7 +4,7 @@ Deep learning in Scala 3, targeting Java 25 and Python-free LLMs, training, and 
 
 Requires **Java 25, Scala 3.3.8 LTS, sbt 2.0.10**. Versions are pinned in the build.
 
-Published Llama checkpoint inference now runs in Scala: standard config + single-file safetensors loading, differentiable model composition, persistent CPU KV cache, and greedy token-ID generation. The public tiny-random Llama matches 128000 independent Rust Candle logits with maximum absolute error `5.96e-8`; cached chunks also match that reference. This verifies architecture interoperability; the random checkpoint is not a useful language model. A native byte-level BPE tokenizer now matches the pinned SmolLM2 tokenizer reference. The trained SmolLM2-135M-Instruct model now generates text offline, matching independent Candle logits and greedy output.
+Published Llama checkpoint inference now runs in Scala: standard config + single-file/indexed safetensors loading, differentiable model composition, persistent CPU KV cache, and greedy token-ID generation. The public tiny-random Llama matches 128000 independent Rust Candle logits with maximum absolute error `5.96e-8`; cached chunks also match that reference. This verifies architecture interoperability; the random checkpoint is not a useful language model. A native byte-level BPE tokenizer now matches the pinned SmolLM2 tokenizer reference. The trained SmolLM2-135M-Instruct model now generates text offline, matching independent Candle logits and greedy output.
 
 Implemented: CPU tensors (Float32/Float64/Int64/Bool), checked shapes and views, slicing, broadcasting, Float32 add/reduction/matrix multiplication, and a numscala GEMM adapter. The FFM module includes host memory scopes, a real CUDA memory-copy probe, and a driver-level Float32 GEMM probe with owned stream/event completion.
 
@@ -20,7 +20,7 @@ Safetensors archives can now be indexed and read without Python: F16/BF16/F32→
 
 Differentiable causal grouped-query attention and Llama-style RoPE are available on rank-4 `(batch, heads, tokens, width)` Variables. Attention supports query position offsets for decode chunks and a configurable score-workspace limit. Numerical gradient and masking tests cover these operations.
 
-Not implemented yet: a persistent GPU Tensor backend, cuBLAS acceleration, sharded weights, broader tokenizer/config variants, LoRA tuning, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
+Not implemented yet: a persistent GPU Tensor backend, cuBLAS acceleration, broader tokenizer/config variants, LoRA tuning, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
 
 ```sh
 sbt 'core / Test / testOnly scalatorch.*'
@@ -162,3 +162,5 @@ val generated = model.generateIds(promptIds,32,sampling=policy)
 ```
 
 Temperature0 keeps the default greedy behavior. [Sampling semantics and tests](docs/research/token-sampling.md) cover temperature, top-k/top-p ordering, numerical boundaries and seed replay.
+
+`LlamaModel.load(directory)` also accepts `model.safetensors.index.json` and its referenced shards. All shard headers and index assignments validate before model weights materialize. A directory containing both single-file and indexed weights is rejected as ambiguous. See [sharded-checkpoint validation and independent reference](docs/research/sharded-safetensors.md).

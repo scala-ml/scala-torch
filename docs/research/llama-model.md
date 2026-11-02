@@ -2,7 +2,7 @@
 
 The `models` module assembles a standard bias-free Llama decoder using the Scala nn/autograd implementation: embedding, pre-attention RMSNorm, q/k/v projections, rotary positions, causal GQA, output projection/residual, post-attention RMSNorm, gated SiLU MLP/residual, final norm and language-model head.
 
-`LlamaModel.init(config,seed)` produces a differentiable model using config.initializerRange; norm scales initialize to one. `LlamaModel.load(directory)` reads config.json and a single model.safetensors directly, frozen by default. It checks every expected name, shape and floating dtype, rejects unexpected/missing tensors, shares tied embedding/head identity and permits an omitted tied head. If a tied head is redundantly stored it must agree with embedding values. `forward` returns differentiable `(batch,tokens,vocab)` logits; `logits` runs noGrad. Module derivation registers nested parameters.
+`LlamaModel.init(config,seed)` produces a differentiable model using config.initializerRange; norm scales initialize to one. `LlamaModel.load(directory)` reads config.json and either a single model.safetensors or an indexed shard set directly, frozen by default. It checks every expected name, shape and floating dtype, rejects unexpected/missing tensors, shares tied embedding/head identity and permits an omitted tied head. If a tied head is redundantly stored it must agree with embedding values. `forward` returns differentiable `(batch,tokens,vocab)` logits; `logits` runs noGrad. Module derivation registers nested parameters.
 
 ## Supported configuration
 
@@ -10,7 +10,7 @@ Bounded duplicate-free JSON with exact integer dimensions; standard model_type=l
 
 Layer/parameter/logit/score limits are configurable through LlamaLimits, and safetensors materialization limits apply separately. Defaults are at most 512 layers, 1 billion logical unique parameters, 16777216 logit elements and 16777216 attention-score elements. These bound specific allocations/counts, not total process memory. CPU Float32 execution is currently supported.
 
-`generateIds(prompt,maxNewTokens)` uses a persistent CPU KV cache by default (`useCache=false` retains full-prefix recomputation), selects the lowest ID on equal logits and stops on configured EOS IDs. The complete requested length must fit the configured context. A [native byte-level BPE tokenizer](byte-bpe-tokenizer.md) is available separately. Explicit SmolLM2 chat formatting and [trained text generation](trained-text-generation.md) are implemented. [Seeded sampling](token-sampling.md) is also supported. Padding masks and sharded loading remain open.
+`generateIds(prompt,maxNewTokens)` uses a persistent CPU KV cache by default (`useCache=false` retains full-prefix recomputation), selects the lowest ID on equal logits and stops on configured EOS IDs. The complete requested length must fit the configured context. A [native byte-level BPE tokenizer](byte-bpe-tokenizer.md) is available separately. Explicit SmolLM2 chat formatting and [trained text generation](trained-text-generation.md) are implemented. [Seeded sampling](token-sampling.md) is also supported. [Indexed shard loading](sharded-safetensors.md) is supported; padding masks remain open.
 
 ## Public checkpoint verification
 
@@ -41,4 +41,4 @@ Without this property, the public model test reports a skip; synthetic model tes
 
 ## Remaining gates
 
-Tokenizer/config variants, broader trained-model text generation, sharded weights, broader persistent KV-cache model references, broader GQA model references, CUDA model execution/performance, diffusion and complete NUI Python removal remain required. Synthetic tests verify GQA composition and gradients, ties, initialization, EOS/tie behavior, empty inputs and loader rejection; they do not replace those public-model gates.
+Tokenizer/config variants, broader trained-model text generation and large-shard-model validation, broader persistent KV-cache model references, broader GQA model references, CUDA model execution/performance, diffusion and complete NUI Python removal remain required. Synthetic tests verify GQA composition and gradients, ties, initialization, EOS/tie behavior, empty inputs and loader rejection; they do not replace those public-model gates.
