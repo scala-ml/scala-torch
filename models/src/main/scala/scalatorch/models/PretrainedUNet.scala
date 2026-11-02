@@ -36,21 +36,27 @@ object PretrainedUNet:
         DiffusionResnet2d(group(s"$name.norm1",in,c.epsilon),conv(s"$name.conv1",in,out),
           Some(linear(s"$name.time_emb_proj",c.timeWidth,out)),group(s"$name.norm2",out,c.epsilon),
           conv(s"$name.conv2",out,out),if in==out then None else Some(conv(s"$name.conv_shortcut",in,out,1,padding=0)),scale)
-      def spatial(name: String,width: Int): DiffusionSpatialTransformer =
+      def spatial(name: String,width: Int,stage: Int): DiffusionSpatialTransformer =
         def attention(prefix: String,context: Int): DiffusionAttention =
           DiffusionAttention(linear(s"$prefix.to_q",width,width,false),linear(s"$prefix.to_k",context,width,false),
-            linear(s"$prefix.to_v",context,width,false),linear(s"$prefix.to_out.0",width,width),c.heads,maxScoreElements)
-        val blocks=Vector.tabulate(c.transformerLayers) { i =>
+            linear(s"$prefix.to_v",context,width,false),linear(s"$prefix.to_out.0",width,width),c.headsAt(stage),maxScoreElements)
+        val blocks=Vector.tabulate(c.transformerLayersAt(stage)) { i =>
           val p=s"$name.transformer_blocks.$i"
           DiffusionTransformerBlock(norm(s"$p.norm1",width),attention(s"$p.attn1",width),
             norm(s"$p.norm2",width),attention(s"$p.attn2",c.contextWidth),norm(s"$p.norm3",width),
             DiffusionFeedForward(linear(s"$p.ff.net.0.proj",width,width*8),linear(s"$p.ff.net.2",width*4,width)))
         }
-        DiffusionSpatialTransformer(group(s"$name.norm",width,1e-6),conv(s"$name.proj_in",width,width,1,padding=0),
-          blocks,conv(s"$name.proj_out",width,width,1,padding=0))
-      def layer(prefix: String,index: Int,in: Int,out: Int,attention: Boolean): DiffusionUNetLayer =
+        def projection(prefix: String): Conv2d =
+          if !c.linearProjection then conv(prefix,width,width,1,padding=0)
+          else
+            val flat=parameter(s"$prefix.weight",width,width)
+            Conv2d(Parameter(flat.data.reshape(Shape.from(Seq(width.toLong,width.toLong,1L,1L))),trainable),
+              Some(parameter(s"$prefix.bias",width)),Conv2dConfig())
+        DiffusionSpatialTransformer(group(s"$name.norm",width,1e-6),projection(s"$name.proj_in"),
+          blocks,projection(s"$name.proj_out"))
+      def layer(prefix: String,index: Int,in: Int,out: Int,attention: Boolean,stage: Int): DiffusionUNetLayer =
         DiffusionUNetLayer(resnet(s"$prefix.resnets.$index",in,out),
-          if attention then Some(spatial(s"$prefix.attentions.$index",out)) else None)
+          if attention then Some(spatial(s"$prefix.attentions.$index",out,stage)) else None)
       val convIn=conv("conv_in",c.inChannels,c.channels.head)
       val time=DiffusionTimeEmbedding(linear("time_embedding.linear_1",c.channels.head,c.timeWidth),
         linear("time_embedding.linear_2",c.timeWidth,c.timeWidth))
@@ -59,7 +65,7 @@ object PretrainedUNet:
       val down=c.channels.indices.toVector.map { i =>
         val out=c.channels(i);val prefix=s"down_blocks.$i"
         val layers=Vector.tabulate(c.layersPerBlock) { j =>
-          val l=layer(prefix,j,current,out,c.downAttention(i))
+          val l=layer(prefix,j,current,out,c.downAttention(i),i)
           current=out;skips+=out;l
         }
         val sample=if i==c.channels.size-1 then None else
@@ -68,12 +74,12 @@ object PretrainedUNet:
         DiffusionDownBlock(layers,sample)
       }
       val mid=DiffusionMidBlock(resnet("mid_block.resnets.0",current,current,c.midScale),
-        spatial("mid_block.attentions.0",current),resnet("mid_block.resnets.1",current,current,c.midScale))
+        spatial("mid_block.attentions.0",current,c.channels.size-1),resnet("mid_block.resnets.1",current,current,c.midScale))
       val up=c.channels.reverse.zipWithIndex.map { (out,i) =>
         val prefix=s"up_blocks.$i"
         val layers=Vector.tabulate(c.layersPerBlock+1) { j =>
           val skip=skips.remove(skips.size-1)
-          val l=layer(prefix,j,current+skip,out,c.upAttention(i))
+          val l=layer(prefix,j,current+skip,out,c.upAttention(i),c.channels.size-1-i)
           current=out;l
         }
         val sample=if i==c.channels.size-1 then None else
