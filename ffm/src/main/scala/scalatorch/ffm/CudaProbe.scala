@@ -5,7 +5,7 @@ import java.lang.foreign.ValueLayout.{ADDRESS, JAVA_INT, JAVA_LONG}
 import java.nio.charset.StandardCharsets
 import scala.util.Using
 
-/** Linux 64-bit driver-only feasibility probes; not a Tensor CUDA backend. */
+/** Windows/Linux 64-bit driver-only feasibility probes; not a Tensor CUDA backend. */
 object CudaProbe:
   final case class Result(driverVersion: Int, deviceName: String, values: Array[Float])
 

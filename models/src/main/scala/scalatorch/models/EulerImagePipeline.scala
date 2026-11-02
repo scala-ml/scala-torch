@@ -23,7 +23,8 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
   /** Noise is unscaled standard-normal data; supplied noise overrides seed. Guidance is enabled above one. */
   def generate(request: DiffusionImageRequest,schedule: EulerSchedule,
       noise: Option[Tensor[Float]]=None,onProgress: DiffusionImageProgress => Unit=_ => (),
-      cancelled: () => Boolean=() => false): Tensor[Float] = Autograd.noGrad {
+      cancelled: () => Boolean=() => false,
+      prediction: DiffusionPrediction=DiffusionPrediction.Epsilon): Tensor[Float] = Autograd.noGrad {
     def checkCancelled(): Unit =
       if cancelled() || Thread.currentThread().isInterrupted then throw new CancellationException("image generation cancelled")
     checkCancelled()
@@ -51,7 +52,7 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
       Tensor.fromFloats(Array.fill(latentShape.numel.toInt)(random.nextGaussian().toFloat),latentShape)
     }
     var latent=Variable(initial,requiresGrad=false)*schedule.initialNoiseSigma.toFloat
-    val scheduler=EulerScheduler(schedule,maxElements=maxLatentElements)
+    val scheduler=EulerScheduler(schedule,prediction,maxElements=maxLatentElements)
     for i <- schedule.timesteps.indices do
       checkCancelled()
       val input=scheduler.scaleModelInput(i,latent)

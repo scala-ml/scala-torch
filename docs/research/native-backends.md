@@ -18,7 +18,29 @@ Official references used for ABI and execution semantics:
 
 ## Scope and outstanding work
 
-This is a correctness/ownership spike, not the production CUDA Tensor backend. Every probe invocation loads/allocates again; bindings are not yet cached. The one-output-per-thread GEMM is deliberately simple and does not replace cuBLAS, tiling, mixed precision, or performance measurements. Native CPU BLAS and cuBLAS loading remain unverified. Windows support is also unimplemented.
+This is a correctness/ownership spike, not the production CUDA Tensor backend. Every probe invocation loads/allocates again; bindings are not yet cached. The one-output-per-thread GEMM is deliberately simple and does not replace cuBLAS, tiling, mixed precision, or performance measurements. Native CPU BLAS and cuBLAS loading remain unverified.
+
+The shared driver loader now supports 64-bit Windows (`nvcuda.dll`) and Linux
+(`libcuda.so.1`). On Windows 11 / Oracle Java 25.0.5 / NVIDIA driver 610.88,
+the existing real-device probe first reproduced the Linux-only rejection
+(two failures), then passed all three cases after the loader correction.
+The full FFM run passed all 35 tests with `SCALATORCH_CUDA_TESTS=1`, including
+resident tensors, ownership, attention, gradients and AdamW. Linux was not rerun
+for this correction; its library name and driver calls are unchanged.
+
+With sbt 2 thin-client mode, environment variables come from the server process.
+After changing the CUDA gate in PowerShell, restart the server before testing:
+
+```powershell
+sbt shutdown
+$env:SCALATORCH_CUDA_TESTS = "1"
+sbt "ffm/testOnly *"
+```
+
+Check actual test output for failures and skips: this Windows thin client returned
+exit code zero even for the deliberately failing reproduction. Neither successful
+CUDA primitives nor library tests establish practical CUDA diffusion or NUI's
+Python removal.
 
 The public Tensor is still CPU-only. Persistent device storage is now implemented as described below. Backend dispatch, asynchronous API lifetime rules, capability detection, failure injection, and leak accounting remain open. Real successful resource release is observed through successful probe completion; exhaustive cleanup under driver failure has not been proven.
 

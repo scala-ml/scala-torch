@@ -13,7 +13,8 @@ final class DiffusionNoiseSchedule private (val betas: Vector[Double],val sigmas
   def euler(steps: Int,spacing: DiffusionTimestepSpacing=DiffusionTimestepSpacing.Linspace,
       stepsOffset: Int=0): EulerSchedule =
     require(steps>0 && steps<=betas.size,"invalid Euler inference step count")
-    require(stepsOffset==0 || spacing==DiffusionTimestepSpacing.Leading,"offset applies only to leading timesteps")
+    // Checkpoints retain steps_offset when switching samplers/spacing. Only
+    // leading timesteps consume it; linspace and trailing ignore it.
     val count=betas.size
     val times=Vector.tabulate(steps) { i =>
       val t: Double=spacing match

@@ -5,6 +5,13 @@ import scalatorch.autograd.Variable
 
 class EulerSchedulerSuite extends munit.FunSuite:
   private def v(xs: Float*)=Variable(Tensor.fromFloats(xs.toArray,Shape.from(Seq(xs.size))))
+  test("checkpoint steps offset applies only to leading spacing") {
+    val noise=DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true)
+    for spacing <- Vector(DiffusionTimestepSpacing.Linspace,DiffusionTimestepSpacing.Trailing) do
+      assertEquals(noise.euler(4,spacing,1),noise.euler(4,spacing,0))
+    assertEquals(noise.euler(4,DiffusionTimestepSpacing.Leading,1).timesteps,
+      Vector(751f,501f,251f,1f))
+  }
   test("beta products determine sigma and interpolation with explicit spacing") {
     val noise=DiffusionNoiseSchedule.fromBetas(Vector(.2,.25))
     assertEqualsDouble(noise.sigmas(0),.5,1e-14)

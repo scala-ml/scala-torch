@@ -8,7 +8,7 @@ import scala.util.Using
 private[ffm] final class CudaDriver private (
     val arena: Arena, register: (() => Unit) => Unit
 ):
-  private val lookup = SymbolLookup.libraryLookup("libcuda.so.1", arena)
+  private val lookup = SymbolLookup.libraryLookup(CudaDriver.libraryName, arena)
   private val linker = Linker.nativeLinker()
   def call(name: String, layouts: Seq[MemoryLayout], args: AnyRef*): Unit =
     val symbol = lookup.find(name).orElseThrow(() => UnsatisfiedLinkError(s"CUDA symbol missing: $name"))
@@ -44,10 +44,15 @@ private[ffm] final class CudaDriver private (
     out.toArray(JAVA_FLOAT)
 
 private[ffm] object CudaDriver:
+  private def libraryName: String =
+    val os = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT)
+    require(ADDRESS.byteSize() == 8, "CUDA requires a 64-bit JVM")
+    if os.startsWith("windows") then "nvcuda.dll"
+    else if os == "linux" then "libcuda.so.1"
+    else throw IllegalArgumentException(s"CUDA requires Windows or Linux, got $os")
+
   def withDevice[A](index: Int)(body: (CudaDriver, Int, String) => A): A =
     require(index >= 0, "negative device index")
-    require(System.getProperty("os.name").toLowerCase.contains("linux") && ADDRESS.byteSize() == 8,
-      "probe currently supports Linux 64-bit only")
     Using.Manager { use =>
       val arena = use(Arena.ofConfined())
       val driver = new CudaDriver(arena, action => {

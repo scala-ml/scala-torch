@@ -1,6 +1,127 @@
 # Handoff — 2026-11-03
 
-## Stop point and user direction
+## Windows continuation (2026-11-03)
+
+`TinyDiffusionRun` now accepts optional trailing `[seed [euler-config.json [steps]]]`
+arguments. It validates the explicit Euler config before loading weights and
+forwards both schedule and prediction to the image pipeline. With no config,
+the original four-step profile remains the default. This does not auto-convert
+the tiny checkpoint's DDIM configuration.
+
+Windows CLI verification used prompt `cat`, seed 42, four steps, and an explicit
+Euler JSON with 1000 training steps, scaled-linear betas 0.00085 to 0.012,
+epsilon prediction, linspace spacing and steps_offset=1. The output
+`.superpowers/outputs/windows-config-euler-42.png` exactly matches the prior
+fixed-profile PNG: SHA256
+`808c2836dfc16dca4bdaf9f9b83a8d839a60b74134b62c72944007cd428a6a32`.
+This is a tiny CPU pipeline check, not practical image-quality evidence.
+
+Euler JSON loading is now implemented as `EulerConfig.read(path)` /
+`EulerConfig.fromJson(json)`. It validates bounded UTF-8 JSON with duplicate
+rejection, linear/scaled-linear or explicit trained betas, prediction and spacing.
+`config.scheduler(steps)` returns both schedule and prediction. Image callers use:
+
+```scala
+val scheduler = EulerConfig.read(configPath).scheduler(steps)
+val image = pipeline.generate(request, scheduler.schedule, prediction = scheduler.prediction)
+```
+
+Unsupported sigma transformations/interpolation/zero-SNR rescaling and unknown
+fields reject explicitly. This API loads Euler configs, not arbitrary scheduler
+families: the downloaded tiny pipeline's DDIM config requires an explicit future
+conversion layer matching NUI's sampler selection. That conversion and NUI's
+default DPM++/Karras remain open. Config-file tests also cover malformed UTF-8,
+size bounds, trained coefficients, duplicate keys and unsupported semantics.
+
+Image prediction follow-up: `EulerImagePipeline.generate` now accepts an explicit
+`prediction: DiffusionPrediction` (default Epsilon) and forwards it to Euler.
+Previously the image path always used epsilon even though the scheduler supported
+other modes. The public tiny-model test confirms exact default/explicit-epsilon
+replay and finite, different output when selecting VPrediction. This is parameter
+plumbing coverage, not a quality/parity claim for a v-prediction-trained model.
+EulerSchedulerSuite + PretrainedVaeSuite: **19 passed, 0 failed, 0 skipped** with
+the pinned external CLIP/U-Net/VAE configured. Scheduler JSON loading remains open.
+
+User constraint: create a dedicated branch before changing NUI. Its current
+`main` checkout was rechecked clean; no NUI files have been modified.
+
+Scheduler follow-up: the pinned tiny checkpoint carries `steps_offset=1`.
+NUI `build_scheduler` preserves this when changing spacing. Euler now ignores
+this offset for linspace/trailing, applying it only to leading, consistent with
+the upstream Euler scheduler. A regression test failed on the old rejection,
+then the Euler/image suites passed all 7 tests after correction. Config-file
+loading itself remains to be implemented. Reference:
+https://github.com/huggingface/diffusers/blob/v0.25.0/src/diffusers/schedulers/scheduling_euler_discrete.py
+
+The user has resumed the goal in `C:\Users\Mizushima\dev\scala-torch`, targeting
+`C:\Users\Mizushima\dev\stablediffusion-nui`. The stop instruction below is
+historical and superseded by that explicit continuation. NUI already launches
+as a standalone application; the goal is to replace its internal Python
+dependency while preserving its current features, not merely make it launch.
+NUI remains clean at d9f13ea; no integration has been performed yet.
+
+Windows validation found and corrected two portability defects:
+
+- Shared CUDA driver loading rejected Windows before calling the driver.
+  It now selects `nvcuda.dll` on Windows and `libcuda.so.1` on Linux, requiring
+  a 64-bit JVM. Existing real-device probe: two reproducible failures before,
+  three passes after. Full FFM suite: 35 passed with the CUDA gate enabled.
+- `core.autocrlf=true` changed pinned text-fixture bytes and broke SHA256
+  verification in CLIP/tokenizer/U-Net/VAE tests. `.gitattributes` now disables
+  conversion for test resources. Existing working-copy resource CRLFs were
+  restored to the repository's LF bytes; expected hashes were not changed.
+
+The machine has Windows 11, Oracle Java 25.0.5 and NVIDIA driver 610.88.
+The user reports installing the Windows CUDA driver. Use one sbt process at
+a time. The sbt 2 thin server retains its original environment: restart it
+after changing `SCALATORCH_CUDA_TESTS`. Its client returned zero even on failing
+tests, so inspect test results, not just the process exit code. Multi-task
+commands must use one quoted semicolon-separated argument. `testOnly *`
+forces actual test execution rather than the `testQuick` cache.
+
+Final current-tree Windows regression: **326 passed, 0 failed, 23 skipped**.
+Per-module passed/skipped: core 19/0, cpu 15/0, ffm 35/0, autograd 74/0,
+io 16/1, nn 43/0, models 124/22. All final XML reports have zero failures/errors.
+The IO skip requires Linux `/proc/self/fd`; 22 model cases need external pinned
+checkpoints absent from this Windows checkout. Bundled independent CLIP,
+tokenizer, U-Net and VAE fixtures did run after byte restoration. Public-model
+prompt-to-image/cancellation gates remain unverified here. Core was rerun with
+`set core / Test / parallelExecution := false; core/testOnly *` because its
+parallel aggregate/report output undercounted executed cases (19 serial passes).
+Other modules ran with `testOnly *`, real CUDA enabled through the server's
+environment. `git diff --check` and staged diff checks are clean.
+
+Next: checkpoint scheduler configuration and NUI prompt semantics, then native
+worker integration through the existing protocol boundary. Windows GPU primitive
+coverage does not establish a CUDA diffusion backend or Python-free NUI.
+
+### Public image-model verification on Windows
+
+The next continuation downloaded the eight CLIP/U-Net/VAE/tokenizer files from
+`hf-internal-testing/tiny-sd-pipe` at the pinned revision
+`39f7e1819d772fbb8dd7f2aa3da8e2fc5a9bd917` into
+`.superpowers/models/tiny-sd-pipe`. This is ignored local test data.
+The existing suites verify checkpoint hashes before their public parity gates.
+
+`PretrainedClipSuite`, `PretrainedUNetSuite`, `PretrainedVaeSuite` and
+`ClipFastTokenizerSuite`: **32 passed, 0 failed, 0 skipped** on Windows.
+This includes public weights, independent Candle outputs, prompt effects,
+seed/noise replay, progress, cancellation and recovery. The earlier statement
+that those image gates are unverified on Windows is now superseded. This does
+not verify practical image quality, SD1.5/SDXL, GPU diffusion, or NUI integration.
+The remaining external Llama/SmolLM2 gates were not rerun.
+
+To reproduce in PowerShell, first shut down the existing sbt thin server, then:
+
+```powershell
+$modelRoot = 'C:/Users/Mizushima/dev/scala-torch/.superpowers/models/tiny-sd-pipe'
+$env:JAVA_TOOL_OPTIONS = "-Dscalatorch.clip.dir=$modelRoot/text_encoder -Dscalatorch.unet.dir=$modelRoot/unet -Dscalatorch.vae.dir=$modelRoot/vae"
+sbt "models/testOnly scalatorch.models.PretrainedClipSuite scalatorch.models.PretrainedUNetSuite scalatorch.models.PretrainedVaeSuite scalatorch.models.ClipFastTokenizerSuite"
+```
+
+Git identity is now configured. The Windows/config changes are ready for the verified checkpoint commit.
+
+## Historical stop point and user direction
 
 The user ended the previous autonomous implementation goal and requested:
 write the goals/current state into Markdown, commit, and finish. **Stop after

@@ -296,6 +296,11 @@ class PretrainedVaeSuite extends munit.FunSuite:
     val request=DiffusionImageRequest("a red cat","a blue boat",10,6,42L,guidanceScale=3f)
     val progress=scala.collection.mutable.ArrayBuffer.empty[Int]
     val image=pipeline.generate(request,schedule,onProgress=p => progress+=p.completedSteps)
+    assertEquals(image.toFloatArray.toVector,
+      pipeline.generate(request,schedule,prediction=DiffusionPrediction.Epsilon).toFloatArray.toVector)
+    val velocityImage=pipeline.generate(request,schedule,prediction=DiffusionPrediction.VPrediction)
+    assert(velocityImage.toFloatArray.forall(_.isFinite))
+    assert(image.toFloatArray.zip(velocityImage.toFloatArray).exists((a,b) => math.abs(a-b)>1e-5))
     assertEquals(progress.toVector,Vector(1,2))
     assertEquals(image.shape,Shape.from(Seq(1,3,6,10)))
     assert(image.toFloatArray.forall(_.isFinite))
