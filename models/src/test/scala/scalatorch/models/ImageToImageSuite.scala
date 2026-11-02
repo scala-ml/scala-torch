@@ -84,6 +84,12 @@ class ImageToImageSuite extends munit.FunSuite:
       assert((0 until 3).exists(c => (0 until 8).exists(y => (4 until 8).exists(x =>
         actual(c*64+y*8+x)!=original(c*64+y*8+x)))))
       assertEquals(maskedOutput.toFloatArray.toVector,maskedReplay.toFloatArray.toVector)
+      if sys.env.get("SCALATORCH_CUDA_TESTS").contains("1") then
+        val gpu=new EulerImagePipeline(tokenizer,clip,unet,vae,
+          vaeExecution=VaeExecution.Cuda(offloadWeights=true),unetExecution=UNetExecution.Cuda(offloadWeights=true))
+        val cudaOutput=if dpm then gpu.generateDpm(request,layout,Some(noise),source=Some(masked))
+          else gpu.generate(request,schedule.euler(2),Some(noise),source=Some(masked))
+        cudaOutput.toFloatArray.zip(actual).foreach((a,b) => assertEqualsDouble(a,b,2e-5))
     intercept[IllegalArgumentException](DiffusionImageSource(input,.5,Some(posterior),Some(mask),None))
     intercept[IllegalArgumentException](DiffusionImageSource(input,.5,Some(posterior),None,Some(input)))
     intercept[IllegalArgumentException](pipeline.generate(request,schedule.euler(2),source=Some(

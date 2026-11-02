@@ -36,7 +36,8 @@ regions while preserving the source image outside the mask.
 ## Design
 
 Worker preprocessing reads the RGB source and grayscale mask, applies inversion,
-the existing resize geometry and a bounded separable Gaussian blur. Initial scope
+the existing resize geometry and three bounded separable box-blur passes that
+approximate a Gaussian blur. Initial scope
 supports the default original-pixel fill and rejects other fill modes and masked
 full-resolution crop with an actionable unsupported error. The pipeline accepts
 an optional white-means-repaint mask and original image alongside the existing

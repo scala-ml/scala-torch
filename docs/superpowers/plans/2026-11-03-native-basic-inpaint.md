@@ -40,7 +40,7 @@
 - [x] Run `sbt "models/testOnly *ImageToImageSuite"`; observed the new API fail compilation before implementation.
 - [x] Implement validation, nearest mask downsampling, noised-source blending after every scheduler step, and final pixel-space compositing.
 - [x] Run `models/testOnly *NativeInpaintSuite *NativeImg2ImgSuite *ImageToImageSuite *SdxlImagePipelineSuite *CudaImagePipelineSuite`; 10 passed, 0 failed, with CUDA enabled.
-- [ ] Commit the pipeline milestone.
+- [x] Commit the pipeline milestone (`75a2225`).
 
 ### Task 2: Worker mask preprocessing and safe request handling
 
@@ -51,11 +51,11 @@
 
 **Interfaces:** `NativeInpaint.prepare(source: BufferedImage, mask: BufferedImage, width: Int, height: Int, resizeMode: Int, blurRadius: Int, invert: Boolean, cancelled: () => Boolean): NativeInpaint.Prepared`; `Prepared` contains masked RGB, original RGB, and CPU Float32 mask tensor.
 
-- [ ] Change the worker test from expecting active-mask rejection to requiring a successful masked request and exact unmasked PNG pixels.
-- [ ] Run `sbt "models/testOnly *NativeImg2ImgSuite"`; confirm it fails because active masks are rejected.
-- [ ] Load the mask with existing bounded image I/O, apply inversion, existing NUI resize geometry and a bounded separable Gaussian blur; accept only fill=original and full-res=false for this slice.
-- [ ] Pass mask/original image into `DiffusionImageSource`; explicitly reject unsupported nine-channel models, full-res crop and non-original fill.
-- [ ] Run the worker test plus existing `NativeImg2ImgSuite` cases and verify denied cancellation leaves no published files.
+- [x] Change the worker test from expecting active-mask rejection to requiring a successful masked request and exact unmasked PNG pixels.
+- [x] Run `sbt "models/testOnly *NativeImg2ImgSuite"`; observed active-mask rejection before implementation.
+- [x] Load the mask with existing bounded image I/O, apply inversion, existing NUI resize geometry and three separable box-blur passes approximating Gaussian blur; accept only fill=original and full-res=false for this slice.
+- [x] Pass mask/original image into `DiffusionImageSource`; explicitly reject unsupported nine-channel models, full-res crop and non-original fill.
+- [x] Run the worker and pipeline suites with CUDA enabled; 10 passed, 0 failed. Worker assertions include denied cancellation leaving no published files.
 - [ ] Commit the worker milestone.
 
 ### Task 3: NUI Generator integration and branch documentation

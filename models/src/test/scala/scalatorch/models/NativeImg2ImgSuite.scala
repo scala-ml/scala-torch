@@ -1,10 +1,11 @@
 package scalatorch.models.worker
 
 import java.nio.file.{Files,Path}
+import java.awt.image.BufferedImage
 import javax.imageio.ImageIO
 
 class NativeImg2ImgSuite extends munit.FunSuite:
-  test("worker img2img decodes resizes generates replays and rejects active inpainting") {
+  test("worker img2img decodes resizes generates replays and preserves unmasked inpaint pixels") {
     import NativeJson.*
     val configured=sys.props.get("scalatorch.clip.dir")
     assume(configured.nonEmpty,"public tiny model required")
@@ -13,8 +14,16 @@ class NativeImg2ImgSuite extends munit.FunSuite:
     val config=output.resolve("scheduler.json")
     Files.writeString(config,"""{"num_train_timesteps":1000,"beta_start":0.00085,"beta_end":0.012,"beta_schedule":"scaled_linear"}""")
     val input=output.resolve("input.png")
+    val inpaintSource=output.resolve("inpaint-source.png")
+    val maskFile=output.resolve("mask.png")
     val stream=this.getClass.getResourceAsStream("/image-input/orientation-6.png")
     try Files.write(input,stream.readAllBytes()) finally stream.close()
+    val original=new BufferedImage(10,6,BufferedImage.TYPE_INT_RGB)
+    val maskImage=new BufferedImage(10,6,BufferedImage.TYPE_BYTE_GRAY)
+    for y <- 0 until 6; x <- 0 until 10 do
+      original.setRGB(x,y,if x<5 then 0xff204060 else 0xffc08040)
+      maskImage.setRGB(x,y,if x<5 then 0xff000000 else 0xffffffff)
+    ImageIO.write(original,"png",inpaintSource.toFile);ImageIO.write(maskImage,"png",maskFile.toFile)
     try
       val backend=new NativeDiffusionBackend(root,config)
       val progress=scala.collection.mutable.ArrayBuffer.empty[Map[String,NativeJson]]
@@ -47,15 +56,30 @@ class NativeImg2ImgSuite extends munit.FunSuite:
       def names()=
         val files=Files.list(output)
         try files.toArray.toVector finally files.close()
-      val before=names().toSet
       intercept[NativeBackendError](run("txt2img",request("Euler",imageParams)))
-      intercept[NativeBackendError](run("img2img",request("Euler",imageParams.updated("mask",Str(input.toString)))))
+      val inpaintParams=imageParams.updated("init_image",Str(inpaintSource.toString)).updated("resize_mode",Number(0))
+        .updated("mask",Str(maskFile.toString)).updated("mask_blur",Number(0))
+      val inpaintResult=run("img2img",request("Euler",inpaintParams))
+      val inpaintPath=Path.of(inpaintResult("images").asInstanceOf[Arr].values.head.asInstanceOf[Obj].fields("path").asInstanceOf[Str].value)
+      val inpainted=ImageIO.read(inpaintPath.toFile)
+      assertEquals(inpainted.getRGB(0,0)&0xffffff,original.getRGB(0,0)&0xffffff)
+      assertEquals(inpainted.getRGB(4,5)&0xffffff,original.getRGB(4,5)&0xffffff)
+      assert((5 until 10).exists(x => (0 until 6).exists(y => inpainted.getRGB(x,y)!=original.getRGB(x,y))))
+      val beforeUnsupported=names().toSet
+      intercept[NativeBackendError](run("img2img",request("Euler",inpaintParams.updated("inpaint_full_res",Bool(true)))))
+      intercept[NativeBackendError](run("img2img",request("Euler",inpaintParams.updated("inpainting_fill",Number(0)))))
+      intercept[IllegalArgumentException](run("img2img",request("Euler",inpaintParams.updated("mask",Str(output.resolve("missing-mask.png").toString)))))
+      intercept[IllegalArgumentException](run("img2img",request("Euler",inpaintParams.updated("mask_blur",Number(65)))))
+      assertEquals(names().toSet,beforeUnsupported)
       intercept[IllegalArgumentException](run("img2img",request("Euler",imageParams.updated("init_image",Str("")))))
       intercept[IllegalArgumentException](run("img2img",request("Euler",imageParams.updated("denoising_strength",Number(2)))))
       val denied=new NativeWorkContext(() => false,() => false,(_,_) => ())
       intercept[java.util.concurrent.CancellationException](backend.execute(
         NativeRequest("denied","img2img",request("Euler",imageParams),None),denied))
-      assertEquals(names().toSet,before)
+      val beforeCancelled=names().toSet
+      intercept[java.util.concurrent.CancellationException](backend.execute(
+        NativeRequest("denied-mask","img2img",request("Euler",inpaintParams),None),denied))
+      assertEquals(names().toSet,beforeCancelled)
     finally
       val files=Files.list(output)
       try files.forEach(p => {Files.delete(p);()}) finally files.close()

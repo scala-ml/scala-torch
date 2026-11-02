@@ -107,6 +107,10 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
     val n=number(p,key,BigDecimal(default))
     require(n.isValidInt,s"$key must be an integer")
     n.toInt
+  private def bool(p: Map[String,NativeJson],key: String,default: Boolean): Boolean=p.get(key) match
+    case None => default
+    case Some(Bool(value)) => value
+    case _ => throw IllegalArgumentException(s"$key must be boolean")
 
   def execute(request: NativeRequest,context: NativeWorkContext): Map[String,NativeJson]=
     val p=request.params
@@ -247,11 +251,30 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           val fields=g.get("img2img") match
             case Some(Obj(fields)) => fields
             case _ => throw IllegalArgumentException("img2img must be an object")
-          keys(NativeGenerationDefaults.strip(fields,NativeGenerationDefaults.inpainting),Set("init_image","denoising_strength","resize_mode"))
+          val inpaintKeys=Set("mask","mask_blur","inpainting_fill","inpaint_full_res","inpaint_full_res_padding","inpainting_mask_invert")
+          keys(NativeGenerationDefaults.strip(fields--inpaintKeys,NativeGenerationDefaults.inpainting),Set("init_image","denoising_strength","resize_mode"))
           val strength=number(fields,"denoising_strength",BigDecimal("0.75")).toDouble
           require(strength.isFinite && strength>=0 && strength<=1,"denoising_strength must be between 0 and 1")
           val mode=integer(fields,"resize_mode",0)
           require(mode>=0 && mode<=2,"resize_mode must be 0, 1 or 2")
+          val maskName=fields.get("mask") match
+            case None | Some(Null) | Some(Str("")) => None
+            case Some(Str(value)) => Some(value)
+            case _ => throw IllegalArgumentException("mask must be a path or null")
+          val maskBlur=integer(fields,"mask_blur",4)
+          require(maskBlur>=0 && maskBlur<=64,"mask_blur must be between 0 and 64")
+          val fill=integer(fields,"inpainting_fill",1)
+          require(fill>=0 && fill<=3,"inpainting_fill must be between 0 and 3")
+          val fullRes=bool(fields,"inpaint_full_res",false)
+          val fullResPadding=integer(fields,"inpaint_full_res_padding",32)
+          require(fullResPadding>=0 && fullResPadding<=256,"inpaint_full_res_padding must be between 0 and 256")
+          val invert=bool(fields,"inpainting_mask_invert",false)
+          if maskName.isEmpty && (maskBlur!=4 || fill!=1 || fullRes || fullResPadding!=32 || invert) then
+            unsupported("inpainting options require an active mask")
+          if maskName.nonEmpty then
+            if fullRes then unsupported("full-resolution masked crop is not implemented")
+            if fullResPadding!=32 then unsupported("custom full-resolution mask padding is not implemented")
+            if fill!=1 then unsupported("only original-pixel inpainting fill is implemented")
           val name=str(fields,"init_image","")
           require(name.nonEmpty,"init_image is required")
           val width=imageRequest.width;val height=imageRequest.height
@@ -259,18 +282,27 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           context.checkCancelled()
           val input=DiffusionImageInput.readRgb(Path.of(name))
           context.checkCancelled()
-          val resized=DiffusionImageResize(input,width,height,mode)
+          val source=maskName match
+            case Some(maskPath) =>
+              if pipeline.unet.convIn.weight.data.shape.dims(1)!=pipeline.vae.config.latentChannels then
+                unsupported("nine-channel inpainting U-Nets are not implemented")
+              val mask=DiffusionImageInput.readRgb(Path.of(maskPath))
+              val prepared=NativeInpaint.prepare(input,mask,width,height,mode,maskBlur,invert,context.cancelled)
+              Some(DiffusionImageSource(prepared.image,strength,mask=Some(prepared.mask),originalImage=Some(prepared.originalImage)))
+            case None =>
+              val resized=DiffusionImageResize(input,width,height,mode)
+              val plane=width*height
+              val values=new Array[Float](plane*3)
+              for y <- 0 until height do
+                context.checkCancelled()
+                for x <- 0 until width do
+                  val rgb=resized.getRGB(x,y)
+                  for channel <- 0 until 3 do
+                    values(channel*plane+y*width+x)=((rgb >>> (16-8*channel))&255)/255f*2f-1f
+              Some(DiffusionImageSource(scalatorch.Tensor.fromFloats(values,
+                scalatorch.Shape.from(Seq(1L,3L,height.toLong,width.toLong))),strength))
           context.checkCancelled()
-          val plane=width*height
-          val values=new Array[Float](plane*3)
-          for y <- 0 until height do
-            context.checkCancelled()
-            for x <- 0 until width do
-              val rgb=resized.getRGB(x,y)
-              for channel <- 0 until 3 do
-                values(channel*plane+y*width+x)=((rgb >>> (16-8*channel))&255)/255f*2f-1f
-          Some(DiffusionImageSource(scalatorch.Tensor.fromFloats(values,
-            scalatorch.Shape.from(Seq(1L,3L,height.toLong,width.toLong))),strength))
+          source
         val sampler=str(g,"sampler_name","DPM++ 2M")
         val requestedSchedule=str(g,"scheduler","Automatic")
         val schedule=if requestedSchedule=="Automatic" then (if sampler=="DPM++ 2M" then "Karras" else "Uniform") else requestedSchedule
