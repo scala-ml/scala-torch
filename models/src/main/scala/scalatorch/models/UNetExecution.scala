@@ -15,22 +15,25 @@ sealed trait UNetExecution:
   def offloadWeights: Boolean=false
   def device: String
   private[models] def withPredictor[A](model: ConditionalUNet2d,conditional: Tensor[Float],
-      unconditional: Option[Tensor[Float]],cancelled: () => Boolean)(body: UNetPredictor => A): A
+      unconditional: Option[Tensor[Float]],cancelled: () => Boolean,
+      positiveAdded: Option[DiffusionAddedConditioning]=None,negativeAdded: Option[DiffusionAddedConditioning]=None)(body: UNetPredictor => A): A
 
 object UNetExecution:
   case object Cpu extends UNetExecution:
     val device="cpu"
     private[models] def withPredictor[A](model: ConditionalUNet2d,conditional: Tensor[Float],
-        unconditional: Option[Tensor[Float]],cancelled: () => Boolean)(body: UNetPredictor => A): A =
+        unconditional: Option[Tensor[Float]],cancelled: () => Boolean,
+        positiveAdded: Option[DiffusionAddedConditioning]=None,negativeAdded: Option[DiffusionAddedConditioning]=None)(body: UNetPredictor => A): A =
       VaeExecution.checkCancelled(cancelled)
+      require(unconditional.isDefined || negativeAdded.isEmpty,"negative addition requires negative context")
       body(new UNetPredictor:
         def apply(sample: Tensor[Float],timesteps: Tensor[Float],guidance: Float): Tensor[Float] = Autograd.noGrad {
           VaeExecution.checkCancelled(cancelled)
           require(guidance.isFinite && guidance>=0,"invalid guidance scale")
-          val positive=model(Variable(sample),timesteps,Variable(conditional))
+          val positive=model(Variable(sample),timesteps,Variable(conditional),positiveAdded)
           VaeExecution.checkCancelled(cancelled)
           val result=unconditional.fold(positive) { context =>
-            val negative=model(Variable(sample),timesteps,Variable(context))
+            val negative=model(Variable(sample),timesteps,Variable(context),negativeAdded)
             VaeExecution.checkCancelled(cancelled)
             ClassifierFreeGuidance.combine(negative,positive,guidance)
           }
@@ -42,23 +45,30 @@ object UNetExecution:
     require(deviceIndex>=0 && maxBytes>0,"invalid CUDA U-Net device or memory budget")
     val device=s"cuda:$deviceIndex"
     private[models] def withPredictor[A](model: ConditionalUNet2d,conditional: Tensor[Float],
-        unconditional: Option[Tensor[Float]],cancelled: () => Boolean)(body: UNetPredictor => A): A =
+        unconditional: Option[Tensor[Float]],cancelled: () => Boolean,
+        positiveAdded: Option[DiffusionAddedConditioning]=None,negativeAdded: Option[DiffusionAddedConditioning]=None)(body: UNetPredictor => A): A =
       VaeExecution.checkCancelled(cancelled)
+      require(conditional.shape.rank==3 && unconditional.forall(_.shape.rank==3),"U-Net contexts must be rank three")
+      require(unconditional.isDefined || negativeAdded.isEmpty,"negative addition requires negative context")
+      val positiveFeatures=model.addedFeatures(conditional.shape.dims.head,positiveAdded)
+      val negativeFeatures=unconditional.flatMap(c => model.addedFeatures(c.shape.dims.head,negativeAdded))
       CudaSession.withDevice(deviceIndex,maxBytes) { session =>
         Using.Manager { use =>
           val unet=use(CudaUNet.upload(session,model,cancelled,offloadWeights))
           val positiveContext=use(session.upload(conditional))
           val negativeContext=unconditional.map(x => use(session.upload(x)))
+          val positiveAddition=positiveFeatures.map(x => use(session.upload(x)))
+          val negativeAddition=negativeFeatures.map(x => use(session.upload(x)))
           body(new UNetPredictor:
             def apply(sample: Tensor[Float],timesteps: Tensor[Float],guidance: Float): Tensor[Float] =
               VaeExecution.checkCancelled(cancelled)
               require(guidance.isFinite && guidance>=0,"invalid guidance scale")
               Using.Manager { temporary =>
                 val input=temporary(session.upload(sample))
-                val positive=temporary(unet(input,timesteps,positiveContext))
+                val positive=temporary(unet.applyPrepared(input,timesteps,positiveContext,positiveAddition))
                 VaeExecution.checkCancelled(cancelled)
                 val predicted=negativeContext.fold(positive) { context =>
-                  val negative=temporary(unet(input,timesteps,context))
+                  val negative=temporary(unet.applyPrepared(input,timesteps,context,negativeAddition))
                   VaeExecution.checkCancelled(cancelled)
                   // Preserve CPU subtraction and CFG operation ordering and rounding.
                   val negated=temporary(session.scale(negative,-1f))

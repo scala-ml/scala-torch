@@ -225,17 +225,29 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       result
     }
 
-  def unet(input: CudaTensor,model: ConditionalUNet2d,timesteps: Tensor[Float],context: CudaTensor): CudaTensor =
+  def unet(input: CudaTensor,model: ConditionalUNet2d,timesteps: Tensor[Float],context: CudaTensor,
+      added: Option[CudaTensor]=None): CudaTensor =
     check()
-    require(model.additionEmbedding.isEmpty,"CUDA U-Net text-time conditioning is not yet implemented")
+    require(added.isDefined==model.additionEmbedding.isDefined,"U-Net additional conditioning presence mismatch")
+    val features=model.timestepFeatures(session.shape(input),timesteps,session.shape(context))
+    added.foreach { a =>
+      require(session.shape(a)==Shape.from(Seq(session.shape(input).dims.head,
+        weightShape(model.additionEmbedding.get.linear1.weight).dims(1))),"U-Net added feature shape mismatch")
+    }
     // Small deterministic sinusoidal conditioning constants are prepared on CPU.
     // Learned timestep projections and every image/context operation run on CUDA.
-    val features=model.timestepFeatures(session.shape(input),timesteps,session.shape(context))
     scope { use =>
       val f=use(session.upload(features))
       val first=use(linear(f,model.timeEmbedding.linear1));f.close()
       val activated=use(session.silu(first));first.close()
-      val time=use(linear(activated,model.timeEmbedding.linear2));activated.close()
+      val baseTime=use(linear(activated,model.timeEmbedding.linear2));activated.close()
+      val time=model.additionEmbedding.fold(baseTime) { embedding =>
+        val projected=use(linear(added.get,embedding.linear1))
+        val activatedAddition=use(session.silu(projected));projected.close()
+        val embedded=use(linear(activatedAddition,embedding.linear2));activatedAddition.close()
+        val result=use(session.add(baseTime,embedded));baseTime.close();embedded.close()
+        result
+      }
       var hidden=use(conv(input,model.convIn))
       val skips=scala.collection.mutable.ArrayBuffer.empty[CudaTensor]
       def saveSkip(): Unit=skips+=use(session.reshape(hidden,hidden.shape))

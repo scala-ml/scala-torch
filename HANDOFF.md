@@ -1,3 +1,32 @@
+## SDXL CUDA U-Net and retained CFG additions (2026-11-03)
+
+U-Net planTask3 implemented. CudaUNet.apply appends optional
+DiffusionAddedConditioning; CPU sinusoidal constants uploaded, learned addition
+MLP runs CUDA and addsnormal timeembedding. privateapplyPrepared accepts already
+uploadedfeatures. UNetExecution.withPredictor appends positiveAdded/negativeAdded
+defaultsNone;CUDA validates/prepares both once and retainsGPUfeatures perloop.
+Different positive/negative pooled+time values honored forCFG. ExistingSD1.5API
+defaults preserved. Invalid/missing additionsreject; callerinputsnotconsumed.
+
+CudaSdxlUNetSuite3tests: resident/offload batch1/2 independentDiffusers maxabs
+2.534e-6; CFG CPU/GPU maxabs3.04e-6;repeatpredictions,allocationfailure,
+cancellation/reuse,malformedshape/conditioning,zero remainingallocations.
+AffectedCUDA/image4suites passed13. Addedscalar-rank test firstfailedNoSuchElement,
+thenfixedexplicitrankguard;focusednew+oldCUDAU-Net suites passed6 (no skips).
+TemporaryCUDA-SDXL rejectionfrompriorcheckpoint removed;conditionsnowimplemented.
+
+NEXT plan docs/superpowers/plans/2026-11-03-sdxl-text-pipeline.md,inline:
+CLIPrawselectedstates+EOSpool/projection,dualtextNUIpromptsemantics,sharedpipeline,
+workerfamilyload/hash andNUIacceptance. Sourceinspectionfound NUI whitespace-only
+negative→zerocontext+zeropooled;Diffusers None-only behavior differs. NUIclip_skip
+1/2→rawpenultimate,no finalnorm. LegacyEOS2 override foractualtokenizerEOS when
+added IDs exceedEOS. Preserve these instead ofassuming standardpipelineparity.
+No nativefullSDXLimagegeneration or normalSDXLweights yet.
+
+ImmutableSD1.5 512px20step session80265 stillactive,lateststep14/20. Original
+11471terminal,neverresume. scala-torch sbtliveCUDA+tinySDXLprops;NUI sbtstopped,
+branchfeat/scala-torch-native-engine unchanged973e5d2. Snapshotjarsisolate livejob.
+
 ## SDXL U-Net stage loading and CPU text-time execution (2026-11-03)
 
 Plan tasks1/2implemented; inline ledger.superpowers/sdd/2026-11-03-sdxl-unet/progress.md.
