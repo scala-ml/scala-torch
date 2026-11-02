@@ -3,8 +3,22 @@ package scalatorch.nn
 import scalatorch.*
 import scala.collection.mutable
 
+private[nn] final case class OptimizerSlot(step: Long, first: Vector[Double], second: Vector[Double])
+
 abstract class Optimizer(input: Seq[Parameter]):
   protected val parameters = input.toVector.distinct.filter(_.trainable)
+  private[nn] def optimized: Vector[Parameter] = parameters
+  private[nn] def kind: String
+  private[nn] def settings: Vector[(String, Double)]
+  private[nn] def snapshot: Vector[Option[OptimizerSlot]]
+  private[nn] def restore(saved: Vector[Option[OptimizerSlot]]): Unit
+  private[nn] def validate(saved: Vector[Option[OptimizerSlot]]): Unit =
+    require(saved.size == parameters.size, "optimizer slot count mismatch")
+    saved.zip(parameters).foreach { (slot, p) => slot.foreach { s =>
+      require(s.step > 0 && s.first.size.toLong == p.data.shape.numel && s.second.size == s.first.size,
+        "invalid optimizer slot shape or counter")
+      require(s.first.forall(_.isFinite) && s.second.forall(x => x.isFinite && x >= 0), "invalid optimizer moments")
+    }}
   def zeroGrad(): Unit = parameters.foreach(_.zeroGrad())
   def step(): Unit
   protected def checked(parameter: Parameter): Option[(Array[Float], Array[Float])] = parameter.grad.map { gradient =>
@@ -20,6 +34,13 @@ abstract class Optimizer(input: Seq[Parameter]):
 final class SGD(input: Seq[Parameter], learningRate: Double, weightDecay: Double = 0.0) extends Optimizer(input):
   require(learningRate.isFinite && learningRate > 0, "invalid learning rate")
   require(weightDecay.isFinite && weightDecay >= 0, "invalid weight decay")
+  private[nn] def kind = "sgd"
+  private[nn] def settings = Vector("learningRate" -> learningRate, "weightDecay" -> weightDecay)
+  private[nn] def snapshot = Vector.fill(parameters.size)(None)
+  override private[nn] def validate(saved: Vector[Option[OptimizerSlot]]): Unit =
+    super.validate(saved)
+    require(saved.forall(_.isEmpty), "SGD has no moment slots")
+  private[nn] def restore(saved: Vector[Option[OptimizerSlot]]): Unit = validate(saved)
   def step(): Unit =
     val updates = parameters.flatMap { p => checked(p).map { (weights, grads) =>
       val next = weights.indices.map(i => (weights(i) - learningRate * (grads(i) + weightDecay * weights(i))).toFloat).toArray
@@ -34,6 +55,16 @@ final class AdamW(input: Seq[Parameter], learningRate: Double, beta1: Double = 0
   require(epsilon.isFinite && epsilon > 0 && weightDecay.isFinite && weightDecay >= 0, "invalid Adam epsilon or decay")
   private case class Moments(step: Long, first: Array[Double], second: Array[Double])
   private val state = mutable.Map.empty[Parameter, Moments]
+  private[nn] def kind = "adamw"
+  private[nn] def settings = Vector("learningRate" -> learningRate, "beta1" -> beta1, "beta2" -> beta2,
+    "epsilon" -> epsilon, "weightDecay" -> weightDecay)
+  private[nn] def snapshot = parameters.map(p => state.get(p).map(s => OptimizerSlot(s.step, s.first.toVector, s.second.toVector)))
+  private[nn] def restore(saved: Vector[Option[OptimizerSlot]]): Unit =
+    validate(saved)
+    val next = parameters.zip(saved).flatMap((p, s) => s.map(slot =>
+      p -> Moments(slot.step, slot.first.toArray, slot.second.toArray)))
+    state.clear()
+    state ++= next
   def step(): Unit =
     val updates = parameters.flatMap { p => checked(p).map { (weights, grads) =>
       val previous = state.getOrElse(p, Moments(0, new Array[Double](weights.length), new Array[Double](weights.length)))

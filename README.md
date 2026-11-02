@@ -10,7 +10,9 @@ First-order CPU Float32 autograd is available through `scalatorch.autograd.Varia
 
 Trainable `Parameter`, `Linear`, SGD and AdamW are available in `scalatorch.nn`. Case-class models use `derives Module` for nested parameter discovery, including Option/Vector fields and tied-weight deduplication. In-memory state dictionaries support strict, atomic loading.
 
-Not implemented yet: persistent training checkpoints, Embedding/norm layers, a persistent GPU Tensor backend, cuBLAS acceleration, model loading, LLM generation, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
+Persistent training checkpoints now save weights, optimizer configuration, AdamW moments/counters, and a caller-supplied step. Restore validates the whole file before changing training state; deterministic save/reload/resume matches uninterrupted training exactly.
+
+Not implemented yet: Embedding/norm layers, a persistent GPU Tensor backend, cuBLAS acceleration, public model loading, LLM generation, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
 
 ```sh
 sbt 'core / Test / testOnly scalatorch.*'
@@ -60,6 +62,14 @@ Module.loadStateDict(model, snapshot)
 ```
 
 Optimizer steps preserve gradients and reject nonfinite inputs before changing weights or Adam moments. Parameters keep their identity while replacing immutable values; backward rejects an older graph after a saved parameter changes. Explicit detach/noGrad results remain independent snapshots. The integration suite trains this MLP on XOR to MSE below `0.001`.
+
+```scala
+val path = java.nio.file.Path.of("training.stc")
+Checkpoint.save(model, optimizer, path, step = 500)
+val restoredStep = Checkpoint.load(model, optimizer, path)
+```
+
+Checkpoint restore requires matching model aliases/shapes/trainability and optimizer kind, parameter subset, and hyperparameters. Save at optimizer-step boundaries; gradients, RNG and data-loader state are not stored. This [training format](docs/research/checkpoint-format.md) is separate from the planned safetensors model loader.
 
 - [Design and roadmap](docs/superpowers/specs/2026-11-02-scala-torch-design.md)
 - [Initial implementation plan](docs/superpowers/plans/2026-11-02-tensor-foundation.md)
