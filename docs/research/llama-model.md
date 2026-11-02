@@ -10,7 +10,7 @@ Bounded duplicate-free JSON with exact integer dimensions; standard model_type=l
 
 Layer/parameter/logit/score limits are configurable through LlamaLimits, and safetensors materialization limits apply separately. Defaults are at most 512 layers, 1 billion logical unique parameters, 16777216 logit elements and 16777216 attention-score elements. These bound specific allocations/counts, not total process memory. CPU Float32 execution is currently supported.
 
-`generateIds(prompt,maxNewTokens)` uses a persistent CPU KV cache by default (`useCache=false` retains full-prefix recomputation), selects the lowest ID on equal logits and stops on configured EOS IDs. The complete requested length must fit the configured context. No tokenizer, padding mask, stochastic sampler or sharded loading is implemented yet.
+`generateIds(prompt,maxNewTokens)` uses a persistent CPU KV cache by default (`useCache=false` retains full-prefix recomputation), selects the lowest ID on equal logits and stops on configured EOS IDs. The complete requested length must fit the configured context. A [native byte-level BPE tokenizer](byte-bpe-tokenizer.md) is available separately. Chat formatting, padding masks, stochastic sampling and sharded loading are not implemented yet.
 
 ## Public checkpoint verification
 

@@ -4,7 +4,7 @@ Deep learning in Scala 3, targeting Java 25 and Python-free LLMs, training, and 
 
 Requires **Java 25, Scala 3.3.8 LTS, sbt 2.0.10**. Versions are pinned in the build.
 
-Published Llama checkpoint inference now runs in Scala: standard config + single-file safetensors loading, differentiable model composition, persistent CPU KV cache, and greedy token-ID generation. The public tiny-random Llama matches 128000 independent Rust Candle logits with maximum absolute error `5.96e-8`; cached chunks also match that reference. This verifies architecture interoperability; the random checkpoint is not a useful language model. Tokenization and useful trained-model text generation remain open.
+Published Llama checkpoint inference now runs in Scala: standard config + single-file safetensors loading, differentiable model composition, persistent CPU KV cache, and greedy token-ID generation. The public tiny-random Llama matches 128000 independent Rust Candle logits with maximum absolute error `5.96e-8`; cached chunks also match that reference. This verifies architecture interoperability; the random checkpoint is not a useful language model. A native byte-level BPE tokenizer now matches the pinned SmolLM2 tokenizer reference. Useful trained-model text generation remains open.
 
 Implemented: CPU tensors (Float32/Float64/Int64/Bool), checked shapes and views, slicing, broadcasting, Float32 add/reduction/matrix multiplication, and a numscala GEMM adapter. The FFM module includes host memory scopes, a real CUDA memory-copy probe, and a driver-level Float32 GEMM probe with owned stream/event completion.
 
@@ -135,3 +135,13 @@ Caches are inference-only, model-bound and budgeted (256MiB by default, configur
 - [Implementation evidence and remaining gates](docs/research/implementation-status.md)
 
 The target is concise Scala model authoring and Python-free real-model execution, rather than full PyTorch API compatibility.
+
+The native tokenizer supports the inspected byte-level BPE pipeline (optional individual Digits), with explicit rejection of unsupported configurations:
+
+```scala
+val tokenizer = scalatorch.models.ByteBpeTokenizer.read(java.nio.file.Path.of("/model/tokenizer.json"))
+val ids = tokenizer.encode("Hello, world!")
+val text = tokenizer.decode(ids)
+```
+
+It inserts no BOS/EOS or chat template. SmolLM2 omits some byte symbols, so arbitrary input is not guaranteed to roundtrip. See [supported semantics and public-reference test](docs/research/byte-bpe-tokenizer.md).

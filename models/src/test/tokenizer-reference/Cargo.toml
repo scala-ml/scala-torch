@@ -1,0 +1,6 @@
+[package]
+name = "scala-torch-tokenizer-reference"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+tokenizers = { version = "=0.22.1", default-features = false, features = ["fancy-regex"] }
