@@ -18,8 +18,13 @@ lazy val ffm = project.dependsOn(core).settings(common).settings(
   Compile / run / javaOptions += "--enable-native-access=ALL-UNNAMED"
 )
 lazy val autograd = project.dependsOn(cpu).settings(common)
-lazy val nn = project.dependsOn(autograd).settings(common)
-lazy val root = (project in file(".")).aggregate(core, cpu, ffm, autograd, nn).settings(
+lazy val tensorio = (project in file("io")).dependsOn(core).settings(common).settings(
+  libraryDependencies += "com.fasterxml.jackson.core" % "jackson-core" % "2.20.1"
+)
+lazy val nn = project.dependsOn(autograd, tensorio).settings(common).settings(
+  Test / unmanagedResourceDirectories += baseDirectory.value.getParentFile / "io" / "src" / "test" / "resources"
+)
+lazy val root = (project in file(".")).aggregate(core, cpu, ffm, autograd, nn, tensorio).settings(
   name := "scala-torch",
   publish / skip := true
 )
