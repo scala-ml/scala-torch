@@ -56,6 +56,10 @@ final class Variable private (
     require(data.shape.numel > 0, "mean of empty Variable is unsupported")
     sum() * (1f / data.shape.numel.toFloat)
 
+  /** Class-index cross entropy over the last axis; targets have the remaining shape. */
+  def crossEntropy(targets: Tensor[Long], reduction: LossReduction = LossReduction.Mean, ignoreIndex: Long = -100): Variable =
+    LossOps.crossEntropy(this,targets,reduction,ignoreIndex)
+
   def embedding(indices: Tensor[Long]): Variable = TransformerOps.embedding(this, indices)
   def rmsNorm(weight: Variable, epsilon: Double = 1e-6): Variable = TransformerOps.rmsNorm(this, weight, epsilon)
   def silu(): Variable = TransformerOps.silu(this)
