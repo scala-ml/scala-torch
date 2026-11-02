@@ -1,3 +1,19 @@
+## Native prompt parser/chunker verified (2026-11-03)
+
+SDXL text plan Task2 partial: DiffusionPrompt now handles attention brackets,
+explicit weights, escaped delimiters, x repetition, BREAK, 75-token content,
+comma relocation and post-EOS padding. 122 cases generated from local NUI's
+prompt.py match (22 targeted +100 seeded combinations). Reference source and
+fixture SHA256 recorded in nui-prompt.manifest.json; optional generator is
+scripts/reference_prompt.py. No Python at runtime. Prompt/chunk bounds reject
+nonfinite weights, oversized repetition/nesting and more than256 chunks.
+DiffusionPromptSuite3 + ClipFastTokenizerSuite4 tests passed. Not yet connected
+to dual CLIP or worker; next implement SdxlTextConditioning with real tokenizer
+and encode_sdxl fixtures, empty negatives, pooled-first-chunk and length padding.
+Live full512 img2img session62925 advanced to6/10 at last poll; preserve it.
+Previous branch-only acknowledgment made no goal implementation progress;
+this continuation revalidated live process and implemented verified parser.
+
 ## SUCCESS:512px native SD1.5 image; full-size img2img started (2026-11-03)
 
 Immutable txt2img session80265 COMPLETED exit0,empty stderr.512x512,20steps,
