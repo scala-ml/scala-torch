@@ -281,3 +281,38 @@ class PretrainedVaeSuite extends munit.FunSuite:
     val other=run(31L)
     assert(first.zip(other).exists((a,b) => math.abs(a-b)>1e-5))
   }
+
+  test("prompt-to-image pipeline supports seeds guidance progress cancellation and recovery") {
+    val dirs=Vector("clip","unet","vae").map(key => sys.props.get(s"scalatorch.$key.dir").map(Path.of(_)))
+    assume(dirs.forall(_.nonEmpty),"set pinned CLIP U-Net and VAE directories")
+    val Vector(clipDir,unetDir,vaeDir)=dirs.map(_.get): @unchecked
+    pinned(vaeDir)
+    def clipResource(name: String): String =
+      val stream=getClass.getResourceAsStream(s"/tiny-clip-tokenizer/$name")
+      try new String(stream.readAllBytes(),UTF_8) finally stream.close()
+    val tokenizer=ClipFastTokenizer.fromText(clipResource("vocab.json"),clipResource("merges.txt"))
+    val pipeline=new EulerImagePipeline(tokenizer,PretrainedClip.load(clipDir),PretrainedUNet.load(unetDir),PretrainedVae.load(vaeDir))
+    val schedule=DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true).euler(2)
+    val request=DiffusionImageRequest("a red cat","a blue boat",10,6,42L,guidanceScale=3f)
+    val progress=scala.collection.mutable.ArrayBuffer.empty[Int]
+    val image=pipeline.generate(request,schedule,onProgress=p => progress+=p.completedSteps)
+    assertEquals(progress.toVector,Vector(1,2))
+    assertEquals(image.shape,Shape.from(Seq(1,3,6,10)))
+    assert(image.toFloatArray.forall(_.isFinite))
+    assertEquals(image.toFloatArray.toVector,pipeline.generate(request,schedule).toFloatArray.toVector)
+    val changed=pipeline.generate(request.copy(negativePrompt="green trees"),schedule)
+    assert(image.toFloatArray.zip(changed.toFloatArray).exists((a,b) => math.abs(a-b)>1e-5))
+    val otherSeed=pipeline.generate(request.copy(seed=43L),schedule)
+    assert(image.toFloatArray.toVector!=otherSeed.toFloatArray.toVector)
+    var cancel=false
+    intercept[java.util.concurrent.CancellationException] {
+      pipeline.generate(request,schedule,onProgress=_ => cancel=true,cancelled=() => cancel)
+    }
+    assertEquals(pipeline.generate(request,schedule).toFloatArray.toVector,image.toFloatArray.toVector)
+    intercept[java.util.concurrent.CancellationException](pipeline.generate(request,schedule,cancelled=() => true))
+    intercept[IllegalArgumentException](pipeline.generate(request.copy(width=9),schedule))
+    intercept[IllegalArgumentException](pipeline.generate(request.copy(width=Int.MaxValue),schedule))
+    val noise=Tensor.fromFloats(Array.fill(60)(.1f),Shape.from(Seq(1,4,3,5)))
+    assertEquals(pipeline.generate(request,schedule,noise=Some(noise)).toFloatArray.toVector,
+      pipeline.generate(request.copy(seed=999),schedule,noise=Some(noise)).toFloatArray.toVector)
+  }

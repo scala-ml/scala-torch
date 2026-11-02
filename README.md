@@ -1,5 +1,7 @@
 # scala-torch
 
+Current stop point and NUI integration roadmap: [HANDOFF.md](HANDOFF.md).
+
 Deep learning in Scala 3, targeting Java 25 and Python-free LLMs, training, and image generation.
 
 Requires **Java 25, Scala 3.3.8 LTS, sbt 2.0.10**. Versions are pinned in the build.
