@@ -2,6 +2,19 @@
 
 ## Windows continuation (2026-11-03)
 
+DPM++ follow-up: `DpmPlusPlus2M` implements deterministic VP midpoint updates,
+epsilon/sample/v-prediction conversion, first-step order one, order-two history,
+and terminal-zero clean output. It is a pure indexed API: callers pass the prior
+`predictedOriginal`, so rejected calls do not advance a hidden cursor. Inputs
+use VP scaling and initial unit noise, NOT Euler latent/input scaling.
+Analytical tests cover a full three-step scalar trajectory, prediction conversion,
+history gradients, rejected histories/budgets and replay. Reference is NUI's pinned
+diffusers 0.33.1, not the initially inspected newer version:
+https://github.com/huggingface/diffusers/blob/v0.33.1/src/diffusers/schedulers/scheduling_dpmsolver_multistep.py
+The image loop and DPM timestep/config construction remain to be connected;
+in particular this version rounds Karras timesteps for linear/scaled-linear betas.
+Do not reuse the Euler image loop unchanged or claim full NUI sampler parity.
+
 Karras follow-up: `DiffusionNoiseSchedule.karrasEuler(steps, rho=7)` creates
 descending Karras sigmas, a terminal zero, and fractional model timesteps using
 log-linear inversion of training sigmas. The formulas were checked against local
