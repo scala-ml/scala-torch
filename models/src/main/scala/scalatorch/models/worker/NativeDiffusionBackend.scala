@@ -122,10 +122,13 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         val g=p.get("params") match
           case Some(Obj(fields)) => fields
           case _ => throw IllegalArgumentException("params must be an object")
-        keys(NativeGenerationDefaults.strip(g,NativeGenerationDefaults.generation),Set("prompt","negative_prompt","width","height","steps","seed","cfg_scale","sampler_name","scheduler","clip_skip"))
+        keys(NativeGenerationDefaults.strip(g,NativeGenerationDefaults.generation),Set("prompt","negative_prompt","width","height","steps","seed","cfg_scale","sampler_name","scheduler","clip_skip","n_iter"))
         val seedNumber=number(g,"seed",42)
         require(seedNumber.isValidLong,"seed must be a signed 64-bit integer")
         val seed=if seedNumber.toLong == -1 then new java.security.SecureRandom().nextLong() & Long.MaxValue else seedNumber.toLong
+        val iterations=integer(g,"n_iter",1)
+        require(iterations>=1 && iterations<=100,"n_iter must be between 1 and 100")
+        require(BigInt(seed)+iterations-1<=Long.MaxValue,"iteration seeds exceed signed 64-bit range")
         val steps=integer(g,"steps",20)
         require(steps>0 && steps<=1000,"steps must be between 1 and 1000")
         val imageRequest=DiffusionImageRequest(str(g,"prompt",""),str(g,"negative_prompt",""),
@@ -140,27 +143,49 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         val output=Path.of(outputName).toAbsolutePath.normalize()
         require(Files.isDirectory(output),"output_dir must be an existing directory")
         val started=System.nanoTime()
-        val progress: DiffusionImageProgress => Unit = value =>
-          context.event("progress",Map(
-            "step"->Number(value.completedSteps),"total"->Number(value.totalSteps),"pass"->Str("base"),
-            "eta_s"->Number(0),"image"->Number(0),"images"->Number(1),"batch_size"->Number(1)))
-          if previewEvery>0 && previewMethod!="none" && value.completedSteps%previewEvery==0 && value.completedSteps<value.totalSteps then
+        val staging=Files.createTempDirectory(output,".native-staging-")
+        val staged=scala.collection.mutable.ArrayBuffer.empty[Path]
+        val published=scala.collection.mutable.ArrayBuffer.empty[Path]
+        try
+          val images=Vector.tabulate(iterations) { index =>
             context.checkCancelled()
-            context.event("preview",Map("step"->Number(value.completedSteps),"jpeg_b64"->Str(NativePreview.jpegBase64(value.latents))))
-        val image=if sampler=="DPM++ 2M" then
-          val layout=if schedule=="Karras" then DpmSchedule.karras(config.noise,steps) else DpmSchedule.uniform(config.noise,steps)
-          pipeline.generateDpm(imageRequest,layout,onProgress=progress,
-            cancelled=context.cancelled,prediction=config.prediction)
-        else
-          val layout=if schedule=="Karras" then config.noise.karrasEuler(steps) else config.noise.euler(steps,config.spacing,config.stepsOffset)
-          pipeline.generate(imageRequest,layout,onProgress=progress,cancelled=context.cancelled,prediction=config.prediction)
-        context.beginPublication()
-        val path=output.resolve(s"native-${UUID.randomUUID()}.png")
-        DiffusionImageIO.writePng(image,path)
-        Map("images"->Arr(Vector(Obj(Map("path"->Str(path.toString),"seed"->Number(BigDecimal(seed)),
-          "width"->Number(imageRequest.width),"height"->Number(imageRequest.height))))),
-          "timing_s"->Number(BigDecimal((System.nanoTime()-started)/1e9)),"model_name"->Str(root.getFileName.toString),
-          "scheduler"->Str(schedule))
+            val current=imageRequest.copy(seed=seed+index)
+            val progress: DiffusionImageProgress => Unit = value =>
+              context.event("progress",Map(
+                "step"->Number(value.completedSteps),"total"->Number(value.totalSteps),"pass"->Str("base"),
+                "eta_s"->Number(0),"image"->Number(index),"images"->Number(iterations),"batch_size"->Number(1)))
+              if previewEvery>0 && previewMethod!="none" && value.completedSteps%previewEvery==0 && value.completedSteps<value.totalSteps then
+                context.checkCancelled()
+                context.event("preview",Map("step"->Number(value.completedSteps),"jpeg_b64"->Str(NativePreview.jpegBase64(value.latents))))
+            val image=if sampler=="DPM++ 2M" then
+              val layout=if schedule=="Karras" then DpmSchedule.karras(config.noise,steps) else DpmSchedule.uniform(config.noise,steps)
+              pipeline.generateDpm(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=config.prediction)
+            else
+              val layout=if schedule=="Karras" then config.noise.karrasEuler(steps) else config.noise.euler(steps,config.spacing,config.stepsOffset)
+              pipeline.generate(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=config.prediction)
+            context.checkCancelled()
+            val name=s"native-${UUID.randomUUID()}.png"
+            val temporary=staging.resolve(name)
+            DiffusionImageIO.writePng(image,temporary)
+            staged+=temporary
+            Obj(Map("path"->Str(output.resolve(name).toString),"seed"->Number(BigDecimal(current.seed)),
+              "width"->Number(current.width),"height"->Number(current.height)))
+          }
+          context.beginPublication()
+          staged.foreach { temporary =>
+            val destination=output.resolve(temporary.getFileName)
+            Files.move(temporary,destination)
+            published+=destination
+          }
+          Files.delete(staging)
+          Map("images"->Arr(images),"timing_s"->Number(BigDecimal((System.nanoTime()-started)/1e9)),
+            "model_name"->Str(root.getFileName.toString),"scheduler"->Str(schedule))
+        catch
+          case error: Throwable =>
+            (staged.toVector++published.toVector :+ staging).foreach { path =>
+              try Files.deleteIfExists(path) catch case cleanup: Throwable => error.addSuppressed(cleanup)
+            }
+            throw error
       case _ => unsupported(s"unsupported request: ${request.kind}")
 
 object NativeWorkerMain:

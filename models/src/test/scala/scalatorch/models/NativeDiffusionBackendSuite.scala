@@ -74,6 +74,29 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       assertEquals(uniform("scheduler"),Str("Uniform"))
       val uniformPath=Path.of(uniform("images").asInstanceOf[Arr].values.head.asInstanceOf[Obj].fields("path").asInstanceOf[Str].value)
       assertEquals(javax.imageio.ImageIO.read(uniformPath.toFile).getWidth,10)
+      val iterativeParams=Map("output_dir"->Str(output.toString),"params"->Obj(Map(
+        "prompt"->Str("cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(1),
+        "seed"->Number(100),"n_iter"->Number(2))))
+      val iterative=run("txt2img",iterativeParams)("images").asInstanceOf[Arr].values
+      assertEquals(iterative.map(_.asInstanceOf[Obj].fields("seed")),Vector(Number(100),Number(101)))
+      def filesNow()=
+        val paths=Files.list(output)
+        try
+          import scala.jdk.CollectionConverters.*
+          paths.iterator().asScala.toVector.map(_.getFileName.toString).toSet
+        finally paths.close()
+      val before=filesNow()
+      var cancelBatch=false
+      val cancelContext=new NativeWorkContext(() => cancelBatch,() => !cancelBatch,(_,fields) => {
+        if fields.get("image").contains(Number(1)) then cancelBatch=true
+      })
+      intercept[java.util.concurrent.CancellationException](backend.execute(NativeRequest("batch","txt2img",iterativeParams,None),cancelContext))
+      assertEquals(filesNow(),before)
+      val rejectPublication=new NativeWorkContext(() => false,() => false,(_,_) => ())
+      intercept[java.util.concurrent.CancellationException](backend.execute(NativeRequest("reject","txt2img",iterativeParams,None),rejectPublication))
+      assertEquals(filesNow(),before)
+      val oversized=iterativeParams.updated("params",Obj(Map("seed"->Number(BigDecimal(Long.MaxValue)),"n_iter"->Number(2))))
+      intercept[IllegalArgumentException](run("txt2img",oversized))
       val cancelled=new NativeWorkContext(() => true,() => false,(_,_) => ())
       intercept[java.util.concurrent.CancellationException](backend.execute(NativeRequest("x","unload",Map.empty,None),cancelled))
       val invalid=intercept[NativeBackendError](run("txt2img",Map("unknown"->Bool(true))))

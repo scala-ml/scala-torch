@@ -1,3 +1,19 @@
+## Native iteration generation (2026-11-03)
+
+Native worker accepts n_iter 1..100 with batch_size still 1. Each iteration uses
+seed+index, own solver history and image index/total progress metadata. Signed-Long
+seed overflow is rejected before inference. Per-iteration tensors are released
+between images; PNGs go into a unique staging directory under the caller output.
+Only after all images finish does context.beginPublication admit moving them to
+unique output names and returning paths. Cancel/failure removes owned staged and
+already-moved files without touching preexisting outputs. Files.move does not replace.
+
+Backend tests verify seeds 100/101, second-image cancellation cleanup, denied
+publication cleanup, overflow rejection, and existing indexed/single model paths.
+Backend plus real JVM subprocess tests passed (3); after adding publication/overflow
+assertions backend suite passed again (2). Runtime stays Python-free. This adds
+iteration count, not tensor batching, and does not establish complete NUI migration.
+NUI unchanged this turn; sbt is scala-torch with all tiny model properties enabled.
 ## Indexed Diffusers weights (2026-11-03)
 
 SafeTensorSet.open now accepts a validated basename (default model.safetensors)
