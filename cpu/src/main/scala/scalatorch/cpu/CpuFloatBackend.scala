@@ -4,6 +4,9 @@ import scalatorch.*
 
 /** Immutable CPU Float32 inference backend; release is a no-op for GC-owned storage. */
 object CpuFloatBackend extends TrainingBackend[Tensor[Float]]:
+  def causalAttentionBackward(query: Tensor[Float],key: Tensor[Float],value: Tensor[Float],gradient: Tensor[Float],
+      queryStart: Int = 0,maxScoreElements: Long = 16777216L): (Tensor[Float],Tensor[Float],Tensor[Float]) =
+    CpuAttentionBackward(query,key,value,gradient,queryStart,maxScoreElements)
   def embeddingBackward(tableShape: Shape,indices: Tensor[Long],gradient: Tensor[Float]): Tensor[Float] =
     CpuBackward.embedding(tableShape,indices,gradient)
   def ropeBackward(gradient: Tensor[Float],positionStart: Int = 0,theta: Double = 10000.0): Tensor[Float] =

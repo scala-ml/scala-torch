@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","cache_append").map { name =>
+  private val kernels=Seq("binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -147,6 +147,47 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
           arena.allocateFrom(JAVA_DOUBLE,1.0/math.sqrt(q(3).toDouble))
       }
     }
+
+  def causalAttentionBackward(query: CudaTensor,key: CudaTensor,value: CudaTensor,gradient: CudaTensor,
+      queryStart: Int = 0,maxScoreElements: Long = 16777216L): (CudaTensor,CudaTensor,CudaTensor) =
+    validate(query);validate(key);validate(value);validate(gradient)
+    val (output,_)=AttentionLayout.validate(query.shape,key.shape,value.shape,queryStart,maxScoreElements)
+    require(gradient.shape==output,"attention gradient shape mismatch")
+    val shapes=Vector(query.shape,key.shape,value.shape)
+    val outputs=mutable.ArrayBuffer.empty[CudaTensor]
+    def keep(t: CudaTensor): CudaTensor = { outputs+=t;t }
+    try
+      if query.shape.numel==0 then
+        require(shapes.map(s => math.max(s.numel*4,1L)).sum<=maxBytes-used,"attention gradient allocation budget exceeded")
+        (keep(fill(query.shape,0f)),keep(fill(key.shape,0f)),keep(fill(value.shape,0f)))
+      else
+        val q=query.shape.dims;val k=key.shape.dims;val v=value.shape.dims
+        val groups=q(0)*k(1);val rowScores=groups*k(2)
+        require((shapes.map(_.numel) :+ rowScores).forall(_*2<=Int.MaxValue),"attention gradient Double workspace exceeds Int indexing")
+        require(shapes.map(_.numel).sum*12+rowScores*16<=maxBytes-used,"attention gradient workspace budget exceeded")
+        Using.Manager { use =>
+          val sums=shapes.map(s => use(fill(Shape.from(Seq(s.numel,2L)),0f)))
+          val probabilities=use(allocate(Shape.from(Seq(rowScores,2L))))
+          val dp=use(allocate(Shape.from(Seq(rowScores,2L))))
+          launch(groups,kernels("attention_backward")) { arena =>
+            Seq(query.address,key.address,value.address,gradient.address,sums(0).address,sums(1).address,sums(2).address,
+              probabilities.address,dp.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
+              Seq(groups,q(1),k(1),q(2),k(2),q(3),v(3),queryStart.toLong).map(x => arena.allocateFrom(JAVA_INT,x.toInt)) :+
+              arena.allocateFrom(JAVA_DOUBLE,1.0/math.sqrt(q(3).toDouble))
+          }
+          val result=shapes.zip(sums).map { (shape,sum) =>
+            keep(execute(shape,shape.numel,kernels("attention_gradient_cast")) { (arena,out) =>
+              Seq(sum.address,out.address).map(x => arena.allocateFrom(JAVA_LONG,x)) :+
+                arena.allocateFrom(JAVA_INT,shape.numel.toInt)
+            })
+          }
+          (result(0),result(1),result(2))
+        }.get
+    catch case error: Throwable =>
+      outputs.reverseIterator.foreach { out =>
+        try out.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      }
+      throw error
 
   def attentionCache(batchSize: Int,heads: Int,capacity: Int,keyWidth: Int,valueWidth: Int,
       maxBytes: Long = 268435456L): AttentionCache[CudaTensor] =

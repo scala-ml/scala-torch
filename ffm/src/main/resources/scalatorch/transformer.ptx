@@ -3,6 +3,127 @@
 .target sm_50
 .address_size 64
 
+.visible .entry attention_gradient_cast(.param .u64 a, .param .u64 out, .param .u32 count) {
+ .reg .pred p;
+ .reg .b32 r<5>;
+ .reg .b64 d<5>;
+ .reg .f64 g;
+ .reg .f32 f;
+ ld.param.u64 d0,[a]; ld.param.u64 d1,[out]; ld.param.u32 r0,[count];
+ mov.u32 r1,%tid.x; mov.u32 r2,%ctaid.x; mov.u32 r3,%ntid.x;
+ mad.lo.u32 r4,r2,r3,r1; setp.ge.u32 p,r4,r0; @p bra DONE;
+ mul.wide.u32 d2,r4,8; add.u64 d3,d0,d2; ld.global.f64 g,[d3];
+ mul.wide.u32 d2,r4,4; add.u64 d4,d1,d2; cvt.rn.f32.f64 f,g; st.global.f32 [d4],f;
+DONE:
+ ret;
+}
+
+// One worker owns each batch/KV-head group. All accumulation is Double and race-free.
+.visible .entry attention_backward(
+ .param .u64 query, .param .u64 key, .param .u64 value, .param .u64 upstream,
+ .param .u64 dq, .param .u64 dk, .param .u64 dv, .param .u64 probabilities, .param .u64 dp,
+ .param .u32 groups, .param .u32 heads, .param .u32 kvheads, .param .u32 qtokens,
+ .param .u32 ktokens, .param .u32 width, .param .u32 vwidth, .param .u32 start, .param .f64 attention_scale
+) {
+ .reg .pred p,pnan,pnew;
+ .reg .b32 r<30>;
+ .reg .b64 d<18>;
+ .reg .f32 f<3>;
+ .reg .f64 g<12>;
+ ld.param.u64 d0,[query]; ld.param.u64 d1,[key]; ld.param.u64 d2,[value]; ld.param.u64 d3,[upstream];
+ ld.param.u64 d4,[dq]; ld.param.u64 d5,[dk]; ld.param.u64 d6,[dv];
+ ld.param.u64 d7,[probabilities]; ld.param.u64 d8,[dp];
+ ld.param.u32 r0,[groups]; ld.param.u32 r1,[heads]; ld.param.u32 r2,[kvheads]; ld.param.u32 r3,[qtokens];
+ ld.param.u32 r4,[ktokens]; ld.param.u32 r5,[width]; ld.param.u32 r6,[vwidth]; ld.param.u32 r7,[start];
+ ld.param.f64 g0,[attention_scale];
+ mov.u32 r8,%tid.x; mov.u32 r9,%ctaid.x; mov.u32 r10,%ntid.x;
+ mad.lo.u32 r11,r9,r10,r8; setp.ge.u32 p,r11,r0; @p bra DONE;
+ div.u32 r12,r11,r2; rem.u32 r13,r11,r2; div.u32 r14,r1,r2;
+ mul.lo.u32 r15,r13,r14; add.u32 r16,r15,r14; mul.lo.u32 r17,r11,r4;
+HEAD:
+ setp.ge.u32 p,r15,r16; @p bra DONE;
+ mov.u32 r18,0;
+TOKEN:
+ setp.ge.u32 p,r18,r3; @p bra NEXT_HEAD;
+ mad.lo.u32 r19,r12,r1,r15; mad.lo.u32 r19,r19,r3,r18;
+ mul.lo.u32 r20,r19,r5; mul.lo.u32 r21,r19,r6;
+ cvt.u64.u32 d9,r7; cvt.u64.u32 d10,r18; add.u64 d9,d9,d10; add.u64 d9,d9,1;
+ cvt.u64.u32 d10,r4; min.u64 d9,d9,d10; cvt.u32.u64 r22,d9;
+ mov.u32 r23,0; mov.f64 g1,0dFFF0000000000000; setp.ne.u32 pnan,r0,r0;
+SCORES:
+ setp.ge.u32 p,r23,r22; @p bra EXP_START;
+ mov.u32 r24,0; mov.f64 g2,0d0000000000000000;
+DOT:
+ setp.ge.u32 p,r24,r5; @p bra SCORE_STORE;
+ add.u32 r25,r20,r24; add.u32 r26,r17,r23; mad.lo.u32 r26,r26,r5,r24;
+ mul.wide.u32 d9,r25,4; add.u64 d10,d0,d9; mul.wide.u32 d9,r26,4; add.u64 d11,d1,d9;
+ ld.global.f32 f0,[d10]; ld.global.f32 f1,[d11]; cvt.f64.f32 g3,f0; cvt.f64.f32 g4,f1;
+ mul.rn.f64 g3,g3,g4; add.rn.f64 g2,g2,g3; add.u32 r24,r24,1; bra DOT;
+SCORE_STORE:
+ mul.rn.f64 g2,g2,g0; add.u32 r25,r17,r23; mul.wide.u32 d9,r25,8; add.u64 d10,d7,d9;
+ st.global.f64 [d10],g2; setp.nan.f64 pnew,g2,g2; or.pred pnan,pnan,pnew; max.f64 g1,g1,g2;
+ add.u32 r23,r23,1; bra SCORES;
+EXP_START:
+ @pnan mov.f64 g1,0d7FF8000000000000;
+ mov.u32 r23,0; mov.f64 g5,0d0000000000000000;
+EXP:
+ setp.ge.u32 p,r23,r22; @p bra NORMALIZE_START;
+ add.u32 r25,r17,r23; mul.wide.u32 d9,r25,8; add.u64 d10,d7,d9; add.u64 d12,d8,d9;
+ ld.global.f64 g2,[d10]; sub.rn.f64 g2,g2,g1;
+ cvt.rn.f32.f64 f0,g2; mul.rn.f32 f0,f0,0f3FB8AA3B; ex2.approx.f32 f0,f0;
+ cvt.f64.f32 g2,f0; st.global.f64 [d10],g2; add.rn.f64 g5,g5,g2;
+ mov.u32 r24,0; mov.f64 g6,0d0000000000000000;
+DP_DOT:
+ setp.ge.u32 p,r24,r6; @p bra DP_STORE;
+ add.u32 r25,r21,r24; add.u32 r26,r17,r23; mad.lo.u32 r26,r26,r6,r24;
+ mul.wide.u32 d9,r25,4; add.u64 d10,d3,d9; mul.wide.u32 d9,r26,4; add.u64 d11,d2,d9;
+ ld.global.f32 f0,[d10]; ld.global.f32 f1,[d11]; cvt.f64.f32 g3,f0; cvt.f64.f32 g4,f1;
+ mul.rn.f64 g3,g3,g4; add.rn.f64 g6,g6,g3; add.u32 r24,r24,1; bra DP_DOT;
+DP_STORE:
+ st.global.f64 [d12],g6; add.u32 r23,r23,1; bra EXP;
+NORMALIZE_START:
+ mov.u32 r23,0; mov.f64 g7,0d0000000000000000;
+NORMALIZE:
+ setp.ge.u32 p,r23,r22; @p bra GRAD_START;
+ add.u32 r25,r17,r23; mul.wide.u32 d9,r25,8; add.u64 d10,d7,d9; add.u64 d11,d8,d9;
+ ld.global.f64 g2,[d10]; div.rn.f64 g2,g2,g5; st.global.f64 [d10],g2;
+ ld.global.f64 g6,[d11]; mul.rn.f64 g6,g6,g2; add.rn.f64 g7,g7,g6;
+ add.u32 r23,r23,1; bra NORMALIZE;
+GRAD_START:
+ mov.u32 r23,0;
+GRAD:
+ setp.ge.u32 p,r23,r22; @p bra NEXT_TOKEN;
+ add.u32 r25,r17,r23; mul.wide.u32 d9,r25,8; add.u64 d10,d7,d9; add.u64 d11,d8,d9;
+ ld.global.f64 g2,[d10]; ld.global.f64 g6,[d11]; sub.rn.f64 g6,g6,g7;
+ mul.rn.f64 g8,g2,g6; mul.rn.f64 g8,g8,g0; mov.u32 r24,0;
+QK:
+ setp.ge.u32 p,r24,r5; @p bra V_START;
+ add.u32 r25,r20,r24; add.u32 r26,r17,r23; mad.lo.u32 r26,r26,r5,r24;
+ mul.wide.u32 d9,r25,4; add.u64 d10,d0,d9; mul.wide.u32 d9,r26,4; add.u64 d11,d1,d9;
+ mul.wide.u32 d9,r25,8; add.u64 d12,d4,d9; mul.wide.u32 d9,r26,8; add.u64 d13,d5,d9;
+ ld.global.f32 f0,[d10]; ld.global.f32 f1,[d11]; cvt.f64.f32 g3,f0; cvt.f64.f32 g4,f1;
+ ld.global.f64 g9,[d12]; mul.rn.f64 g10,g8,g4; add.rn.f64 g9,g9,g10; st.global.f64 [d12],g9;
+ ld.global.f64 g9,[d13]; mul.rn.f64 g10,g8,g3; add.rn.f64 g9,g9,g10; st.global.f64 [d13],g9;
+ add.u32 r24,r24,1; bra QK;
+V_START:
+ mov.u32 r24,0;
+V:
+ setp.ge.u32 p,r24,r6; @p bra NEXT_KEY;
+ add.u32 r25,r21,r24; add.u32 r26,r17,r23; mad.lo.u32 r26,r26,r6,r24;
+ mul.wide.u32 d9,r25,4; add.u64 d10,d3,d9; mul.wide.u32 d9,r26,8; add.u64 d11,d6,d9;
+ ld.global.f32 f0,[d10]; cvt.f64.f32 g3,f0; mul.rn.f64 g3,g2,g3;
+ ld.global.f64 g9,[d11]; add.rn.f64 g9,g9,g3; st.global.f64 [d11],g9;
+ add.u32 r24,r24,1; bra V;
+NEXT_KEY:
+ add.u32 r23,r23,1; bra GRAD;
+NEXT_TOKEN:
+ add.u32 r18,r18,1; bra TOKEN;
+NEXT_HEAD:
+ add.u32 r15,r15,1; bra HEAD;
+DONE:
+ ret;
+}
+
 // One owner per output element; occurrence lists preserve logical token order.
 .visible .entry embedding_backward(.param .u64 gradient, .param .u64 heads, .param .u64 next,
  .param .u64 out, .param .u32 count, .param .u32 width) {
@@ -425,7 +546,7 @@ DONE:
  .param .u64 query, .param .u64 key, .param .u64 value, .param .u64 out, .param .u64 scores,
  .param .u32 rows, .param .u32 heads, .param .u32 kvheads, .param .u32 qtokens,
  .param .u32 ktokens, .param .u32 width, .param .u32 vwidth, .param .u32 start, .param .u32 storageTokens,
- .param .f64 scale
+ .param .f64 forward_attention_scale
 ) {
  .reg .pred p,pnan,pnew;
  .reg .b32 r<28>;
@@ -436,7 +557,7 @@ DONE:
  ld.param.u64 d3,[out]; ld.param.u64 d4,[scores];
  ld.param.u32 r0,[rows]; ld.param.u32 r1,[heads]; ld.param.u32 r2,[kvheads];
  ld.param.u32 r3,[qtokens]; ld.param.u32 r4,[ktokens]; ld.param.u32 r5,[width];
- ld.param.u32 r6,[vwidth]; ld.param.u32 r7,[start]; ld.param.u32 r27,[storageTokens]; ld.param.f64 g0,[scale];
+ ld.param.u32 r6,[vwidth]; ld.param.u32 r7,[start]; ld.param.u32 r27,[storageTokens]; ld.param.f64 g0,[forward_attention_scale];
  mov.u32 r8,%tid.x; mov.u32 r9,%ctaid.x; mov.u32 r10,%ntid.x;
  mad.lo.u32 r11,r9,r10,r8;
  setp.ge.u32 p,r11,r0; @p bra DONE;

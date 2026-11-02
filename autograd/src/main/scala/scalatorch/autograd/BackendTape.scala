@@ -14,6 +14,13 @@ final class BackendTape[T](val backend: TrainingBackend[T]) extends AutoCloseabl
   private val nodes=mutable.ArrayBuffer.empty[Value]
   private class Handles extends AutoCloseable:
     private val values=mutable.ArrayBuffer.empty[T]
+    private val attention=mutable.Map.empty[AnyRef,(T,T,T)]
+    def attentionGradients(key: AnyRef)(compute: => (T,T,T)): (T,T,T) =
+      attention.getOrElseUpdate(key,{
+        val result=compute
+        keep(result._1);keep(result._2);keep(result._3)
+        result
+      })
     def keep(value: T): T = { values+=value;value }
     def take(value: T): T =
       val index=values.lastIndexOf(value)
@@ -27,6 +34,7 @@ final class BackendTape[T](val backend: TrainingBackend[T]) extends AutoCloseabl
           if failure==null then failure=e else failure.addSuppressed(e)
       }
       values.clear()
+      attention.clear()
       if failure!=null then throw failure
   private val owned=new Handles
   private def check(): Unit =
@@ -59,6 +67,14 @@ final class BackendTape[T](val backend: TrainingBackend[T]) extends AutoCloseabl
       this -> ((g,_) => backend.multiply(g,other.data)),other -> ((g,_) => backend.multiply(g,data))))
     def *(scalar: Float): Value = result(backend.scale(data,scalar),Vector(this -> ((g,_) => backend.scale(g,scalar))))
     def -(other: Value): Value = this + other * -1f
+    def causalAttention(key: Value,value: Value,queryStart: Int = 0,maxScoreElements: Long = 16777216L): Value =
+      val identity=new Object
+      def pullback(g: T,s: Handles,index: Int): T =
+        val gradients=s.attentionGradients(identity)(backend.causalAttentionBackward(data,key.data,value.data,g,queryStart,maxScoreElements))
+        val selected=if index==0 then gradients._1 else if index==1 then gradients._2 else gradients._3
+        backend.reshape(selected,backend.shape(selected))
+      result(backend.causalAttention(data,key.data,value.data,queryStart,maxScoreElements),Vector(
+        this -> ((g,s) => pullback(g,s,0)),key -> ((g,s) => pullback(g,s,1)),value -> ((g,s) => pullback(g,s,2))))
     def embedding(indices: Tensor[Long]): Value = result(backend.embedding(data,indices),
       Vector(this -> ((g,_) => backend.embeddingBackward(backend.shape(data),indices,g))))
     def rope(positionStart: Int = 0,theta: Double = 10000.0): Value =
