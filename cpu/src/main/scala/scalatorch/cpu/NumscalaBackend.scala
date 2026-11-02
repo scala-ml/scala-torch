@@ -24,5 +24,7 @@ object NumscalaBackend:
     val (am, at) = matrix(a)
     val (bm, bt) = matrix(b)
     val out = MatrixF32.zeros(shape.dims(0).toInt, shape.dims(1).toInt)
-    ScalarF32Kernels.gemmInto(am, at, bm, bt, out, new Workspace())
+    val workspace=new Workspace()
+    workspace.reserveFloats(ScalarF32Kernels.gemmWorkspaceFloats(out.rows,out.cols,a.shape.dims(1).toInt,at,bt))
+    ScalarF32Kernels.gemmInto(am, at, bm, bt, out, workspace)
     Tensor.fromFloats(out.data, shape)

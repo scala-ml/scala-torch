@@ -1,6 +1,6 @@
 package scalatorch
 
-/** Explicit inference execution and ownership; no autograd or implicit device transfer.
+/** Explicit execution and ownership; operations do not record gradients or transfer implicitly.
   * Arithmetic consumes no inputs. Results are independently releasable.
   * Add/multiply require equal shapes; RMSNorm normalizes the final axis.
   */
@@ -18,6 +18,11 @@ trait FloatBackend[T]:
   def multiply(a: T, b: T): T
   /** Elementwise Float32 scalar multiplication, including IEEE nonfinite values. */
   def scale(value: T, scalar: Float): T
+  def fill(shape: Shape, value: Float): T
+  /** Sum all elements into a rank-zero Float32 output, accumulating in Double. */
+  def sum(value: T): T
+  /** Repeat a rank-zero backend value without a host transfer. */
+  def expandScalar(value: T, shape: Shape): T
   def silu(value: T): T
   def rmsNorm(value: T, weight: T, epsilon: Double = 1e-6): T
   def rope(value: T, positionStart: Int = 0, theta: Double = 10000.0): T

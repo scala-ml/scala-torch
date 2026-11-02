@@ -3,6 +3,20 @@ package scalatorch.cpu
 import scalatorch.*
 
 class CpuFloatBackendSuite extends munit.FunSuite:
+  test("backend scalar reduction and expansion preserve views and empty shapes") {
+    val a=Tensor.fromFloats(Array(1e8f,1f,-1e8f,2f),Shape.from(Seq(2L,2L))).transpose(0,1)
+    assertEquals(CpuFloatBackend.sum(a).toFloatArray.toVector,Vector(3f))
+    val zero=CpuFloatBackend.fill(Shape.from(Seq.empty),-0f)
+    assert(CpuFloatBackend.expandScalar(zero,Shape.from(Seq(3L))).toFloatArray.forall(v => java.lang.Float.floatToRawIntBits(v)==0x80000000))
+    val empty=CpuFloatBackend.fill(Shape.from(Seq(0L,Long.MaxValue)),2f)
+    assertEquals(CpuFloatBackend.sum(empty).toFloatArray.toVector,Vector(0f))
+    intercept[IllegalArgumentException](CpuFloatBackend.expandScalar(a,Shape.from(Seq(2L))))
+  }
+  test("Numscala reserves packing workspace for two transposed operands") {
+    val a=Tensor.fromFloats(Array(1f,2f,3f,4f,5f,6f),Shape.from(Seq(3L,2L))).transpose(0,1)
+    val b=Tensor.fromFloats(Array(1f,2f,3f,4f,5f,6f,7f,8f,9f,10f,11f,12f),Shape.from(Seq(4L,3L))).transpose(0,1)
+    assertEquals(CpuFloatBackend.matmul(a,b).toFloatArray.toVector,Ops.matmul(a,b).toFloatArray.toVector)
+  }
   test("scalar multiplication preserves logical view order and IEEE values") {
     val x=Tensor.fromFloats(Array(1f,-2f,0f,-0f),Shape.from(Seq(2L,2L))).transpose(0,1)
     val result=CpuFloatBackend.scale(x,-2f).toFloatArray

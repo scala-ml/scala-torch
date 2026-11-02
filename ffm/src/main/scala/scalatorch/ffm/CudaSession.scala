@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("binary","scale","silu","rmsnorm","transpose","embedding","rope","attention","cache_append").map { name =>
+  private val kernels=Seq("binary","scale","fill","sum","expand_scalar","silu","rmsnorm","transpose","embedding","rope","attention","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -250,6 +250,23 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     }
   def add(a: CudaTensor,b: CudaTensor): CudaTensor = binary(a,b,0)
   def multiply(a: CudaTensor,b: CudaTensor): CudaTensor = binary(a,b,1)
+  def fill(shape: Shape,value: Float): CudaTensor =
+    execute(shape,shape.numel,kernels("fill")) { (arena,result) =>
+      Seq(arena.allocateFrom(JAVA_LONG,result.address),arena.allocateFrom(JAVA_INT,shape.numel.toInt),arena.allocateFrom(JAVA_FLOAT,value))
+    }
+  def sum(value: CudaTensor): CudaTensor =
+    validate(value)
+    execute(Shape.from(Seq.empty),1,kernels("sum")) { (arena,result) =>
+      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) :+
+        arena.allocateFrom(JAVA_INT,value.shape.numel.toInt)
+    }
+  def expandScalar(value: CudaTensor,shape: Shape): CudaTensor =
+    validate(value)
+    require(value.shape.rank==0,"expandScalar requires rank zero")
+    execute(shape,shape.numel,kernels("expand_scalar")) { (arena,result) =>
+      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) :+
+        arena.allocateFrom(JAVA_INT,shape.numel.toInt)
+    }
   def scale(value: CudaTensor,scalar: Float): CudaTensor =
     validate(value)
     execute(value.shape,value.shape.numel,kernels("scale")) { (arena,result) =>

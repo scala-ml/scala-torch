@@ -1,6 +1,6 @@
 # Float32 inference execution
 
-`FloatBackend[T]` selects a typed execution/storage backend without implicit CPU/GPU transfer. `CpuFloatBackend` operates on immutable `Tensor[Float]`; `CudaSession` implements the same interface for owned `CudaTensor` buffers. This explicit inference interface does not change existing Tensor or Variable operations and does not provide GPU autograd.
+`FloatBackend[T]` selects a typed execution/storage backend without implicit CPU/GPU transfer. `CpuFloatBackend` operates on immutable `Tensor[Float]`; `CudaSession` implements the same interface for owned `CudaTensor` buffers. Operations do not record gradients themselves. The separate [BackendTape](backend-autograd.md) now provides basic first-order CPU/CUDA autodiff without changing existing Tensor or Variable operations.
 
 ```scala
 import scalatorch.FloatBackend
@@ -26,6 +26,7 @@ Inputs remain unchanged, operation results are independently releasable, and the
 | matmul | Rank-2 Float32 matrices |
 | add/multiply | Exact matching shapes; no implicit broadcasting |
 | scale | Elementwise Float32 scalar multiplication, preserving IEEE nonfinite behavior |
+| fill / sum / expandScalar | Backend creation, total Double-accumulated scalar reduction, and rank-zero expansion |
 | silu | Stable sign-based sigmoid; negative infinity maps to negative zero |
 | rmsNorm | Positive final-axis width, matching rank-1 weight, finite positive Double epsilon |
 

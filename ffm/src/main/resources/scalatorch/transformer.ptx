@@ -3,6 +3,55 @@
 .target sm_50
 .address_size 64
 
+.visible .entry fill(.param .u64 out, .param .u32 count, .param .f32 value) {
+ .reg .pred p;
+ .reg .b32 r<5>;
+ .reg .b64 d<3>;
+ .reg .f32 f;
+ ld.param.u64 d0,[out]; ld.param.u32 r0,[count]; ld.param.f32 f,[value];
+ mov.u32 r1,%tid.x; mov.u32 r2,%ctaid.x; mov.u32 r3,%ntid.x;
+ mad.lo.u32 r4,r2,r3,r1; setp.ge.u32 p,r4,r0; @p bra DONE;
+ mul.wide.u32 d1,r4,4; add.u64 d2,d0,d1; st.global.f32 [d2],f;
+DONE:
+ ret;
+}
+
+.visible .entry expand_scalar(.param .u64 a, .param .u64 out, .param .u32 count) {
+ .reg .pred p;
+ .reg .b32 r<5>;
+ .reg .b64 d<4>;
+ .reg .f32 f;
+ ld.param.u64 d0,[a]; ld.param.u64 d1,[out]; ld.param.u32 r0,[count];
+ mov.u32 r1,%tid.x; mov.u32 r2,%ctaid.x; mov.u32 r3,%ntid.x;
+ mad.lo.u32 r4,r2,r3,r1; setp.ge.u32 p,r4,r0; @p bra DONE;
+ ld.global.f32 f,[d0]; mul.wide.u32 d2,r4,4; add.u64 d3,d1,d2;
+ st.global.f32 [d3],f;
+DONE:
+ ret;
+}
+
+// Serial reference reduction; no throughput claim.
+.visible .entry sum(.param .u64 a, .param .u64 out, .param .u32 count) {
+ .reg .pred p;
+ .reg .b32 r<4>;
+ .reg .b64 d<4>;
+ .reg .f32 f;
+ .reg .f64 g<2>;
+ mov.u32 r0,%tid.x; setp.ne.u32 p,r0,0; @p bra DONE;
+ mov.u32 r0,%ctaid.x; setp.ne.u32 p,r0,0; @p bra DONE;
+ ld.param.u64 d0,[a]; ld.param.u64 d1,[out]; ld.param.u32 r1,[count];
+ mov.u32 r2,0; mov.f64 g0,0d0000000000000000;
+LOOP:
+ setp.ge.u32 p,r2,r1; @p bra STORE;
+ mul.wide.u32 d2,r2,4; add.u64 d3,d0,d2; ld.global.f32 f,[d3];
+ cvt.f64.f32 g1,f; add.rn.f64 g0,g0,g1;
+ add.u32 r2,r2,1; bra LOOP;
+STORE:
+ cvt.rn.f32.f64 f,g0; st.global.f32 [d1],f;
+DONE:
+ ret;
+}
+
 .visible .entry scale(.param .u64 a, .param .u64 out, .param .u32 count, .param .f32 scalar) {
  .reg .pred p;
  .reg .b32 r<5>;

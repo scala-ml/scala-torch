@@ -20,7 +20,7 @@ Safetensors archives can now be indexed and read without Python: F16/BF16/F32→
 
 Differentiable causal grouped-query attention and Llama-style RoPE are available on rank-4 `(batch, heads, tokens, width)` Variables. Attention supports query position offsets for decode chunks and a configurable score-workspace limit. Numerical gradient and masking tests cover these operations.
 
-Not implemented yet: GPU autograd/training, cuBLAS acceleration, broader tokenizer/config variants, or diffusion/NUI migration. Persistent GPU inference and CPU LoRA training are described below. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
+Not implemented yet: GPU transformer training, cuBLAS acceleration, broader tokenizer/config variants, or diffusion/NUI migration. Persistent GPU inference, CPU LoRA training and basic backend autodiff are described below. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
 
 ```sh
 sbt 'core / Test / testOnly scalatorch.*'
@@ -182,3 +182,9 @@ Backend rotary positions and causal grouped-query attention now run on CPU or CU
 [Prepared Llama inference](docs/research/backend-llama.md) now runs complete models with resident CPU or CUDA weights, including LoRA factors. The native CUDA CLI generates **The capital of France is Paris.** from pinned SmolLM2 weights, and all196608 independent Candle reference logits pass the existing tolerance. GPU training remains pending; resident KV caching is described below.
 
 [Resident backend KV caches](docs/research/backend-kv-cache.md) now make cached CPU/CUDA generation the default. Device K/V buffers stay at fixed capacity, cached SmolLM2 logits match Candle, and rejected decodes leave the committed position unchanged.
+
+[Scoped backend autodiff](docs/research/backend-autograd.md) now differentiates matrix/layout and basic arithmetic operations on CPU or CUDA. A resident GPU training test learns `y=2x+1` in 100 steps, reducing loss from9.0 to1.21e-13 while restoring its allocation baseline after every step. Transformer backward kernels and backend optimizer/checkpoint integration remain open. Enable the separate real-GPU autograd gate with:
+
+```sh
+sbt --server -Dsbt.io.virtual=false -Dsbt.server.autostart=false -batch ';set autograd / Test / envVars += "SCALATORCH_CUDA_TESTS" -> "1";autograd / Test / testOnly scalatorch.autograd.*'
+```

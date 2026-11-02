@@ -4,6 +4,14 @@ import scalatorch.*
 
 /** Immutable CPU Float32 inference backend; release is a no-op for GC-owned storage. */
 object CpuFloatBackend extends FloatBackend[Tensor[Float]]:
+  def fill(shape: Shape,value: Float): Tensor[Float] =
+    require(shape.numel<=Int.MaxValue,"fill exceeds Int indexing")
+    Tensor.fromFloats(Array.fill(shape.numel.toInt)(value),shape)
+  def sum(value: Tensor[Float]): Tensor[Float] =
+    Tensor.fromFloats(Array(value.toFloatArray.foldLeft(0.0)((a,b) => a+b).toFloat),Shape.from(Seq.empty))
+  def expandScalar(value: Tensor[Float],shape: Shape): Tensor[Float] =
+    require(value.shape.rank==0,"expandScalar requires rank zero")
+    fill(shape,value.toFloatArray.head)
   def attentionCache(batchSize: Int,heads: Int,capacity: Int,keyWidth: Int,valueWidth: Int,
       maxBytes: Long = 268435456L): AttentionCache[Tensor[Float]] =
     new CpuAttentionCache(CacheLayout(batchSize,heads,capacity,keyWidth,valueWidth,maxBytes))

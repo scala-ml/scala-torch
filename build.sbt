@@ -17,7 +17,9 @@ lazy val ffm = project.dependsOn(core, cpu % "test->compile").settings(common).s
   Compile / run / fork := true,
   Compile / run / javaOptions += "--enable-native-access=ALL-UNNAMED"
 )
-lazy val autograd = project.dependsOn(cpu).settings(common)
+lazy val autograd = project.dependsOn(cpu, ffm % "test->compile").settings(common).settings(
+  Test / javaOptions += "--enable-native-access=ALL-UNNAMED"
+)
 lazy val tensorio = (project in file("io")).dependsOn(core).settings(common).settings(
   libraryDependencies += "com.fasterxml.jackson.core" % "jackson-core" % "2.20.1"
 )

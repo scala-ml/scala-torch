@@ -4,6 +4,33 @@ import scalatorch.*
 import scalatorch.cpu.CpuFloatBackend
 
 class CudaOpsSuite extends munit.FunSuite:
+  test("CUDA scalar creation reduction and expansion preserve IEEE values and budgets") {
+    gpu()
+    CudaSession.withDevice() { session =>
+      for values <- Seq(Array(1e8f,1f,-1e8f,2f),Array(Float.NaN,1f,2f,3f),Array(Float.PositiveInfinity,Float.NegativeInfinity,0f,1f)) do
+        val source=tensor(values,2,2).transpose(0,1)
+        val x=session.upload(source);val sum=session.sum(x)
+        closeEnough(sum.toCpu.toFloatArray,CpuFloatBackend.sum(source).toFloatArray)
+        sum.close();x.close()
+      val zero=session.fill(Shape.from(Seq.empty),-0f)
+      val expanded=session.expandScalar(zero,Shape.from(Seq(137L)))
+      assert(expanded.toCpu.toFloatArray.forall(v => java.lang.Float.floatToRawIntBits(v)==0x80000000))
+      intercept[IllegalArgumentException](session.expandScalar(expanded,Shape.from(Seq(2L))))
+      expanded.close();zero.close()
+      val empty=session.fill(Shape.from(Seq(0L,Long.MaxValue)),2f)
+      val sum=session.sum(empty)
+      assertEquals(sum.toCpu.toFloatArray.toVector,Vector(0f))
+      sum.close();empty.close()
+      assertEquals(session.allocatedBytes,0L)
+    }
+    CudaSession.withDevice(maxBytes=4) { session =>
+      val scalar=session.fill(Shape.from(Seq.empty),3f)
+      intercept[IllegalArgumentException](session.sum(scalar))
+      intercept[IllegalArgumentException](session.expandScalar(scalar,Shape.from(Seq(2L))))
+      assertEquals(session.allocatedBytes,4L)
+      scalar.close()
+    }
+  }
   test("CUDA dot products match Numscala linear reduction for complete groups and tails") {
     gpu()
     CudaSession.withDevice() { session =>
