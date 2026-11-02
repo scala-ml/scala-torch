@@ -1,3 +1,27 @@
+## Contiguous host-copy acceleration and running512px acceptance (2026-11-03)
+
+Tensor.logicalArray now bulk-copies contiguous storage via System.arraycopy,
+respecting offset and returning independent primitive arrays. Strided views keep
+existing Layout.index behavior. Core20, CUDA session/ops13 and CUDA offload2 tests
+passed. Added semantic tests cover raw bits, offset slices and independent arrays;
+existing transpose/reversal/broadcast/empty tests pass. Baseline semantics tests
+passed before optimization; performance was verified with actual SD1.5 execution.
+
+Standard SD1.5 Java-only64x64/two-step generation improved77.9136696s ->31.6210033s
+in smoke comparison (~2.46x, not controlled benchmark). Output PNG SHA256 is
+identical92a0f854009740b088f484a538e401661333aff5c466df60f7ba5a7d478ecd86.
+Logs: .superpowers/sd15-64-2/protocol-before-copy.jsonl and protocol.jsonl;
+PNGs native-b0278d12-d2f4-4923-b4ac-3722b8832b1c.png and
+native-d64033b9-f6f1-4d69-932e-feab13bb89b6.png.
+
+RUNNING: .superpowers/run-sd15.ps1 -Side512 -Steps20 via exec session11471.
+Java wrapper PID508, actual worker PID33796, PowerShell parent37596 at last check.
+Do not restart just because observation times out. Poll session11471 or inspect
+current process/protocol state. Model load succeeded. Logs/output:
+.superpowers/sd15-512-20/protocol.jsonl and stderr.txt (stderr flushed at exit).
+Both CUDA offload options,1GiB session allocation caps,134217728 scores,12GiB JVM
+heap. Last observed GPU83%,817MiB total device memory; generation result pending.
+NUI unchanged. Do not claim512px acceptance without final result and image review.
 ## First standard SD1.5 native load and small-image smoke (2026-11-03)
 
 Provisioned original FP32 Diffusers SD1.5 from public mirror, pinned revision

@@ -36,3 +36,15 @@ content or quality acceptance. Full512x512 and adequate sampling remain untested
 Live jcmd sampling at53s showed the worker in Tensor.logicalArray/Layout.index
 while preparing a convolution weight upload. This identifies a host-copy
 optimization candidate; one stack sample is not a complete time profile.
+## Contiguous host-copy optimization
+
+Tensor.logicalArray uses System.arraycopy for contiguous layouts, including an
+explicit nonzero storage offset; strided layouts retain existing indexing.
+Fresh64x64/two-step run with otherwise identical Java/model/sampler settings
+reported31.6210033s versus77.9136696s before (~2.46x for this smoke run, not a
+controlled general benchmark). Both PNG files have SHA256
+92a0f854009740b088f484a538e401661333aff5c466df60f7ba5a7d478ecd86.
+Output remains the same coarse blobs. Core20, CUDA session/ops13, offloaded
+model2 tests passed; additional extraction coverage includes offsets, raw NaN/
+negative-zero bits and independent primitive arrays. Existing transpose/reverse/
+broadcast/empty cases pass. Further normal-resolution verification is in progress.
