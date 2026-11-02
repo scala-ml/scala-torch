@@ -19,7 +19,7 @@ Five tests cover:
 
 The affected diffusion suite, including public CLIP/U-Net checkpoints, passes **47 tests, 0 failures, 0 skips**. Read-only review found no correctness blockers. No existing core/autograd kernels changed; the latest all-module public/CUDA run remains the prior 312-test release-preparation run.
 
-## Next interoperability gate
+## Pretrained interoperability
 
 The VAE files from `hf-internal-testing/tiny-sd-pipe`, revision `39f7e1819d772fbb8dd7f2aa3da8e2fc5a9bd917`, have been downloaded under ignored `.superpowers/models/tiny-sd/vae`:
 
@@ -27,6 +27,6 @@ The VAE files from `hf-internal-testing/tiny-sd-pipe`, revision `39f7e1819d772fb
 - `diffusion_pytorch_model.safetensors`: 2646532 bytes, SHA256 `7999b516094ac4239121d9f62a37e6be99620e7016220011bb99cf8b1a391aad`.
 - Config uses channels32/64, one residual layer per encoder stage, groups32, latent width4, image width3 and pipeline scaling factor0.18215.
 
-These files have **not yet been loaded into this graph or compared against a public reference**. Config/weight mapping and independent encoder/decoder parity are the next gate. Posterior log-variance clamping, sampling/KL, image normalization, diffusion latent scaling, pixel conversion, schedulers and prompt processing belong to subsequent integration; this API does not silently implement them. Complete image generation and Python-free NUI remain unfinished.
+These files are now loaded and independently compared in the [pretrained VAE gate](pretrained-vae.md). Six encoder/decoder cases agree within3e-6; the expanded affected public diffusion suite passes57 tests. Posterior log-variance clamping, sampling/KL, image normalization, diffusion latent scaling, pixel conversion, schedulers and prompt processing belong to subsequent integration; this API does not silently implement them. Complete image generation and Python-free NUI remain unfinished.
 
 The verified Maven preparation commit `10878ca` remains available. This new graph is a subsequent implementation slice and does not claim that any Central artifact has been uploaded.

@@ -1,0 +1,9 @@
+[package]
+name = "scala-torch-vae-reference"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+candle = { package = "candle-core", version = "=0.9.1" }
+candle-nn = "=0.9.1"
+candle-transformers = "=0.9.1"
+anyhow = "1"
