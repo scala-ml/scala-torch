@@ -1,0 +1,68 @@
+package scalatorch.models
+
+import scalatorch.*
+import scalatorch.autograd.Variable
+
+class EulerSchedulerSuite extends munit.FunSuite:
+  private def v(xs: Float*)=Variable(Tensor.fromFloats(xs.toArray,Shape.from(Seq(xs.size))))
+  test("beta products determine sigma and interpolation with explicit spacing") {
+    val noise=DiffusionNoiseSchedule.fromBetas(Vector(.2,.25))
+    assertEqualsDouble(noise.sigmas(0),.5,1e-14)
+    assertEqualsDouble(noise.sigmas(1),math.sqrt(2.0/3),1e-14)
+    val schedule=noise.euler(2)
+    assertEquals(schedule.timesteps,Vector(1f,0f))
+    assertEquals(schedule.sigmas,noise.sigmas.reverse :+ 0.0)
+    val ten=DiffusionNoiseSchedule.linear(10,.001,.02)
+    assertEquals(ten.euler(4).timesteps,Vector(9f,6f,3f,0f))
+    assertEquals(ten.euler(4,DiffusionTimestepSpacing.Leading,1).timesteps,Vector(7f,5f,3f,1f))
+    assertEquals(ten.euler(4,DiffusionTimestepSpacing.Trailing).timesteps,Vector(9f,7f,4f,1f))
+    assertEquals(ten.euler(1).timesteps,Vector(0f))
+    val fractional=ten.euler(3)
+    assertEquals(fractional.timesteps,Vector(9f,4.5f,0f))
+    assertEqualsDouble(fractional.sigmas(1),(ten.sigmas(4)+ten.sigmas(5))*.5,1e-14)
+    val leading=ten.euler(4,DiffusionTimestepSpacing.Leading)
+    assertEqualsDouble(leading.initialNoiseSigma,math.hypot(leading.sigmas.head,1),1e-14)
+    assertEqualsDouble(DiffusionNoiseSchedule.linear(3,.01,.09,scaled=true).betas(1),.04,1e-14)
+  }
+  test("Euler prediction modes agree on an analytical denoising step") {
+    val schedule=EulerSchedule(Vector(9f,4f),Vector(2.0,1.0,0.0),2.0)
+    val sample=v(3f,-2f)
+    val clean=v(1f,2f)
+    val epsilon=v(1f,-2f)
+    val velocity=v(((3.0/5-1)*math.sqrt(5)/2).toFloat,((-2.0/5-2)*math.sqrt(5)/2).toFloat)
+    for (prediction,output) <- Vector((DiffusionPrediction.Epsilon,epsilon),(DiffusionPrediction.Sample,clean),(DiffusionPrediction.VPrediction,velocity)) do
+      val scheduler=EulerScheduler(schedule,prediction)
+      val result=scheduler.step(0,output,sample)
+      result.predictedOriginal.data.toFloatArray.zip(Array(1f,2f)).foreach((a,b) => assertEqualsFloat(a,b,1e-6f))
+      result.previous.data.toFloatArray.zip(Array(2f,0f)).foreach((a,b) => assertEqualsFloat(a,b,1e-6f))
+      val scaled=scheduler.scaleModelInput(0,sample).data.toFloatArray
+      assertEqualsFloat(scaled(0),(3/math.sqrt(5)).toFloat,1e-6f)
+  }
+  test("complete Euler trajectory recovers clean input and is stateless with gradients") {
+    val scheduler=EulerScheduler(EulerSchedule(Vector(9f,4f,0f),Vector(3.0,1.0,.5,0.0),3.0))
+    val clean=v(2f,-1f);val epsilon=v(.25f,-.5f)
+    var sample=scheduler.addNoise(0,clean,epsilon)
+    for i <- 0 until 3 do sample=scheduler.step(i,epsilon,sample).previous
+    assertEquals(sample.data.toFloatArray.toVector,clean.data.toFloatArray.toVector)
+    sample.sum().backward()
+    assertEquals(clean.grad.get.toFloatArray.toVector,Vector(1f,1f))
+    assertEquals(epsilon.grad.get.toFloatArray.toVector,Vector(0f,0f))
+    assertEquals(scheduler.step(0,epsilon,v(3,4)).previous.data.toFloatArray.toVector,
+      scheduler.step(0,epsilon,v(3,4)).previous.data.toFloatArray.toVector)
+  }
+  test("Euler rejects malformed schedules, shapes, step indices and allocation budgets") {
+    for betas <- Vector(Vector.empty[Double],Vector(0.0),Vector(1.0),Vector(Double.NaN)) do
+      intercept[IllegalArgumentException](DiffusionNoiseSchedule.fromBetas(betas))
+    intercept[IllegalArgumentException](EulerSchedule(Vector(1f),Vector(0.0,0.0),1))
+    intercept[IllegalArgumentException](EulerSchedule(Vector(1f,0f),Vector(1.0,2.0,0.0),2))
+    intercept[IllegalArgumentException](EulerSchedule(Vector(Float.NaN),Vector(1.0,0.0),1))
+    val noise=DiffusionNoiseSchedule.linear(10,.001,.02)
+    intercept[IllegalArgumentException](noise.euler(0))
+    intercept[IllegalArgumentException](noise.euler(11))
+    intercept[IllegalArgumentException](noise.euler(10,DiffusionTimestepSpacing.Leading,1))
+    val scheduler=EulerScheduler(noise.euler(2),maxElements=2)
+    intercept[IllegalArgumentException](scheduler.step(2,v(1),v(1)))
+    intercept[IllegalArgumentException](scheduler.step(0,v(1),v(1,2)))
+    intercept[IllegalArgumentException](scheduler.scaleModelInput(0,v(1,2,3)))
+    assertEquals(scheduler.step(0,v(),v()).previous.data.shape,Shape.from(Seq(0)))
+  }

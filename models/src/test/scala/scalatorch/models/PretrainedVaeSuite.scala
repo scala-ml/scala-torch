@@ -247,3 +247,37 @@ class PretrainedVaeSuite extends munit.FunSuite:
     assertEquals(actual.data.toFloatArray.toVector,model.decode(latent).data.toFloatArray.toVector)
     assert(!actual.requiresGrad)
   }
+
+  test("published CLIP U-Net Euler VAE loop yields reproducible conditioning-sensitive images") {
+    val dirs=Vector("clip","unet","vae").map(key => sys.props.get(s"scalatorch.$key.dir").map(Path.of(_)))
+    assume(dirs.forall(_.nonEmpty),"set pinned CLIP U-Net and VAE directories")
+    val Vector(clipDir,unetDir,vaeDir)=dirs.map(_.get): @unchecked
+    pinned(vaeDir)
+    for (dir,name,hash) <- Vector(
+      (clipDir,"model.safetensors","57f8ef72a6c2d5abd52829b83ed38d217cce0d515021db79147baf60dd94175f"),
+      (clipDir,"config.json","aae70cf2c528c154e5cbd2eba1249e759b91bbce15a9be74698f4a6492ec4879"),
+      (unetDir,"diffusion_pytorch_model.safetensors","d122d9ced096e51609cd202cb97ff6f2614e0be5394f3b38f84c8c58df04e07c"),
+      (unetDir,"config.json","2f80e0a35261d11d52c976b8bf15ec45ab414f46c5506e7a1f0c48851382ef06")) do
+      val stream=Files.newInputStream(dir.resolve(name))
+      try verify(stream,hash) finally stream.close()
+    val clip=PretrainedClip.load(clipDir);val unet=PretrainedUNet.load(unetDir);val vae=PretrainedVae.load(vaeDir)
+    val schedule=DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true).euler(4)
+    val scheduler=EulerScheduler(schedule)
+    val initial=Variable(Tensor.fromFloats(Array.tabulate(60)(i => math.sin(i*.17).toFloat),Shape.from(Seq(1,4,3,5))),false)
+    def run(token: Long): Vector[Float] =
+      val context=clip(Tensor.fromLongs(Array(0L,token,2L),Shape.from(Seq(1,3))))
+      var latent=initial*schedule.initialNoiseSigma.toFloat
+      for i <- schedule.timesteps.indices do
+        val time=Tensor.fromFloats(Array(schedule.timesteps(i)),Shape.from(Seq(1)))
+        val predicted=unet(scheduler.scaleModelInput(i,latent),time,context)
+        latent=scheduler.step(i,predicted,latent).previous
+        assert(!latent.requiresGrad)
+      val image=vae.decodeDiffusionLatents(latent)
+      assertEquals(image.data.shape,Shape.from(Seq(1,3,6,10)))
+      assert(!image.requiresGrad && image.data.toFloatArray.forall(_.isFinite))
+      image.data.toFloatArray.toVector
+    val first=run(7L)
+    assertEquals(first,run(7L))
+    val other=run(31L)
+    assert(first.zip(other).exists((a,b) => math.abs(a-b)>1e-5))
+  }
