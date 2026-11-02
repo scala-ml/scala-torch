@@ -297,6 +297,19 @@ class PretrainedVaeSuite extends munit.FunSuite:
     val dpmSchedule=DpmSchedule.karras(DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true),3)
     val dpmProgress=scala.collection.mutable.ArrayBuffer.empty[Int]
     val dpmImage=pipeline.generateDpm(request,dpmSchedule,onProgress=p => dpmProgress+=p.completedSteps)
+    val referenceNoise=Tensor.fromFloats(Array.tabulate(60)(i => (i%7-3)*.125f),Shape.from(Seq(1,4,3,5)))
+    val referenceImage=pipeline.generateDpm(request,dpmSchedule,noise=Some(referenceNoise))
+    val referenceStream=getClass.getResourceAsStream("/dpm/image-f32.bin")
+    val referenceBytes=try referenceStream.readAllBytes() finally referenceStream.close()
+    verify(new java.io.ByteArrayInputStream(referenceBytes),
+      "4dbb24c34998d8f1bce8a241cc875573f039485a819cec5eff1f527b1c4c4db4")
+    val referenceBuffer=ByteBuffer.wrap(referenceBytes).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+    val expectedImage=new Array[Float](referenceBuffer.remaining())
+    referenceBuffer.get(expectedImage)
+    assertEquals(referenceImage.toFloatArray.length,expectedImage.length)
+    val imageError=referenceImage.toFloatArray.zip(expectedImage).map((a,b) => math.abs(a-b)).max
+    println(s"DPM full-image Diffusers maxAbsError=$imageError")
+    assert(imageError<1e-4f)
     assertEquals(dpmProgress.toVector,Vector(1,2,3))
     assert(dpmImage.toFloatArray.forall(_.isFinite))
     assertEquals(dpmImage.toFloatArray.toVector,pipeline.generateDpm(request,dpmSchedule).toFloatArray.toVector)

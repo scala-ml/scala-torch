@@ -2,6 +2,15 @@
 
 ## Windows continuation (2026-11-03)
 
+Full tiny-image parity is now checked against Diffusers 0.33.1 / transformers
+4.49.0 / torch 2.7.1 CPU. With explicit noise, two prompts, CFG 3 and three
+DPM++/Karras steps, Scala's raw 1x3x6x10 decoded output matched all 180 values
+with max absolute error 3.7252903e-6. Static hashed reference bytes and an offline
+generator live in `models/src/test/resources/dpm/`; ordinary Scala tests do not
+invoke Python. This supersedes the earlier absence of full-image parity for
+this specific tiny case only. Practical models, more prompt/schedule cases,
+GPU diffusion and the NUI application remain unverified/unintegrated.
+
 Independent DPM verification now exists in `DpmReferenceSuite` and
 `models/src/test/resources/dpm/`. A disposable ignored reference venv used
 Python 3.12.12 / torch 2.7.1+cpu / diffusers 0.33.1 to export three four-step
