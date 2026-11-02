@@ -167,4 +167,3 @@ fidelity acceptance. Real image-input/VAE encoder/U-Net/decoder/output path
 completed without Python. Runtime14 jars were copied and hashed before launch.
 No active acceptance worker remains. Historical active-process notes below are
 superseded by terminal results, not instructions to restart old runs.
-
