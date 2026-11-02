@@ -17,7 +17,8 @@ lazy val ffm = project.dependsOn(core).settings(common).settings(
   Compile / run / fork := true,
   Compile / run / javaOptions += "--enable-native-access=ALL-UNNAMED"
 )
-lazy val root = (project in file(".")).aggregate(core, cpu, ffm).settings(
+lazy val autograd = project.dependsOn(cpu).settings(common)
+lazy val root = (project in file(".")).aggregate(core, cpu, ffm, autograd).settings(
   name := "scala-torch",
   publish / skip := true
 )

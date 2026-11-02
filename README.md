@@ -6,12 +6,15 @@ Requires **Java 25, Scala 3.3.8 LTS, sbt 2.0.10**. Versions are pinned in the bu
 
 Implemented: CPU tensors (Float32/Float64/Int64/Bool), checked shapes and views, slicing, broadcasting, Float32 add/reduction/matrix multiplication, and a numscala GEMM adapter. The FFM module includes host memory scopes, a real CUDA memory-copy probe, and a driver-level Float32 GEMM probe with owned stream/event completion.
 
-Not implemented yet: autograd, a persistent GPU Tensor backend, cuBLAS acceleration, model loading, LLM generation, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
+First-order CPU Float32 autograd is available through `scalatorch.autograd.Variable`: shared graph gradients, broadcast reductions, GEMM, ReLU, reshape/transpose, detach and thread-local noGrad. A Python-free linear regression training test verifies loss reduction using automatic gradients.
+
+Not implemented yet: trainable module/optimizer APIs, checkpointing, a persistent GPU Tensor backend, cuBLAS acceleration, model loading, LLM generation, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
 
 ```sh
 sbt 'core / Test / testOnly scalatorch.*'
 sbt 'cpu / Test / testOnly scalatorch.cpu.*'
 sbt 'ffm / Test / testOnly scalatorch.ffm.*'
+sbt 'autograd / Test / testOnly scalatorch.autograd.*'
 # Requires a Linux 64-bit CUDA driver and GPU; fails if unavailable:
 sbt 'ffm / Compile / runMain scalatorch.ffm.CudaProbe'
 # Force the actual GPU test, including when using an existing sbt server:
@@ -28,6 +31,17 @@ assert(gram.toFloatArray.toSeq == Seq(14f, 32f, 32f, 77f))
 ```
 
 `reshape` requires a contiguous layout; call `.contiguous` to copy a strided view first. Input and extracted arrays are copied. Operations currently use explicit CPU backends; no implicit device transfers or in-place public mutations.
+
+```scala
+import scalatorch.autograd.*
+
+val x = Variable(Tensor.fromFloats(Array(3f), Shape.from(Seq.empty)))
+val y = x * x + x
+y.backward()
+assert(x.grad.get.toFloatArray.toSeq == Seq(7f))
+```
+
+Raw Tensor operations do not record gradients; use Variable operations for differentiation. `backward` retains the immutable graph for reuse, accumulates gradients on leaves only, and requires `.zeroGrad()` to clear them. Use an explicit Tensor seed for nonscalar outputs. Gradients are first-order; parallel backward on shared leaves is unsupported. Variable reshape may copy a strided input, unlike strict raw Tensor reshape.
 
 - [Design and roadmap](docs/superpowers/specs/2026-11-02-scala-torch-design.md)
 - [Initial implementation plan](docs/superpowers/plans/2026-11-02-tensor-foundation.md)
