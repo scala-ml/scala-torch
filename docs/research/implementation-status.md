@@ -2,7 +2,13 @@
 
 Updated 2026-11-02. The design was approved by the user. Subsequent explicit requirements set Scala to **3.3.8 LTS**, sbt to **2.x** (pinned to 2.0.10), and subsequently communication to Japanese. These supersede the initial 3.3.7 candidate in historical research notes.
 
+## Immediate application target
+
+The user confirmed `/home/mizushima/dev/stablediffusion-nui` as the current Python-removal target. The [refreshed local inventory](nui-current-migration.md) pins clean revisiond9f13ea:48 worker requests,121 plugins,100 parameter fields and138 Python modules. All migration rows remain open. Library milestones below support this application goal and do not replace it.
+
 ## Verified checkpoint
+
+[Native CLIP fast-profile BPE](clip-fast-tokenizer.md) now matches15 independent tokenizers0.22.1 cases, including Unicode normalization, code-point lowercase, special tokens and unknown symbols. Fixed-size batches preserve EOS and require explicit truncation. Natural-language inputs drive frozen public CLIP features. Affected public diffusion72tests and existing SmolLM2/tokenizer5tests pass without failures/skips; review found no blockers. Slow ftfy/HTML repair and NUI weighted long-prompt compatibility remain open.
 
 [Euler scheduling](euler-scheduler.md) adds immutable beta/sigma schedules, three timestep spacings and stateless epsilon/sample/velocity updates. A pinned public CLIP→U-Net→VAE integration runs four denoising steps with reproducible, conditioning-sensitive image tensors. Analytical schedule/update/gradient checks and affected public diffusion regression: **68 passed, 0 failed, 0 skipped**. Read-only review found no correctness blockers. This uses explicit token IDs and deterministic test inputs; it is not a complete prompt-to-image pipeline or independent end-to-end numerical parity. NUI's remaining sampler inventory and migration are open.
 

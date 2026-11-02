@@ -1,5 +1,7 @@
 # Stable Diffusion NUI migration inventory
 
+**Current target:** the user identified `/home/mizushima/dev/stablediffusion-nui` on2026-11-03. See the [refreshed local inventory and integration plan](nui-current-migration.md). The8823aa4 tables below remain historical evidence, not the current complete surface.
+
 Snapshot: [kmizu/stablediffusion-nui at 8823aa413a3b3a1db682456357b15ee681387554](https://github.com/kmizu/stablediffusion-nui/tree/8823aa413a3b3a1db682456357b15ee681387554), inspected locally on 2026-11-02. This supplements the earlier audit at revision1f41743; it does not silently treat those revisions as identical. App version0.03, protocol version1. The upstream checkout was read only; no NUI source was changed or incorporated into scala-torch.
 
 This is a complete static enumeration of the selected dispatch table, registered standard plugins and Python package files at that revision. It is **not** a completed behavioral audit, a runtime test, or evidence that any NUI feature has been ported. Every migration row remains open. NUI source carries AGPLv3; the future integration boundary must remain separate from generic scala-torch implementation work.
