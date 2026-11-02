@@ -89,6 +89,8 @@ final class Variable private (
   def rmsNorm(weight: Variable, epsilon: Double = 1e-6): Variable = TransformerOps.rmsNorm(this, weight, epsilon)
   def gelu(approximation: GeluApproximation = GeluApproximation.Erf): Variable = GeluOps(this,approximation)
   def silu(): Variable = TransformerOps.silu(this)
+  /** CLIP QuickGELU: x * sigmoid(1.702 * x), with stable Double intermediates. */
+  def quickGelu(): Variable = TransformerOps.silu(this,1.702)
   /** Noncausal scaled dot-product attention over all keys, with optional grouped query heads. */
   def scaledDotProductAttention(key: Variable,value: Variable,maxScoreElements: Long = 16777216L): Variable =
     AttentionOps.dense(this,key,value,maxScoreElements)

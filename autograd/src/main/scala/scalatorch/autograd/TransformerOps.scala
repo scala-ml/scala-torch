@@ -87,19 +87,20 @@ private[autograd] object TransformerOps:
       Tensor.fromFloats(sums.map(_.toFloat), weight.data.shape)
     Variable.result(Tensor.fromFloats(output, shape), Vector(input -> inputPullback, weight -> weightPullback))
 
-  def silu(input: Variable): Variable =
+  def silu(input: Variable,beta: Double = 1.0): Variable =
     val x = input.data.toFloatArray
     val derivatives = new Array[Double](x.length)
     val output = new Array[Float](x.length)
     var i = 0
     while i < x.length do
       val value = x(i).toDouble
-      val sigmoid = if value >= 0 then 1.0 / (1.0 + math.exp(-value)) else
-        val e = math.exp(value)
+      val scaled = beta * value
+      val sigmoid = if scaled >= 0 then 1.0 / (1.0 + math.exp(-scaled)) else
+        val e = math.exp(scaled)
         e / (1.0 + e)
       output(i) = (if value == Double.NegativeInfinity then -0.0 else value * sigmoid).toFloat
       derivatives(i) = if sigmoid == 0 then 0.0 else if sigmoid == 1 then 1.0 else
-        sigmoid * (1.0 + value * (1.0 - sigmoid))
+        sigmoid * (1.0 + scaled * (1.0 - sigmoid))
       i += 1
     Variable.result(Tensor.fromFloats(output, input.data.shape), Vector(input -> ((g: Tensor[Float]) =>
       val upstream = g.toFloatArray

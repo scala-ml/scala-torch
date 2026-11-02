@@ -40,7 +40,7 @@ sbt --server -Dsbt.io.virtual=false -Dsbt.server.autostart=false -batch ';set mo
 
 Without that property the two public-checkpoint tests explicitly skip; config and synthetic archive tests remain offline. The initial nine tests passed with the property enabled. Review then added enforced config/checkpoint/fixture SHA256 checks and a corruption regression. The synthetic tests check training opt-in, frozen F16/BF16 loading, exact output-bias mapping, missing/extra/misshaped/unsupported-dtype tensors and budget rejection.
 
-This tiny public model verifies checkpoint interoperability, not image quality. CLIP text conditioning, VAE decode, schedulers, integrated image generation, CUDA image kernels and full NUI migration remain unfinished.
+This tiny public model verifies checkpoint interoperability, not image quality. [CLIP text encoding](clip-text.md) and CLIP-to-U-Net integration are now verified. Prompt tokenization, VAE decode, schedulers, integrated image generation, CUDA image kernels and full NUI migration remain unfinished.
 
 The original Candle attention.rs SHA256 is `a5c47be3b77dae5db2940c5e6dedb3688fc38bf64ef7e41ec0fa6820b0da46d3`; after the single-line patch it is `1b0340a7028920d68d34ffc2fbc614f2cba9877bd2a80d28bd08b888e10ba59e`. The shape-manifest SHA256 is `56d586abab1789e1e880d0f9b7677be5fb3ee062aee01d1d3382e58d7efebef9`.
 
