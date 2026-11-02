@@ -7,7 +7,8 @@ import java.time.Instant
 object NativeSystemStatus:
   import NativeJson.*
   def snapshot(model: Map[String,NativeJson]=Map.empty,vaeDevice: String="cpu",unetDevice: String="cpu",
-      vaeOffloadWeights: Boolean=false,unetOffloadWeights: Boolean=false): Map[String,NativeJson]=
+      vaeOffloadWeights: Boolean=false,unetOffloadWeights: Boolean=false,
+      maxAttentionScoreElements: Long=16777216L): Map[String,NativeJson]=
     val cuda=vaeDevice!="cpu" || unetDevice!="cpu"
     def mb(bytes: Long): NativeJson=Number(BigDecimal(bytes)/BigDecimal(1048576))
     val runtime=ManagementFactory.getRuntimeMXBean
@@ -29,6 +30,7 @@ object NativeSystemStatus:
       "runtime"->Obj(Map("pipeline"->Str("scala-torch"),"backend"->Str(if cuda then "hybrid" else "cpu"),"dtype"->Str("float32"),
         "vae_device"->Str(vaeDevice),"unet_device"->Str(unetDevice),
         "vae_offload_weights"->Bool(vaeOffloadWeights),"unet_offload_weights"->Bool(unetOffloadWeights),
+        "max_attention_score_elements"->Number(BigDecimal(maxAttentionScoreElements)),
         "text_encoder_device"->Str("cpu"),"scheduler_device"->Str("cpu"),
         "vram_mode"->Str("cpu"),"vae_tiling"->Bool(false),"dry_run"->Bool(false),
         "flags"->Arr((Vector("cpu","float32")++(if cuda then Vector("cuda") else Vector.empty)).map(Str.apply)),

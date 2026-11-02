@@ -21,7 +21,10 @@ class NativeWorkerProcessSuite extends munit.FunSuite:
     assume(sys.env.get("SCALATORCH_CUDA_TESTS").contains("1"),"real GPU test disabled")
     runWorker(true,true,true)
   }
-  private def runWorker(cuda: Boolean,unetCuda: Boolean=false,offload: Boolean=false): Unit = {
+  test("worker attention work limit rejects generation before progress") {
+    runWorker(false,scoreLimit=1)
+  }
+  private def runWorker(cuda: Boolean,unetCuda: Boolean=false,offload: Boolean=false,scoreLimit: Long=134217728L): Unit = {
     val configured=sys.props.get("scalatorch.clip.dir")
     assume(configured.nonEmpty,"public tiny model required")
     val root=Path.of(configured.get).getParent
@@ -37,6 +40,7 @@ class NativeWorkerProcessSuite extends munit.FunSuite:
     builder.environment().remove("PYTHONPATH")
     builder.environment().remove("PYTHONHOME")
     builder.environment().remove("JAVA_TOOL_OPTIONS")
+    builder.environment().put("SDFX_SCALATORCH_MAX_ATTENTION_SCORE_ELEMENTS",scoreLimit.toString)
     builder.environment().put("SDFX_SCALATORCH_VAE_DEVICE",if cuda then "cuda" else "cpu")
     builder.environment().remove("SDFX_SCALATORCH_VAE_MAX_BYTES")
     builder.environment().put("SDFX_SCALATORCH_UNET_DEVICE",if unetCuda then "cuda" else "cpu")
@@ -81,9 +85,19 @@ class NativeWorkerProcessSuite extends munit.FunSuite:
       assertEquals(status("runtime").asInstanceOf[Obj].fields("unet_device"),Str(if unetCuda then "cuda:0" else "cpu"))
       assertEquals(status("runtime").asInstanceOf[Obj].fields("unet_offload_weights"),Bool(offload))
       assertEquals(status("runtime").asInstanceOf[Obj].fields("vae_offload_weights"),Bool(offload))
+      assertEquals(status("runtime").asInstanceOf[Obj].fields("max_attention_score_elements"),Number(BigDecimal(scoreLimit)))
       send("generate","txt2img",Map("output_dir"->Str(temp.toString),"params"->Obj(Map(
         "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(3),
         "seed"->Number(BigDecimal(Long.MaxValue)),"sampler_name"->Str("DPM++ 2M"),"scheduler"->Str("Karras")))))
+      if scoreLimit==1 then
+        val error=receive()
+        assertEquals(error("type"),Str("error"))
+        assertEquals(error("id"),Str("generate"))
+        assert(NativeJson.render(Obj(error)).contains("attention"))
+        send("shutdown","shutdown")
+        assertEquals(receive()("id"),Str("shutdown"))
+        assert(process.waitFor(5,TimeUnit.SECONDS))
+        return
       for step <- 1 to 2 do
         val event=receive()
         assertEquals(event("event"),Str("progress"))

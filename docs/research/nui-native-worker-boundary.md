@@ -1,3 +1,20 @@
+# Explicit attention work limit (2026-11-03)
+
+SDFX_SCALATORCH_MAX_ATTENTION_SCORE_ELEMENTS configures the maximum score count
+per attention call for both U-Net and VAE, including replacement VAEs. Default
+16777216 is unchanged; worker accepts0..2147483647. Counts include batch, query
+heads, query tokens and key tokens. Status runtime.max_attention_score_elements
+reports the configured limit. PretrainedUNet.load now exposes maxScoreElements,
+matching the existing VAE loader option, and passes it to every attention block.
+
+This is a work guard, not a byte budget. CUDA noncausal attention still slices
+scratch to16MiB or available session memory. CPU attention may allocate the full
+score array; raising the limit does not make CPU memory use bounded. At4096
+tokens/eight heads (the token/head geometry of SD1.5 512px self-attention), the
+score count is134217728. A real-GPU width-one fixture fits a20MiB session and
+produces the exact constant result; default work guard rejects it. This only
+verifies score geometry, not a complete standard model, head widths or throughput.
+Normal checkpoint loading, performance and full NUI parity remain incomplete.
 # CUDA weight offload through native worker (2026-11-03)
 
 With CUDA placement selected, SDFX_SCALATORCH_UNET_OFFLOAD_WEIGHTS=true and

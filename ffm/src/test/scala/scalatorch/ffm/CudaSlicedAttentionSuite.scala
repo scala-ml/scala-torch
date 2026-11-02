@@ -7,6 +7,23 @@ class CudaSlicedAttentionSuite extends munit.FunSuite:
   private def data(dims: Seq[Long],seed: Int): Tensor[Float] =
     val shape=Shape.from(dims);val random=new java.util.Random(seed)
     Tensor.fromFloats(Array.fill(shape.numel.toInt)(random.nextGaussian().toFloat),shape)
+  test("explicit work limit permits 4096 tokens and eight heads with bounded scratch") {
+    gpu()
+    CudaSession.withDevice(maxBytes=20L*1024*1024) { s =>
+      // SD1.5 512px self-attention token/head geometry; width one isolates the score matrix.
+      val shape=Shape.from(Seq(1L,8L,4096L,1L))
+      val q=s.fill(shape,0f);val k=s.fill(shape,0f);val v=s.fill(shape,2f)
+      val before=s.allocatedBytes
+      intercept[IllegalArgumentException](s.scaledDotProductAttention(q,k,v))
+      assertEquals(s.allocatedBytes,before)
+      val out=s.scaledDotProductAttention(q,k,v,maxScoreElements=134217728L)
+      assert(out.toCpu.toFloatArray.forall(_==2f))
+      out.close()
+      assertEquals(s.allocatedBytes,before)
+      v.close();k.close();q.close()
+      assertEquals(s.allocatedBytes,0L)
+    }
+  }
   test("query slices preserve exact dense outputs across batch head and GQA boundaries") {
     gpu()
     CudaSession.withDevice() { s =>

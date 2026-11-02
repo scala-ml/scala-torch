@@ -1,3 +1,30 @@
+## Attention work limit for larger spatial inputs (2026-11-03)
+
+PretrainedUNet.load appends maxScoreElements=16777216 and propagates it to every
+self/cross attention block. NativeDiffusionBackend accepts maxAttentionScoreElements
+(default unchanged,0..Int.MaxValue) and applies it to U-Net, VAE and replacement
+VAEs. NativeWorkerMain reads SDFX_SCALATORCH_MAX_ATTENTION_SCORE_ELEMENTS; status
+runtime.max_attention_score_elements reports it. This explicit work guard remains
+separate from sliced CUDA scratch/session byte caps. CPU still uses dense scores.
+
+Actual GPU test:4096 tokens,8heads,width1 has134217728 scores, rejected by default
+and accepted with explicit limit under20MiB session budget; constant output exact,
+no allocation leaks. Width1 isolates score geometry, not normal-model head width,
+full image generation or practical throughput. Passed4 sliced-attention tests.
+PretrainedUNetSuite passed8 with public fixture, including propagation to all
+loaded blocks and original independent Candle reference outputs. Worker process
+suite passed5 (including limit1 rejection before progress, four successful CPU/
+CUDA/offload generation modes); backend suite passed2. Final worker/status rerun
+passed7 with no skips. Initial loader run had skipped public tests because server
+lacked properties; restarted with explicit CUDA flag and all3 model properties
+before collecting passing evidence.
+
+Only tiny-sd-pipe was found in this workspace model folder; the historical NUI
+D:/stable-diffusion-webui-reForge model location did not yield local model files.
+Next locate/provision a standard Diffusers checkpoint, inspect host memory needs,
+and run real-model acceptance; then continue missing NUI features/formats. Goal
+remains incomplete. scala-torch sbt now has CUDA tests and model properties; NUI
+sbt stopped. No NUI edits in this checkpoint; its dedicated branch is preserved.
 ## CUDA offload connected to pipeline, worker and NUI (2026-11-03)
 
 UNetExecution.Cuda / VaeExecution.Cuda now expose offloadWeights=false and pass

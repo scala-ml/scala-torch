@@ -9,8 +9,9 @@ import scala.util.Using
 
 /** Diffusers single or indexed safetensors loader. Parameters are frozen unless requested. */
 object PretrainedUNet:
-  def load(directory: Path,trainable: Boolean=false,maxParameters: Long=1000000000L): ConditionalUNet2d =
-    require(maxParameters>=0,"negative U-Net parameter budget")
+  def load(directory: Path,trainable: Boolean=false,maxParameters: Long=1000000000L,
+      maxScoreElements: Long=16777216L): ConditionalUNet2d =
+    require(maxParameters>=0 && maxScoreElements>=0,"negative U-Net parameter or attention budget")
     val c=UNetConfig.read(directory.resolve("config.json"))
     Using.resource(SafeTensorSet.open(directory,filename="diffusion_pytorch_model.safetensors")) { archive =>
       val total=archive.tensors.values.foldLeft(BigInt(0))((sum,t) => sum+t.shape.numel)
@@ -38,7 +39,7 @@ object PretrainedUNet:
       def spatial(name: String,width: Int): DiffusionSpatialTransformer =
         def attention(prefix: String,context: Int): DiffusionAttention =
           DiffusionAttention(linear(s"$prefix.to_q",width,width,false),linear(s"$prefix.to_k",context,width,false),
-            linear(s"$prefix.to_v",context,width,false),linear(s"$prefix.to_out.0",width,width),c.heads)
+            linear(s"$prefix.to_v",context,width,false),linear(s"$prefix.to_out.0",width,width),c.heads,maxScoreElements)
         val blocks=Vector.tabulate(c.transformerLayers) { i =>
           val p=s"$name.transformer_blocks.$i"
           DiffusionTransformerBlock(norm(s"$p.norm1",width),attention(s"$p.attn1",width),

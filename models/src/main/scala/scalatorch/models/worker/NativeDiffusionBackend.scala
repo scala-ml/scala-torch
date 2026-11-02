@@ -8,7 +8,9 @@ final class NativeBackendError(val code: String,message: String) extends Runtime
 
 /** Host-loaded Float32 models with explicit U-Net/VAE execution placement. */
 final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
-    vaeExecution: VaeExecution=VaeExecution.Cpu,unetExecution: UNetExecution=UNetExecution.Cpu) extends NativeWorkerBackend:
+    vaeExecution: VaeExecution=VaeExecution.Cpu,unetExecution: UNetExecution=UNetExecution.Cpu,
+    maxAttentionScoreElements: Long=16777216L) extends NativeWorkerBackend:
+  require(maxAttentionScoreElements>=0 && maxAttentionScoreElements<=Int.MaxValue,"invalid attention work limit")
   import NativeJson.*
   private val root=modelRoot.toRealPath()
   private val config=EulerConfig.read(schedulerConfig)
@@ -18,7 +20,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
   override def device: String=unetExecution.device
   override def usesCuda: Boolean=vaeExecution.device!="cpu" || unetExecution.device!="cpu"
   override def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot(modelSummary,vaeExecution.device,unetExecution.device,
-    vaeExecution.offloadWeights,unetExecution.offloadWeights)
+    vaeExecution.offloadWeights,unetExecution.offloadWeights,maxAttentionScoreElements)
   private def checkpointHash(context: NativeWorkContext): String=
     val digest=java.security.MessageDigest.getInstance("SHA-256")
     val weights=Vector("text_encoder"->"model.safetensors","unet"->"diffusion_pytorch_model.safetensors",
@@ -52,7 +54,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
     val directory=Files.isDirectory(selected)
     val folder=if directory then selected else selected.getParent
     val filename=if directory then "diffusion_pytorch_model.safetensors" else selected.getFileName.toString
-    val vae=PretrainedVae.load(folder,configOverride=if directory then None else Some(VaeConfig.read(root.resolve("vae/config.json"))),filename=filename)
+    val vae=PretrainedVae.load(folder,maxScoreElements=maxAttentionScoreElements,
+      configOverride=if directory then None else Some(VaeConfig.read(root.resolve("vae/config.json"))),filename=filename)
     context.checkCancelled()
     val digest=java.security.MessageDigest.getInstance("SHA-256")
     scala.util.Using.resource(scalatorch.io.SafeTensorSet.open(folder,filename=filename)) { set =>
@@ -147,7 +150,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         context.checkCancelled()
         val clip=PretrainedClip.load(root.resolve("text_encoder"))
         context.checkCancelled()
-        val unet=PretrainedUNet.load(root.resolve("unet"))
+        val unet=PretrainedUNet.load(root.resolve("unet"),maxScoreElements=maxAttentionScoreElements)
         context.checkCancelled()
         val (vae,vaeInfo)=readVae(selectedVae,context)
         val pipeline=new EulerImagePipeline(tokenizer,clip,unet,vae,vaeExecution=vaeExecution,unetExecution=unetExecution)
@@ -284,6 +287,6 @@ object NativeWorkerMain:
   def main(args: Array[String]): Unit=
     require(args.length==2,"usage: NativeWorkerMain <diffusers-root> <explicit-euler-config.json>")
     val backend=new NativeDiffusionBackend(Path.of(args(0)),Path.of(args(1)),VaeExecution.fromEnvironment(sys.env),
-      UNetExecution.fromEnvironment(sys.env))
+      UNetExecution.fromEnvironment(sys.env),sys.env.get("SDFX_SCALATORCH_MAX_ATTENTION_SCORE_ELEMENTS").fold(16777216L)(_.toLong))
     val worker=new NativeWorker(System.out,backend)
     worker.serve(new java.io.InputStreamReader(System.in,java.nio.charset.StandardCharsets.UTF_8))
