@@ -48,3 +48,16 @@ Output remains the same coarse blobs. Core20, CUDA session/ops13, offloaded
 model2 tests passed; additional extraction coverage includes offsets, raw NaN/
 negative-zero bits and independent primitive arrays. Existing transpose/reverse/
 broadcast/empty cases pass. Further normal-resolution verification is in progress.
+## Live512px investigation
+
+During the first512px/20-step run (worker33796), jcmd at86s sampled CUDA
+attention in a Transformer. At131s it again sampled attention, now in the
+negative CFG prediction (UNetExecution line61) in the up path. Thus computation
+had advanced despite no completed-step event yet. GPU utilization was100% with
+about791MiB total memory at the earlier observation. No timeout/restart was done.
+The current kernel assigns an entire query row to one thread, including serial
+key dot products, exponentials and weighted sums across all value channels.
+At4096 keys the16MiB scratch cap admits512 query rows per slice; this limits
+parallelism. Candidate follow-up: parallel score generation and per-output-channel
+weighted sums while preserving per-dot/reduction arithmetic order and scratch cap.
+This is a code/stack observation, not a completed benchmark or proven speedup.
