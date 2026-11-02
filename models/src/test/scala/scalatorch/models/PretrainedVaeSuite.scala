@@ -310,6 +310,14 @@ class PretrainedVaeSuite extends munit.FunSuite:
     val imageError=referenceImage.toFloatArray.zip(expectedImage).map((a,b) => math.abs(a-b)).max
     println(s"DPM full-image Diffusers maxAbsError=$imageError")
     assert(imageError<1e-4f)
+    val brokenVae=pipeline.vae.copy(decoder=pipeline.vae.decoder.copy(maxFeatureElements=0))
+    val brokenPipeline=new EulerImagePipeline(pipeline.tokenizer,pipeline.textEncoder,pipeline.unet,brokenVae)
+    var finalLatents=referenceNoise
+    val decodeFailure=intercept[VaeDecodeFailure] {
+      brokenPipeline.generateDpm(request,dpmSchedule,noise=Some(referenceNoise),onProgress=p => finalLatents=p.latents)
+    }
+    assertEquals(decodeFailure.decoderInput.toFloatArray.toVector,
+      finalLatents.toFloatArray.toVector.map(_*(1/pipeline.vae.config.scalingFactor).toFloat))
     val skipped=pipeline.generateDpm(request.copy(clipSkip=2),dpmSchedule,noise=Some(referenceNoise))
     val skippedStream=getClass.getResourceAsStream("/dpm/image-clip-skip2-f32.bin")
     val skippedBytes=try skippedStream.readAllBytes() finally skippedStream.close()

@@ -90,8 +90,14 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
       checkCancelled()
       onProgress(DiffusionImageProgress(i+1,schedule.timesteps.size,schedule.timesteps(i),latent.data))
     checkCancelled()
-    val image=vae.decodeDiffusionLatents(latent).data
-    require(image.toFloatArray.forall(_.isFinite),"VAE produced nonfinite image values")
+    val decoderInput=latent*(1/vae.config.scalingFactor).toFloat
+    val image=try
+      val decoded=vae.decode(decoderInput).data
+      require(decoded.toFloatArray.forall(_.isFinite),"VAE produced nonfinite image values")
+      decoded
+    catch
+      case e: CancellationException => throw e
+      case scala.util.control.NonFatal(e) => throw new VaeDecodeFailure(decoderInput.data,e)
     checkCancelled()
     image
   }

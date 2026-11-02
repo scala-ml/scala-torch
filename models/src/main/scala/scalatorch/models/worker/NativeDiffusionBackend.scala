@@ -166,7 +166,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         Map.empty
       case "txt2img" =>
         val pipeline=loaded.getOrElse(throw new NativeBackendError("no_model","load a model first"))
-        keys(NativeGenerationDefaults.strip(p,NativeGenerationDefaults.envelope),Set("params","output_dir","preview_every","preview_method"))
+        keys(NativeGenerationDefaults.strip(p,NativeGenerationDefaults.envelope),Set("params","output_dir","preview_every","preview_method","vae_recovery_dir"))
         val previewEvery=integer(p,"preview_every",2)
         require(previewEvery>=0,"preview_every must be nonnegative")
         val previewMethod=str(p,"preview_method","approx")
@@ -174,13 +174,27 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         val g=p.get("params") match
           case Some(Obj(fields)) => fields
           case _ => throw IllegalArgumentException("params must be an object")
-        keys(NativeGenerationDefaults.strip(g,NativeGenerationDefaults.generation),Set("prompt","negative_prompt","width","height","steps","seed","cfg_scale","sampler_name","scheduler","clip_skip","n_iter"))
+        keys(NativeGenerationDefaults.strip(g,NativeGenerationDefaults.generation),Set("prompt","negative_prompt","width","height","steps","seed","subseed","cfg_scale","sampler_name","scheduler","clip_skip","n_iter","checkpoint","vae"))
+        g.get("checkpoint") match
+          case None | Some(Null) => ()
+          case Some(Str(name)) =>
+            require(name==root.getFileName.toString || Path.of(name).toAbsolutePath.normalize()==root,"requested checkpoint is not loaded")
+          case _ => throw IllegalArgumentException("checkpoint must be a string or null")
+        g.get("vae") match
+          case None | Some(Null) => ()
+          case Some(Str(name)) =>
+            require(modelSummary.get("vae_name").contains(Str(name)) ||
+              (name=="Automatic" && modelSummary.get("vae_name").contains(Null)),"requested VAE is not loaded")
+          case _ => throw IllegalArgumentException("vae must be a string or null")
         val seedNumber=number(g,"seed",42)
         require(seedNumber.isValidLong,"seed must be a signed 64-bit integer")
         val seed=if seedNumber.toLong == -1 then new java.security.SecureRandom().nextLong() & Long.MaxValue else seedNumber.toLong
         val iterations=integer(g,"n_iter",1)
+        val subseed=number(g,"subseed",-1)
+        require(subseed.isValidLong,"subseed must be a signed 64-bit integer")
         require(iterations>=1 && iterations<=100,"n_iter must be between 1 and 100")
         require(BigInt(seed)+iterations-1<=Long.MaxValue,"iteration seeds exceed signed 64-bit range")
+        require(subseed<0 || subseed+iterations-1<=BigDecimal(Long.MaxValue),"iteration subseeds exceed signed 64-bit range")
         val steps=integer(g,"steps",20)
         require(steps>0 && steps<=1000,"steps must be between 1 and 1000")
         val imageRequest=DiffusionImageRequest(str(g,"prompt",""),str(g,"negative_prompt",""),
@@ -194,6 +208,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
         require(outputName.nonEmpty,"output_dir is required")
         val output=Path.of(outputName).toAbsolutePath.normalize()
         require(Files.isDirectory(output),"output_dir must be an existing directory")
+        val recoveryName=str(p,"vae_recovery_dir","")
+        val recovery=if recoveryName.isEmpty then output else Path.of(recoveryName).toAbsolutePath.normalize()
         val started=System.nanoTime()
         val staging=Files.createTempDirectory(output,".native-staging-")
         val staged=scala.collection.mutable.ArrayBuffer.empty[Path]
@@ -209,18 +225,25 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path) extend
               if previewEvery>0 && previewMethod!="none" && value.completedSteps%previewEvery==0 && value.completedSteps<value.totalSteps then
                 context.checkCancelled()
                 context.event("preview",Map("step"->Number(value.completedSteps),"jpeg_b64"->Str(NativePreview.jpegBase64(value.latents))))
-            val image=if sampler=="DPM++ 2M" then
-              val layout=if schedule=="Karras" then DpmSchedule.karras(config.noise,steps) else DpmSchedule.uniform(config.noise,steps)
-              pipeline.generateDpm(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=config.prediction)
-            else
-              val layout=if schedule=="Karras" then config.noise.karrasEuler(steps) else config.noise.euler(steps,config.spacing,config.stepsOffset)
-              pipeline.generate(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=config.prediction)
+            val image=try
+              if sampler=="DPM++ 2M" then
+                val layout=if schedule=="Karras" then DpmSchedule.karras(config.noise,steps) else DpmSchedule.uniform(config.noise,steps)
+                pipeline.generateDpm(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=config.prediction)
+              else
+                val layout=if schedule=="Karras" then config.noise.karrasEuler(steps) else config.noise.euler(steps,config.spacing,config.stepsOffset)
+                pipeline.generate(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=config.prediction)
+            catch
+              case failure: VaeDecodeFailure =>
+                context.checkCancelled()
+                val artifact=NativeVaeRecovery.save(failure.decoderInput,recovery)
+                throw new NativeBackendError("vae_decode_failed",s"VAE decode failed; exact decoder input saved to $artifact")
             context.checkCancelled()
             val name=s"native-${UUID.randomUUID()}.png"
             val temporary=staging.resolve(name)
             DiffusionImageIO.writePng(image,temporary)
             staged+=temporary
             Obj(Map("path"->Str(output.resolve(name).toString),"seed"->Number(BigDecimal(current.seed)),
+              "subseed"->Number(if subseed<0 then subseed else subseed+index),
               "width"->Number(current.width),"height"->Number(current.height)))
           }
           context.beginPublication()

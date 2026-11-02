@@ -1,3 +1,30 @@
+## Desktop envelope and VAE recovery (2026-11-03)
+
+Native backend now accepts vae_recovery_dir and uses it on VAE decode failure.
+Pipeline wraps nonfatal VAE exceptions/nonfinite output as VaeDecodeFailure carrying
+exact Float32 decoder input AFTER scaling. NativeVaeRecovery writes tensor to a
+unique create-new safetensors under vae-recovery; worker returns vae_decode_failed
+with artifact path and cleans normal staging. No Broken-preview substitution yet,
+no RGBA packed PNG, and native metadata is not yet NUI vae_tools provenance schema:
+this is exact tensor preservation, NOT full existing recovery feature parity.
+Test forces decoder budget failure and verifies actual decoder input values;
+writer roundtrip test verifies safetensors readback. Default full-image reference
+still matches. 17 tests passed before later envelope edits; final VAE suite 14
+passed, envelope/recovery/backend 4 passed, then subseed backend 2 passed.
+
+Checkpoint/vae selectors are checked against loaded model rather than requiring
+null. Empty manual_loras/hires_loras/img2img_hires_loras arrays accepted along with
+null; nonempty remains rejected. Non-default subseed accepted only while variation
+strength remains zero; returned/incremented as metadata with overflow checks.
+Generator normalizes subseed from -1 even when variations are inactive.
+
+Desktop rerun screenshot native-ui-recovery-fixed.png (same isolated home in prior
+checkpoint) proved vae_recovery_dir no longer blocked. NEXT failure was empty
+manual_loras; fixed afterwards but desktop NOT rerun yet. Likely next issue:
+UI sends model_keyword hook by default (Generator keywordActive implies manual_loras
+Some(empty)). Need inspect full actual Generator payload/port hook semantics, not
+silently drop hooks. No desktop-generated image exists yet; vram_estimator banner
+also remains. Current sbt scala-torch with all tiny props. NUI unchanged this turn.
 ## First actual native desktop run (2026-11-03)
 
 Ran NUI JavaFX Launcher with --home isolated under scala-torch/.superpowers,

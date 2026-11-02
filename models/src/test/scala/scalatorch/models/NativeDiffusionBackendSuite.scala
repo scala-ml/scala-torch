@@ -72,7 +72,8 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       val restored=run("set_vae",Map("path"->Null))
       assertEquals(restored("vae_name"),Null)
       intercept[NativeBackendError](run("load_model",Map("dtype"->Str("fp16"))))
-      val result=run("txt2img",NativeGenerationDefaults.envelope++Map("output_dir"->Str(output.toString),"params"->Obj(NativeGenerationDefaults.generation++Map(
+      val result=run("txt2img",NativeGenerationDefaults.envelope++Map("output_dir"->Str(output.toString),"vae_recovery_dir"->Str(output.toString),"params"->Obj(NativeGenerationDefaults.generation++Map(
+        "checkpoint"->Str(root.toString),"vae"->Str("Automatic"),
         "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(2),
         "seed"->Number(42),"sampler_name"->Str("DPM++ 2M"),"scheduler"->Str("Automatic")))))
       assertEquals(result("scheduler"),Str("Karras"))
@@ -89,9 +90,10 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       assertEquals(javax.imageio.ImageIO.read(uniformPath.toFile).getWidth,10)
       val iterativeParams=Map("output_dir"->Str(output.toString),"params"->Obj(Map(
         "prompt"->Str("cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(1),
-        "seed"->Number(100),"n_iter"->Number(2))))
+        "seed"->Number(100),"subseed"->Number(7),"n_iter"->Number(2))))
       val iterative=run("txt2img",iterativeParams)("images").asInstanceOf[Arr].values
       assertEquals(iterative.map(_.asInstanceOf[Obj].fields("seed")),Vector(Number(100),Number(101)))
+      assertEquals(iterative.map(_.asInstanceOf[Obj].fields("subseed")),Vector(Number(7),Number(8)))
       def filesNow()=
         val paths=Files.list(output)
         try

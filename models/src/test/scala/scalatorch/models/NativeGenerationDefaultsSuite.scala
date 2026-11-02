@@ -10,4 +10,6 @@ class NativeGenerationDefaultsSuite extends munit.FunSuite:
       intercept[NativeBackendError](NativeGenerationDefaults.strip(Map(key->value),defaults))
     assertEquals(NativeGenerationDefaults.strip(Map("hires"->Obj(Map("enabled"->Bool(false)))),defaults),Map.empty)
     assertEquals(NativeGenerationDefaults.strip(NativeGenerationDefaults.envelope,NativeGenerationDefaults.envelope),Map.empty)
+    assertEquals(NativeGenerationDefaults.strip(Map("manual_loras"->Arr(Vector.empty)),NativeGenerationDefaults.envelope),Map.empty)
+    intercept[NativeBackendError](NativeGenerationDefaults.strip(Map("manual_loras"->Arr(Vector(Str("x")))),NativeGenerationDefaults.envelope))
   }
