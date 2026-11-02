@@ -60,6 +60,10 @@ final class Variable private (
   def crossEntropy(targets: Tensor[Long], reduction: LossReduction = LossReduction.Mean, ignoreIndex: Long = -100): Variable =
     LossOps.crossEntropy(this,targets,reduction,ignoreIndex)
 
+  def pad2d(padding: Padding2d): Variable =
+    Variable.result(SpatialPadding.forward(data,padding),Vector(
+      this -> ((g: Tensor[Float]) => SpatialPadding.backward(data,g,padding))))
+
   def conv2d(weight: Variable, config: Conv2dConfig = Conv2dConfig()): Variable =
     val inputSnapshot=data
     val weightSnapshot=weight.data
