@@ -50,6 +50,10 @@ lazy val nn = project.dependsOn(autograd, tensorio).settings(common).settings(
 lazy val models = project.dependsOn(nn, ffm).settings(common).settings(
   name := "scala-torch-models",
   description := "Scala-native Llama inference and training, CLIP text conditioning and diffusion U-Net",
+  Test / javaOptions += {
+    val converter = fileConverter.value
+    "-Dscalatorch.worker.classpath=" + (Compile / fullClasspath).value.map(a => converter.toPath(a.data)).mkString(java.io.File.pathSeparator)
+  },
   Compile / run / fork := true,
   Compile / run / javaOptions += "--enable-native-access=ALL-UNNAMED",
   Test / javaOptions += "--enable-native-access=ALL-UNNAMED"

@@ -1,3 +1,18 @@
+## Native JVM subprocess verification (2026-11-03)
+
+NativeWorkerProcessSuite now launches NativeWorkerMain in a separate Java process
+using Compile/fullClasspath (exported by the models Test/javaOptions setting).
+sbt 2's forked test java.class.path contains only sbt worker jars, so it cannot be
+reused for the application child process. This was reproduced as ClassNotFoundException
+and fixed with sbt's fileConverter for virtual classpath entries.
+
+The gated tiny-model subprocess test passed: hello, model load, two progress events,
+DPM++ PNG result, exact Long.MaxValue seed round trip, unload, typed no_model error,
+shutdown acknowledgement and zero exit code. Child removes JAVA_TOOL_OPTIONS and
+Python environment overrides. Runtime command is Java plus application classes/jars;
+no Python is launched by the worker. Test verifies a real 10x6 PNG, not model quality.
+Next: accept NUI's actual default request envelope and integrate its EngineProcess
+on a dedicated NUI branch. Full application migration remains unfinished.
 ## Native diffusion adapter checkpoint (2026-11-03)
 
 NativeDiffusionBackend now implements load_model/unload/txt2img with the real
