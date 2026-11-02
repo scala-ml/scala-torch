@@ -168,3 +168,5 @@ Temperature0 keeps the default greedy behavior. [Sampling semantics and tests](d
 The [NUI migration ledger](docs/research/nui-migration-audit.md) tracks the remaining Python removal work against47 worker requests and117 standard plugins at a pinned source revision. These features are inventoried, not yet migrated.
 
 Causal language-model training now composes `model.forward(input).crossEntropy(targets)` with AdamW. Classes are on the final axis; targets are Long IDs with matching batch/time dimensions. A synthetic Llama next-token test reduces loss from2.1746 to0.000660. See [loss semantics and training example](docs/research/cross-entropy.md).
+
+[CPU LoRA adapters](docs/research/lora.md) now support selected Llama attention/MLP projections with frozen base weights and adapter-only optimizer parameters. A pinned SmolLM2 last-layer test trains 7,680 parameters and reduces synthetic-token loss from20.86 to4.61. Adapter bundle persistence remains pending.
