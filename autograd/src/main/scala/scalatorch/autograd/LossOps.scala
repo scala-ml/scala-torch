@@ -2,8 +2,9 @@ package scalatorch.autograd
 
 import scalatorch.*
 
-enum LossReduction:
-  case None, Sum, Mean
+// Preserve existing source imports while backends share the core settings.
+type LossReduction = scalatorch.LossReduction
+val LossReduction = scalatorch.LossReduction
 
 private[autograd] object LossOps:
   def crossEntropy(logits: Variable, targets: Tensor[Long], reduction: LossReduction, ignoreIndex: Long): Variable =

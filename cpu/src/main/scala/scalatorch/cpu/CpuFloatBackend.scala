@@ -4,6 +4,11 @@ import scalatorch.*
 
 /** Immutable CPU Float32 inference backend; release is a no-op for GC-owned storage. */
 object CpuFloatBackend extends TrainingBackend[Tensor[Float]]:
+  def crossEntropy(logits: Tensor[Float],targets: Tensor[Long],reduction: LossReduction = LossReduction.Mean,ignoreIndex: Long = -100L): Tensor[Float] =
+    CpuCrossEntropy.forward(logits,targets,reduction,ignoreIndex)
+  def crossEntropyBackward(logits: Tensor[Float],targets: Tensor[Long],gradient: Tensor[Float],
+      reduction: LossReduction = LossReduction.Mean,ignoreIndex: Long = -100L): Tensor[Float] =
+    CpuCrossEntropy.backward(logits,targets,gradient,reduction,ignoreIndex)
   def causalAttentionBackward(query: Tensor[Float],key: Tensor[Float],value: Tensor[Float],gradient: Tensor[Float],
       queryStart: Int = 0,maxScoreElements: Long = 16777216L): (Tensor[Float],Tensor[Float],Tensor[Float]) =
     CpuAttentionBackward(query,key,value,gradient,queryStart,maxScoreElements)

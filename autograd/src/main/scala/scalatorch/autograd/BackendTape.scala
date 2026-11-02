@@ -75,6 +75,9 @@ final class BackendTape[T](val backend: TrainingBackend[T]) extends AutoCloseabl
         backend.reshape(selected,backend.shape(selected))
       result(backend.causalAttention(data,key.data,value.data,queryStart,maxScoreElements),Vector(
         this -> ((g,s) => pullback(g,s,0)),key -> ((g,s) => pullback(g,s,1)),value -> ((g,s) => pullback(g,s,2))))
+    def crossEntropy(targets: Tensor[Long],reduction: LossReduction = LossReduction.Mean,ignoreIndex: Long = -100L): Value =
+      result(backend.crossEntropy(data,targets,reduction,ignoreIndex),
+        Vector(this -> ((g,_) => backend.crossEntropyBackward(data,targets,g,reduction,ignoreIndex))))
     def embedding(indices: Tensor[Long]): Value = result(backend.embedding(data,indices),
       Vector(this -> ((g,_) => backend.embeddingBackward(backend.shape(data),indices,g))))
     def rope(positionStart: Int = 0,theta: Double = 10000.0): Value =

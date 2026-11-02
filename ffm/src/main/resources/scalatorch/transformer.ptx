@@ -638,3 +638,184 @@ DONE:
 DONE:
  ret;
 }
+
+// Private math helpers: exp for finite nonpositive arguments; log for [1, Int.MaxValue].
+.func (.param .f64 ce_result) ce_exp(.param .f64 ce_input) {
+ .reg .pred p;
+ .reg .b32 r<8>;
+ .reg .b64 d<7>;
+ .reg .f64 g<7>;
+ ld.param.f64 g1,[ce_input];
+ setp.lt.f64 p,g1,0dC087500000000000; @p bra EXP_ZERO;
+ // exp(x), x=-abs(input): x = n*ln(2) + r, |r| <= ln(2)/2.
+ // Split ln(2) avoids cancellation; degree-12 Taylor evaluated in Double.
+ mul.rn.f64 g2,g1,0d3FF71547652B82FE;
+ cvt.rni.s32.f64 r5,g2; cvt.rn.f64.s32 g3,r5;
+ mul.rn.f64 g2,g3,0d3FE62E42FEE00000; sub.rn.f64 g2,g1,g2;
+ mul.rn.f64 g3,g3,0d3DEA39EF35793C76; sub.rn.f64 g2,g2,g3;
+ mov.f64 g4,0d3E21EED8EFF8D898;
+ fma.rn.f64 g4,g4,g2,0d3E5AE64567F544E4;
+ fma.rn.f64 g4,g4,g2,0d3E927E4FB7789F5C;
+ fma.rn.f64 g4,g4,g2,0d3EC71DE3A556C734;
+ fma.rn.f64 g4,g4,g2,0d3EFA01A01A01A01A;
+ fma.rn.f64 g4,g4,g2,0d3F2A01A01A01A01A;
+ fma.rn.f64 g4,g4,g2,0d3F56C16C16C16C17;
+ fma.rn.f64 g4,g4,g2,0d3F81111111111111;
+ fma.rn.f64 g4,g4,g2,0d3FA5555555555555;
+ fma.rn.f64 g4,g4,g2,0d3FC5555555555555;
+ fma.rn.f64 g4,g4,g2,0d3FE0000000000000;
+ fma.rn.f64 g4,g4,g2,0d3FF0000000000000;
+ fma.rn.f64 g4,g4,g2,0d3FF0000000000000;
+ // Split the power of two into normal Double factors, including subnormal exp(x).
+ shr.s32 r6,r5,1; sub.s32 r7,r5,r6;
+ add.s32 r6,r6,1023; add.s32 r7,r7,1023;
+ cvt.u64.u32 d5,r6; cvt.u64.u32 d6,r7;
+ shl.b64 d5,d5,52; shl.b64 d6,d6,52;
+ mov.b64 g5,d5; mov.b64 g6,d6;
+ mul.rn.f64 g4,g4,g5; mul.rn.f64 g4,g4,g6;
+ bra RETURN;
+EXP_ZERO:
+ mov.f64 g4,0d0000000000000000;
+RETURN:
+ st.param.f64 [ce_result],g4; ret;
+}
+
+.func (.param .f64 cl_result) ce_log(.param .f64 cl_input) {
+ .reg .b64 d<3>;
+ .reg .b32 r;
+ .reg .f64 g<7>;
+ ld.param.f64 g0,[cl_input];
+ mov.b64 d0,g0; shr.u64 d1,d0,52; cvt.u32.u64 r,d1; sub.u32 r,r,1023;
+ and.b64 d0,d0,0x000fffffffffffff; or.b64 d0,d0,0x3ff0000000000000;
+ mov.b64 g0,d0;
+ sub.rn.f64 g1,g0,0d3FF0000000000000; add.rn.f64 g2,g0,0d3FF0000000000000;
+ div.rn.f64 g1,g1,g2; mul.rn.f64 g2,g1,g1;
+ mov.f64 g3,0d3F9A41A41A41A41A;
+ fma.rn.f64 g3,g3,g2,0d3F9BACF914C1BAD0;
+ fma.rn.f64 g3,g3,g2,0d3F9D41D41D41D41D;
+ fma.rn.f64 g3,g3,g2,0d3F9F07C1F07C1F08;
+ fma.rn.f64 g3,g3,g2,0d3FA0842108421084;
+ fma.rn.f64 g3,g3,g2,0d3FA1A7B9611A7B96;
+ fma.rn.f64 g3,g3,g2,0d3FA2F684BDA12F68;
+ fma.rn.f64 g3,g3,g2,0d3FA47AE147AE147B;
+ fma.rn.f64 g3,g3,g2,0d3FA642C8590B2164;
+ fma.rn.f64 g3,g3,g2,0d3FA8618618618618;
+ fma.rn.f64 g3,g3,g2,0d3FAAF286BCA1AF28;
+ fma.rn.f64 g3,g3,g2,0d3FAE1E1E1E1E1E1E;
+ fma.rn.f64 g3,g3,g2,0d3FB1111111111111;
+ fma.rn.f64 g3,g3,g2,0d3FB3B13B13B13B14;
+ fma.rn.f64 g3,g3,g2,0d3FB745D1745D1746;
+ fma.rn.f64 g3,g3,g2,0d3FBC71C71C71C71C;
+ fma.rn.f64 g3,g3,g2,0d3FC2492492492492;
+ fma.rn.f64 g3,g3,g2,0d3FC999999999999A;
+ fma.rn.f64 g3,g3,g2,0d3FD5555555555555;
+ fma.rn.f64 g3,g3,g2,0d3FF0000000000000;
+ mul.rn.f64 g3,g3,g1; add.rn.f64 g3,g3,g3;
+ cvt.rn.f64.u32 g4,r;
+ fma.rn.f64 g3,g4,0d3DEA39EF35793C76,g3;
+ fma.rn.f64 g3,g4,0d3FE62E42FEE00000,g3;
+ st.param.f64 [cl_result],g3; ret;
+}
+
+.visible .entry cross_entropy_stats(.param .u64 ce_x, .param .u64 ce_ids, .param .u64 ce_stats,
+ .param .u64 ce_invalid, .param .u32 ce_rows, .param .u32 ce_width) {
+ .reg .pred p;
+ .reg .b32 r<12>;
+ .reg .b64 d<9>;
+ .reg .f32 f<2>;
+ .reg .f64 g<6>;
+ .param .f64 arg; .param .f64 answer;
+ ld.param.u64 d0,[ce_x]; ld.param.u64 d1,[ce_ids]; ld.param.u64 d2,[ce_stats]; ld.param.u64 d3,[ce_invalid];
+ ld.param.u32 r0,[ce_rows]; ld.param.u32 r1,[ce_width];
+ mov.u32 r2,%tid.x; mov.u32 r3,%ctaid.x; mov.u32 r4,%ntid.x;
+ mad.lo.u32 r5,r3,r4,r2; setp.ge.u32 p,r5,r0; @p bra DONE;
+ mul.lo.u32 r6,r5,r1; mov.u32 r7,0; mov.f64 g0,0dFFF0000000000000;
+MAXIMUM:
+ setp.ge.u32 p,r7,r1; @p bra TARGET;
+ add.u32 r8,r6,r7; mul.wide.u32 d4,r8,4; add.u64 d5,d0,d4;
+ ld.global.f32 f0,[d5]; abs.f32 f1,f0; setp.gtu.f32 p,f1,0f7F7FFFFF;
+ @p atom.global.or.b32 r10,[d3],1;
+ cvt.f64.f32 g1,f0; max.f64 g0,g0,g1;
+ add.u32 r7,r7,1; bra MAXIMUM;
+TARGET:
+ mul.wide.u32 d4,r5,4; add.u64 d5,d1,d4; ld.global.s32 r9,[d5];
+ mov.f64 g2,0d0000000000000000; mov.f64 g3,0d0000000000000000;
+ setp.lt.s32 p,r9,0; @p bra STORE;
+ mov.u32 r7,0;
+SUM_EXP:
+ setp.ge.u32 p,r7,r1; @p bra LOG_SUM;
+ add.u32 r8,r6,r7; mul.wide.u32 d4,r8,4; add.u64 d5,d0,d4;
+ ld.global.f32 f0,[d5]; cvt.f64.f32 g1,f0; sub.rn.f64 g1,g1,g0;
+ st.param.f64 [arg],g1; call.uni (answer),ce_exp,(arg); ld.param.f64 g1,[answer];
+ add.rn.f64 g2,g2,g1; add.u32 r7,r7,1; bra SUM_EXP;
+LOG_SUM:
+ st.param.f64 [arg],g2; call.uni (answer),ce_log,(arg); ld.param.f64 g2,[answer];
+ add.u32 r8,r6,r9; mul.wide.u32 d4,r8,4; add.u64 d5,d0,d4;
+ ld.global.f32 f0,[d5]; cvt.f64.f32 g1,f0; sub.rn.f64 g1,g1,g0;
+ sub.rn.f64 g3,g2,g1;
+STORE:
+ mul.wide.u32 d4,r5,24; add.u64 d5,d2,d4;
+ st.global.f64 [d5],g0; st.global.f64 [d5+8],g2; st.global.f64 [d5+16],g3;
+DONE:
+ ret;
+}
+
+.visible .entry cross_entropy_output(.param .u64 co_x, .param .u64 co_ids, .param .u64 co_stats, .param .u64 co_seed, .param .u64 co_out,
+ .param .u32 co_rows, .param .u32 co_width, .param .u32 co_valid, .param .u32 co_reduction, .param .u32 co_count) {
+ .reg .pred p;
+ .reg .b32 r<10>;
+ .reg .b64 d<5>;
+ .reg .f64 g<3>;
+ .reg .f32 f;
+ ld.param.u64 d0,[co_stats]; ld.param.u64 d1,[co_out];
+ ld.param.u32 r0,[co_rows]; ld.param.u32 r1,[co_reduction]; ld.param.u32 r2,[co_valid]; ld.param.u32 r3,[co_count];
+ mov.u32 r4,%tid.x; mov.u32 r5,%ctaid.x; mov.u32 r6,%ntid.x;
+ mad.lo.u32 r7,r5,r6,r4; setp.ge.u32 p,r7,r3; @p bra DONE;
+ setp.eq.u32 p,r1,0; @p bra UNREDUCED;
+ mov.f64 g0,0d0000000000000000; mov.u32 r8,0;
+SUM_LOSS:
+ setp.ge.u32 p,r8,r0; @p bra REDUCE;
+ mul.wide.u32 d2,r8,24; add.u64 d3,d0,d2; ld.global.f64 g1,[d3+16];
+ add.rn.f64 g0,g0,g1; add.u32 r8,r8,1; bra SUM_LOSS;
+REDUCE:
+ setp.ne.u32 p,r1,2; @p bra STORE;
+ cvt.rn.f64.u32 g1,r2; div.rn.f64 g0,g0,g1; bra STORE;
+UNREDUCED:
+ mul.wide.u32 d2,r7,24; add.u64 d3,d0,d2; ld.global.f64 g0,[d3+16];
+STORE:
+ cvt.rn.f32.f64 f,g0; mul.wide.u32 d2,r7,4; add.u64 d3,d1,d2; st.global.f32 [d3],f;
+DONE: ret;
+}
+
+.visible .entry cross_entropy_gradient(.param .u64 co_x, .param .u64 co_ids, .param .u64 co_stats, .param .u64 co_seed, .param .u64 co_out,
+ .param .u32 co_rows, .param .u32 co_width, .param .u32 co_valid, .param .u32 co_reduction, .param .u32 co_count) {
+ .reg .pred p;
+ .reg .b32 r<14>;
+ .reg .b64 d<10>;
+ .reg .f64 g<6>;
+ .reg .f32 f;
+ .param .f64 arg; .param .f64 answer;
+ ld.param.u64 d0,[co_x]; ld.param.u64 d1,[co_ids]; ld.param.u64 d2,[co_stats];
+ ld.param.u64 d3,[co_seed]; ld.param.u64 d4,[co_out];
+ ld.param.u32 r0,[co_count]; ld.param.u32 r1,[co_width]; ld.param.u32 r2,[co_valid]; ld.param.u32 r3,[co_reduction];
+ mov.u32 r4,%tid.x; mov.u32 r5,%ctaid.x; mov.u32 r6,%ntid.x;
+ mad.lo.u32 r7,r5,r6,r4; setp.ge.u32 p,r7,r0; @p bra DONE;
+ div.u32 r8,r7,r1; rem.u32 r9,r7,r1;
+ mul.wide.u32 d5,r8,4; add.u64 d6,d1,d5; ld.global.s32 r10,[d6];
+ mov.f32 f,0f00000000; setp.lt.s32 p,r10,0; @p bra STORE;
+ mul.wide.u32 d5,r8,24; add.u64 d6,d2,d5;
+ ld.global.f64 g0,[d6]; ld.global.f64 g1,[d6+8];
+ mul.wide.u32 d5,r7,4; add.u64 d6,d0,d5; ld.global.f32 f,[d6]; cvt.f64.f32 g2,f;
+ sub.rn.f64 g2,g2,g0; sub.rn.f64 g2,g2,g1;
+ st.param.f64 [arg],g2; call.uni (answer),ce_exp,(arg); ld.param.f64 g2,[answer];
+ setp.eq.u32 p,r9,r10; @p sub.rn.f64 g2,g2,0d3FF0000000000000;
+ setp.eq.u32 p,r3,0; selp.u32 r11,r8,0,p;
+ mul.wide.u32 d5,r11,4; add.u64 d6,d3,d5; ld.global.f32 f,[d6]; cvt.f64.f32 g3,f;
+ setp.ne.u32 p,r3,2; @p bra MULTIPLY;
+ cvt.rn.f64.u32 g4,r2; div.rn.f64 g3,g3,g4;
+MULTIPLY:
+ mul.rn.f64 g2,g2,g3; cvt.rn.f32.f64 f,g2;
+STORE:
+ mul.wide.u32 d5,r7,4; add.u64 d6,d4,d5; st.global.f32 [d6],f;
+DONE: ret;
+}

@@ -2,6 +2,9 @@ package scalatorch
 
 /** Explicit first-order pullbacks. Inputs are borrowed; each result is independently owned. */
 trait TrainingBackend[T] extends FloatBackend[T]:
+  def crossEntropy(logits: T,targets: Tensor[Long],reduction: LossReduction = LossReduction.Mean,ignoreIndex: Long = -100L): T
+  def crossEntropyBackward(logits: T,targets: Tensor[Long],gradient: T,
+      reduction: LossReduction = LossReduction.Mean,ignoreIndex: Long = -100L): T
   /** Caller owns all three independently releasable outputs (query, key, value). */
   def causalAttentionBackward(query: T,key: T,value: T,gradient: T,queryStart: Int = 0,
       maxScoreElements: Long = 16777216L): (T,T,T)

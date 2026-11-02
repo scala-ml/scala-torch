@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
+  private val kernels=Seq("cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -98,6 +98,48 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       }
       body(buffer.address)
     }
+
+  def crossEntropy(logits: CudaTensor,targets: Tensor[Long],reduction: LossReduction = LossReduction.Mean,ignoreIndex: Long = -100L): CudaTensor =
+    crossEntropyRun(logits,targets,None,reduction,ignoreIndex)
+  def crossEntropyBackward(logits: CudaTensor,targets: Tensor[Long],gradient: CudaTensor,
+      reduction: LossReduction = LossReduction.Mean,ignoreIndex: Long = -100L): CudaTensor =
+    validate(gradient)
+    require(gradient.shape==CrossEntropyLayout.output(targets,reduction),"cross entropy gradient shape mismatch")
+    crossEntropyRun(logits,targets,Some(gradient),reduction,ignoreIndex)
+  private def crossEntropyRun(logits: CudaTensor,targets: Tensor[Long],gradient: Option[CudaTensor],
+      reduction: LossReduction,ignoreIndex: Long): CudaTensor =
+    validate(logits)
+    val ids=CrossEntropyLayout.targets(logits.shape,targets,ignoreIndex)
+    val rows=ids.length.toLong
+    val output=if gradient.isDefined then logits.shape else CrossEntropyLayout.output(targets,reduction)
+    require(rows*6<=Int.MaxValue,"cross entropy Double workspace exceeds Int indexing")
+    val bytes=math.max(rows*4,1L)+math.max(rows*24,1L)+4+math.max(output.numel*4,1L)
+    require(bytes<=maxBytes-used,"cross entropy workspace budget exceeded")
+    var result: CudaTensor=null
+    try
+      withInts(ids) { targetAddress =>
+        Using.Manager { use =>
+          val stats=use(allocate(Shape.from(Seq(rows,6L))))
+          val invalid=use(fill(Shape.from(Seq.empty),0f))
+          launch(rows,kernels("cross_entropy_stats")) { arena =>
+            Seq(logits.address,targetAddress,stats.address,invalid.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
+              Seq(rows,logits.shape.dims.last).map(x => arena.allocateFrom(JAVA_INT,x.toInt))
+          }
+          // Four-byte control transfer only: logits, statistics and gradients stay resident.
+          require(download(invalid).toFloatArray.head==0f,"cross entropy requires finite logits")
+          val kernel=if gradient.isDefined then "cross_entropy_gradient" else "cross_entropy_output"
+          result=execute(output,output.numel,kernels(kernel)) { (arena,result) =>
+            Seq(logits.address,targetAddress,stats.address,gradient.fold(0L)(_.address),result.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
+              Seq(rows,logits.shape.dims.last,ids.count(_>=0).toLong,reduction.ordinal.toLong,output.numel).map(x => arena.allocateFrom(JAVA_INT,x.toInt))
+          }
+          result
+        }.get
+      }
+    catch case error: Throwable =>
+      if result!=null then
+        try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
 
   def rope(value: CudaTensor,positionStart: Int = 0,theta: Double = 10000.0): CudaTensor =
     rotate(value,positionStart,theta,inverse=false)
