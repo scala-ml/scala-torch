@@ -56,7 +56,7 @@
 - [x] Load the mask with existing bounded image I/O, apply inversion, existing NUI resize geometry and three separable box-blur passes approximating Gaussian blur; accept only fill=original and full-res=false for this slice.
 - [x] Pass mask/original image into `DiffusionImageSource`; explicitly reject unsupported nine-channel models, full-res crop and non-original fill.
 - [x] Run the worker and pipeline suites with CUDA enabled; 10 passed, 0 failed. Worker assertions include denied cancellation leaving no published files.
-- [ ] Commit the worker milestone.
+- [x] Commit the worker milestone (`08183db`).
 
 ### Task 3: NUI Generator integration and branch documentation
 
@@ -64,10 +64,10 @@
 - Modify: `C:/Users/Mizushima/dev/stablediffusion-nui/engine/src/test/scala/sdfx/engine/NativeGeneratorSuite.scala`
 - Modify: `C:/Users/Mizushima/dev/stablediffusion-nui/docs/scala-torch-native-engine.md`
 
-- [ ] Extend the real Generator SDXL test with a local mask; assert source-sized output and exact original pixels outside the mask.
-- [ ] Run the opt-in Python-free Generator test with the saved CUDA settings and tiny SDXL model.
-- [ ] Record the tested mask scope and explicit unsupported cases in NUI docs; keep this work on the existing NUI feature branch.
-- [ ] Commit the NUI integration milestone.
+- [x] Extend the real Generator SDXL test with a local mask; assert source-sized output and exact original pixels outside the mask.
+- [x] Run the opt-in Python-free Generator test with saved CUDA settings and the tiny SDXL model; passed on GTX 1650, reported `cuda:0`, and created no Python directory.
+- [x] Record tested mask scope, unsupported cases and the dependency boundary in NUI docs; changes stayed on the existing NUI feature branch.
+- [x] Commit the NUI integration milestone (`b198ca8`).
 
 ## Deferred
 
