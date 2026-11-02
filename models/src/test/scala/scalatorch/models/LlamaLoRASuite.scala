@@ -27,6 +27,20 @@ class LlamaLoRASuite extends munit.FunSuite:
     assert(last < initial * .9)
     // Tensor data is immutable: retaining the identical snapshot proves no base replacement.
     assert(snapshots.forall((p,t) => (p.data eq t) && !p.trainable && p.grad.isEmpty))
+    val path=java.nio.file.Files.createTempFile("smollm-lora-",".stl")
+    try
+      LoRACheckpoint.save(adapted,optimizer,path,30)
+      // A fresh initialization over the same frozen base must restore both factors and Adam slots.
+      val restored=LlamaLoRA.attach(original,4,8.0,999,targetLayers=Some(Set(original.layers.size-1)))
+      val resumed=new AdamW(Module.parameters(restored),learningRate=.01)
+      assertEquals(LoRACheckpoint.load(restored,resumed,path),30L)
+      assertEquals(restored.model.logits(input).toFloatArray.toVector,adapted.model.logits(input).toFloatArray.toVector)
+      for (model,opt) <- Seq(adapted -> optimizer,restored -> resumed) do
+        opt.zeroGrad();model.model.forward(input).crossEntropy(targets).backward();opt.step()
+      assertEquals(Module.parameters(restored).map(_.data.toFloatArray.toVector),
+        Module.parameters(adapted).map(_.data.toFloatArray.toVector))
+      assert(java.nio.file.Files.size(path) < 200000)
+    finally java.nio.file.Files.deleteIfExists(path)
   }
 
   test("selected adapters train while all base weights remain frozen and tied") {
