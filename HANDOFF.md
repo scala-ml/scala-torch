@@ -1,3 +1,21 @@
+## Real NUI EngineClient integration (2026-11-03)
+
+Created NUI branch feat/scala-torch-native-engine BEFORE edits, as requested.
+NUI commit e9ab842 adds NativeScalaEngineSuite plus docs/scala-torch-native-engine.md.
+It launches NativeWorkerMain in Java 25 through the REAL EngineSupervisor and
+EngineClient, using NUI GenerationRequest/GenerationParams default serialization.
+Passed: hello, fp32/cpu load, model hash, 64x64 three-step DPM++/Automatic generation,
+typed progress 1/2/3 and preview, final PNG and seed, unload. Runtime was 17 seconds.
+No Python launched. This validates the real client transport but not the desktop
+UI or all features. NUI default launch is unchanged; both repos still have substantial
+migration work (catalog, normal models, CUDA, SDXL, batching, extensions, packaging).
+
+NUI sbt server currently running (2.0.12), with SCALATORCH_WORKER_CLASSPATH_FILE set
+to C:/Users/Mizushima/dev/scala-torch/.superpowers/worker-classpath.txt and
+SCALATORCH_TINY_MODEL to the .superpowers/models/tiny-sd-pipe directory. Shut it down
+before switching back to scala-torch sbt. Classpath file was extracted from
+show models/Test/javaOptions (sbt export fullClasspath returns virtual refs in sbt2).
+Regenerate it after rebuilding jars. Native integration env is read at sbt startup.
 ## Native live preview checkpoint (2026-11-03)
 
 NativePreview implements SD1.x cheap latent-to-RGB projection, float32 channel
