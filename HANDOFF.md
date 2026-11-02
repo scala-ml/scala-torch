@@ -1,3 +1,23 @@
+## SDXL worker model loading and generation connected (2026-11-03)
+
+NativeDiffusionBackend selects SDXL from validated U-Net text-time config and
+model_index class (if present); rejects contradictory/unsupported classes.
+Loads both CLIPs/tokenizers, explicit tokenizer PAD/max length/special tokens,
+uses3B U-Net parameter cap for SDXL (SD default1B unchanged). Checkpoint hash
+includes encoder2 weights/config, tokenizer2 files and SDXL tokenizer configs/
+model_index; existing SD1 hash layout preserved. Metadata includes family.
+set_vae preserves sdxlConditioning; failed load/publication leaves model intact.
+NativeSdxlBackendSuite uses isolated copied tiny model: CPU txt2img/img2img,
+seed replay, VAE replacement, malformed encoder/config and rejected publication,
+hash change on PAD config, unsupported inpaint-family rejection, CUDA16MiB
+offload txt2img/img2img and failed VAE replacement. SD1 backend regressions pass.
+Explicit extension tags now produce unsupported instead of being literal text;
+extension implementation remains necessary for full NUI parity.
+Next: NUI typed EngineClient/AppServices SDXL requests on dedicated branch,
+plus remaining worker SDXL-specific recovery evidence and real model acceptance.
+No live generation jobs. Full goal still open: SD2/inpaint/extensions/checkpoint
+formats/GUI/MCP/packaged Python-free runtime; tiny SDXL is not full acceptance.
+
 ## SDXL shared image pipeline verified; worker loading next (2026-11-03)
 
 EulerImagePipeline now accepts optional SdxlTextConditioning and routes raw

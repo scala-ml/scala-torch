@@ -97,6 +97,18 @@ object ClipFastTokenizer:
   }
   def load(vocabPath: Path,mergesPath: Path,maxLength: Int=77,padToken: String=eos): ClipFastTokenizer =
     fromText(read(vocabPath),read(mergesPath),maxLength,padToken)
+  /** Directory profile including explicit CLIP special-token padding configuration. */
+  def loadDirectory(directory: Path): ClipFastTokenizer =
+    val path=directory.resolve("tokenizer_config.json")
+    val config=if Files.exists(path) then TokenizerJson.read(path).obj else Map.empty[String,TokenizerJson.Value]
+    def token(key: String,default: String): String=config.get(key) match
+      case None | Some(TokenizerJson.Value.Null) => default
+      case Some(TokenizerJson.Value.Str(value)) => value
+      case Some(value) => value.obj("content").str
+    require(token("bos_token",bos)==bos && token("eos_token",eos)==eos && token("unk_token",eos)==eos,
+      "unsupported CLIP special token configuration")
+    val length=config.get("model_max_length").fold(77)(_.int)
+    load(directory.resolve("vocab.json"),directory.resolve("merges.txt"),length,token("pad_token",eos))
   def fromText(vocabJson: String,mergesText: String,maxLength: Int=77,padToken: String=eos): ClipFastTokenizer =
     require(maxLength>=2 && maxLength<=16384,"invalid CLIP context length")
     val vocab=TokenizerJson.parse(vocabJson).obj.map((token,id) => token->id.int)

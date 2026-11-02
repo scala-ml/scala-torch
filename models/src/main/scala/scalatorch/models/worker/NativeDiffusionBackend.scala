@@ -21,15 +21,32 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
   override def usesCuda: Boolean=vaeExecution.device!="cpu" || unetExecution.device!="cpu"
   override def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot(modelSummary,vaeExecution.device,unetExecution.device,
     vaeExecution.offloadWeights,unetExecution.offloadWeights,maxAttentionScoreElements)
+  private def sdxlProfile(): Boolean =
+    val addition=UNetConfig.read(root.resolve("unet/config.json")).additionTimeWidth.nonEmpty
+    val index=root.resolve("model_index.json")
+    if Files.exists(index) then
+      val name=TokenizerJson.read(index).obj("_class_name").str
+      val xl=Set("StableDiffusionXLPipeline","StableDiffusionXLImg2ImgPipeline").contains(name)
+      require(xl || Set("StableDiffusionPipeline","StableDiffusionImg2ImgPipeline").contains(name),"unsupported diffusion model family")
+      require(xl==addition,"model index and U-Net conditioning disagree")
+    require(addition || (!Files.exists(root.resolve("text_encoder_2")) && !Files.exists(root.resolve("tokenizer_2"))),
+      "second text encoder requires SDXL text-time conditioning")
+    addition
   private def checkpointHash(context: NativeWorkContext): String=
+    val sdxl=sdxlProfile()
     val digest=java.security.MessageDigest.getInstance("SHA-256")
-    val weights=Vector("text_encoder"->"model.safetensors","unet"->"diffusion_pytorch_model.safetensors",
-      "vae"->"diffusion_pytorch_model.safetensors").flatMap { (part,name) =>
+    val parts=Vector("text_encoder"->"model.safetensors","unet"->"diffusion_pytorch_model.safetensors",
+      "vae"->"diffusion_pytorch_model.safetensors")++(if sdxl then Vector("text_encoder_2"->"model.safetensors") else Vector.empty)
+    val weights=parts.flatMap { (part,name) =>
       scala.util.Using.resource(scalatorch.io.SafeTensorSet.open(root.resolve(part),filename=name)) { set =>
         Vector(s"$part/config.json")++set.sourceFiles.map(p => root.relativize(p).toString.replace('\\','/'))
       }
     }
-    val names=weights++Vector("tokenizer/vocab.json","tokenizer/merges.txt")
+    val textFiles=Vector("tokenizer/vocab.json","tokenizer/merges.txt")++(if sdxl then
+      Vector("tokenizer_2/vocab.json","tokenizer_2/merges.txt")++
+        Vector("model_index.json","tokenizer/tokenizer_config.json","tokenizer_2/tokenizer_config.json").filter(n => Files.exists(root.resolve(n)))
+      else Vector.empty)
+    val names=weights++textFiles
     names.foreach { name =>
       digest.update(name.getBytes(java.nio.charset.StandardCharsets.UTF_8))
       digest.update(0.toByte)
@@ -146,19 +163,27 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           unsupported("native parameter loading requires fp32 and cpu; U-Net/VAE execution placement is configured separately")
         if p.get("vae_tiling").exists(_!=Bool(false)) then unsupported("VAE tiling is not implemented")
         val selectedVae=vaeChoice(p,"vae_path")
-        val tokenizer=ClipFastTokenizer.load(root.resolve("tokenizer/vocab.json"),root.resolve("tokenizer/merges.txt"))
+        val sdxl=sdxlProfile()
+        val tokenizer=if sdxl then ClipFastTokenizer.loadDirectory(root.resolve("tokenizer")) else
+          ClipFastTokenizer.load(root.resolve("tokenizer/vocab.json"),root.resolve("tokenizer/merges.txt"))
         context.checkCancelled()
         val clip=PretrainedClip.load(root.resolve("text_encoder"))
         context.checkCancelled()
-        val unet=PretrainedUNet.load(root.resolve("unet"),maxScoreElements=maxAttentionScoreElements)
+        val sdxlText=if !sdxl then None else
+          val tokenizer2=ClipFastTokenizer.loadDirectory(root.resolve("tokenizer_2"))
+          val clip2=PretrainedClip.load(root.resolve("text_encoder_2"))
+          context.checkCancelled()
+          Some(new SdxlTextConditioning(tokenizer,clip,tokenizer2,clip2))
+        val unet=PretrainedUNet.load(root.resolve("unet"),maxScoreElements=maxAttentionScoreElements,
+          maxParameters=if sdxl then 3000000000L else 1000000000L)
         context.checkCancelled()
         val (vae,vaeInfo)=readVae(selectedVae,context)
-        val pipeline=new EulerImagePipeline(tokenizer,clip,unet,vae,vaeExecution=vaeExecution,unetExecution=unetExecution)
+        val pipeline=new EulerImagePipeline(tokenizer,clip,unet,vae,vaeExecution=vaeExecution,unetExecution=unetExecution,sdxlConditioning=sdxlText)
         val hash=checkpointHash(context)
         context.beginPublication()
         loaded=Some(pipeline)
         modelSummary=Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),"kind"->Str("diffusers"),
-          "hash"->Str(hash),"model_token"->Str(UUID.randomUUID().toString))++vaeInfo
+          "hash"->Str(hash),"family"->Str(if sdxl then "sdxl" else "sd"),"model_token"->Str(UUID.randomUUID().toString))++vaeInfo
         modelSummary
       case "set_vae" =>
         keys(p,Set("path"))
@@ -167,7 +192,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         require(vae.config.latentChannels==previous.vae.config.latentChannels &&
           vae.config.channels.size==previous.vae.config.channels.size,"replacement VAE latent geometry differs")
         val replacement=new EulerImagePipeline(previous.tokenizer,previous.textEncoder,previous.unet,vae,
-          vaeExecution=previous.vaeExecution,unetExecution=previous.unetExecution)
+          vaeExecution=previous.vaeExecution,unetExecution=previous.unetExecution,sdxlConditioning=previous.sdxlConditioning)
         context.beginPublication()
         loaded=Some(replacement)
         modelSummary=modelSummary++info++Map("model_token"->Str(UUID.randomUUID().toString))
@@ -266,6 +291,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           val images=Vector.tabulate(iterations) { index =>
             context.checkCancelled()
             val current=imageRequest.copy(seed=seed+index,prompt=keywordPlan.fold(imageRequest.prompt)(_.prompts(index)))
+            if Seq(current.prompt,current.negativePrompt).exists(s => "<(?:lora|lyco|hypernet|cdt|cdtc):[^>]+>".r.findFirstIn(s).nonEmpty) then
+              unsupported("prompt extension directives require native extension execution, which is not implemented")
             val progress: DiffusionImageProgress => Unit = value =>
               context.event("progress",Map(
                 "step"->Number(value.completedSteps),"total"->Number(value.totalSteps),"pass"->Str("base"),

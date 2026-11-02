@@ -80,8 +80,11 @@ and addition dimensions. Eight fixed-noise Diffusers Euler/DPM cases compare
 final latent and VAE output, CPU maxabs1.956e-5. CUDA offload16MiB agreement max
 6.021e-6. Seed replay after cancellation and cancellation during text encoding
 pass. SD1.5 CudaImagePipelineSuite and ImageToImageSuite regressions also pass.
-Worker family loading, tokenizer config/hash and replacement-state tests remain
-before Task3 can be considered complete. No real SDXL image acceptance yet.
+Worker family loading, tokenizer config/hash and replacement-state tests now pass
+in NativeSdxlBackendSuite. CPU/CUDA txt2img/img2img, VAE replacement, failed model
+load/publication and unsupported family rejection covered. Existing SD1 backend
+regressions pass. SDXL-specific recovery artifact verification remains; shared
+recovery path was covered by earlier SD1 tests. No real SDXL image acceptance yet.
 
 ## Task4: NUI and real-model acceptance
 
