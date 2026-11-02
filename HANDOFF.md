@@ -2,6 +2,17 @@
 
 ## Windows continuation (2026-11-03)
 
+Native JSON transport primitives now exist in `worker/NativeProtocol.scala`:
+bounded/depth-limited duplicate-rejecting JSON, exact BigDecimal values (including
+64-bit seeds), validated request IDs/owners/object params, and synchronized UTF-8
+hello/result/error/event emission. Tests cover Unicode/newline framing, malformed
+envelopes, exact numbers and 80 progress emissions from four concurrent threads.
+The parser targets NUI's string-ID requests; legacy numeric/missing IDs and unknown
+envelope options (including image encryption transport) reject explicitly for now.
+This is not yet a runnable worker: bounded stdin framing, dispatch, control/job
+thread wiring, model handlers and integration tests remain next. The emitter's
+hello describes CPU inference and must advertise only implemented features.
+
 Native worker control has begun in `models/worker/NativeJobControl.scala`.
 It serializes admission, owner/target matching, interruption protection revisions,
 queued cancellation, publication admission and shutdown under one monitor. Each
