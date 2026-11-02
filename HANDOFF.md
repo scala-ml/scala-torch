@@ -2,6 +2,18 @@
 
 ## Windows continuation (2026-11-03)
 
+DPM image integration: `EulerImagePipeline.generateDpm(request, DpmSchedule, ...)`
+now runs VP DPM++ 2M with unit initial noise, unscaled model inputs, local history,
+shared prompt/guidance/decoder handling and cooperative cancellation.
+`DpmSchedule.karras(noise, steps)` rounds model timesteps for the linear/scaled-linear
+training profile. Public tiny-model integration verifies finite images, progress,
+exact seed replay and cancellation/recovery alongside the existing Euler path.
+PretrainedVaeSuite + initial DPM solver suite: 17 passed, no failures/skips; an
+additional schedule test checks 999/687/146/0 timesteps and unit initial scaling.
+This supersedes the earlier note that the DPM image loop is unconnected. Native
+worker/NUI integration, complete DPM config loading, independent Diffusers numeric
+parity, practical GPU diffusion and real-model quality remain open.
+
 DPM++ follow-up: `DpmPlusPlus2M` implements deterministic VP midpoint updates,
 epsilon/sample/v-prediction conversion, first-step order one, order-two history,
 and terminal-zero clean output. It is a pure indexed API: callers pass the prior

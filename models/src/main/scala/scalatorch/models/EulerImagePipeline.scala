@@ -8,7 +8,7 @@ final case class DiffusionImageRequest(prompt: String,negativePrompt: String,wid
     guidanceScale: Float=7.5f,truncatePrompt: Boolean=false)
 final case class DiffusionImageProgress(completedSteps: Int,totalSteps: Int,timestep: Float,latents: Tensor[Float])
 
-/** Single-image CPU inference composition; explicit fast tokenizer and Euler schedule, no hidden checkpoint defaults. */
+/** Single-image CPU inference composition with explicit Euler or DPM++ schedules. */
 final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder: ClipTextModel,
     val unet: ConditionalUNet2d,val vae: VaeModel,maxImagePixels: Long=16777216L,maxLatentElements: Long=16777216L):
   require(maxImagePixels>=0 && maxLatentElements>=0,"negative image pipeline allocation limit")
@@ -24,7 +24,19 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
   def generate(request: DiffusionImageRequest,schedule: EulerSchedule,
       noise: Option[Tensor[Float]]=None,onProgress: DiffusionImageProgress => Unit=_ => (),
       cancelled: () => Boolean=() => false,
-      prediction: DiffusionPrediction=DiffusionPrediction.Epsilon): Tensor[Float] = Autograd.noGrad {
+      prediction: DiffusionPrediction=DiffusionPrediction.Epsilon): Tensor[Float] =
+    generateImpl(request,schedule,noise,onProgress,cancelled,prediction,false)
+
+  /** VP DPM++ 2M: unit initial noise and no Euler model-input scaling. History is local to each call. */
+  def generateDpm(request: DiffusionImageRequest,schedule: DpmSchedule,
+      noise: Option[Tensor[Float]]=None,onProgress: DiffusionImageProgress => Unit=_ => (),
+      cancelled: () => Boolean=() => false,
+      prediction: DiffusionPrediction=DiffusionPrediction.Epsilon): Tensor[Float] =
+    generateImpl(request,schedule.layout,noise,onProgress,cancelled,prediction,true)
+
+  private def generateImpl(request: DiffusionImageRequest,schedule: EulerSchedule,
+      noise: Option[Tensor[Float]],onProgress: DiffusionImageProgress => Unit,
+      cancelled: () => Boolean,prediction: DiffusionPrediction,dpm: Boolean): Tensor[Float] = Autograd.noGrad {
     def checkCancelled(): Unit =
       if cancelled() || Thread.currentThread().isInterrupted then throw new CancellationException("image generation cancelled")
     checkCancelled()
@@ -53,9 +65,11 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
     }
     var latent=Variable(initial,requiresGrad=false)*schedule.initialNoiseSigma.toFloat
     val scheduler=EulerScheduler(schedule,prediction,maxElements=maxLatentElements)
+    val dpmSolver=if dpm then Some(DpmPlusPlus2M(schedule.sigmas,prediction,maxLatentElements)) else None
+    var history: Option[Variable]=None
     for i <- schedule.timesteps.indices do
       checkCancelled()
-      val input=scheduler.scaleModelInput(i,latent)
+      val input=if dpm then latent else scheduler.scaleModelInput(i,latent)
       val time=Tensor.fromFloats(Array(schedule.timesteps(i)),Shape.from(Seq(1)))
       val positive=unet(input,time,conditional)
       checkCancelled()
@@ -65,7 +79,12 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
           val negative=unet(input,time,context)
           checkCancelled()
           ClassifierFreeGuidance.combine(negative,positive,request.guidanceScale)
-      latent=scheduler.step(i,predicted,latent).previous
+      dpmSolver match
+        case Some(solver) =>
+          val result=solver.step(i,predicted,latent,history)
+          latent=result.previous
+          history=Some(result.predictedOriginal)
+        case None => latent=scheduler.step(i,predicted,latent).previous
       require(latent.data.toFloatArray.forall(_.isFinite),"denoising produced nonfinite latents")
       checkCancelled()
       onProgress(DiffusionImageProgress(i+1,schedule.timesteps.size,schedule.timesteps(i),latent.data))

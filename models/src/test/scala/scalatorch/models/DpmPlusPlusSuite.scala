@@ -5,6 +5,14 @@ import scalatorch.autograd.Variable
 
 class DpmPlusPlusSuite extends munit.FunSuite:
   private def v(x: Float)=Variable(Tensor.fromFloats(Array(x),Shape.from(Seq(1))))
+  test("DPM Karras schedules round model timesteps and use unit initial noise") {
+    val noise=DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true)
+    val schedule=DpmSchedule.karras(noise,4)
+    assertEquals(schedule.timesteps,Vector(999f,687f,146f,0f))
+    assertEquals(schedule.sigmas,noise.karrasEuler(4).sigmas)
+    assertEquals(schedule.layout.initialNoiseSigma,1.0)
+    intercept[IllegalArgumentException](DpmSchedule(Vector(2f,1f),Vector(2.0,2.0,0.0)))
+  }
   test("VP midpoint uses history and terminal zero returns current clean prediction") {
     val solver=DpmPlusPlus2M(Vector(4.0,2.0,1.0,0.0),DiffusionPrediction.Sample)
     val first=solver.step(0,v(1),v(0))

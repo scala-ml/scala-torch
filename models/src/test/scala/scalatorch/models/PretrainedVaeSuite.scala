@@ -294,6 +294,17 @@ class PretrainedVaeSuite extends munit.FunSuite:
     val pipeline=new EulerImagePipeline(tokenizer,PretrainedClip.load(clipDir),PretrainedUNet.load(unetDir),PretrainedVae.load(vaeDir))
     val schedule=DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true).euler(2)
     val request=DiffusionImageRequest("a red cat","a blue boat",10,6,42L,guidanceScale=3f)
+    val dpmSchedule=DpmSchedule.karras(DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true),3)
+    val dpmProgress=scala.collection.mutable.ArrayBuffer.empty[Int]
+    val dpmImage=pipeline.generateDpm(request,dpmSchedule,onProgress=p => dpmProgress+=p.completedSteps)
+    assertEquals(dpmProgress.toVector,Vector(1,2,3))
+    assert(dpmImage.toFloatArray.forall(_.isFinite))
+    assertEquals(dpmImage.toFloatArray.toVector,pipeline.generateDpm(request,dpmSchedule).toFloatArray.toVector)
+    var dpmCancel=false
+    intercept[java.util.concurrent.CancellationException] {
+      pipeline.generateDpm(request,dpmSchedule,onProgress=_ => dpmCancel=true,cancelled=() => dpmCancel)
+    }
+    assertEquals(dpmImage.toFloatArray.toVector,pipeline.generateDpm(request,dpmSchedule).toFloatArray.toVector)
     val progress=scala.collection.mutable.ArrayBuffer.empty[Int]
     val image=pipeline.generate(request,schedule,onProgress=p => progress+=p.completedSteps)
     assertEquals(image.toFloatArray.toVector,
