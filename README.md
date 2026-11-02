@@ -183,7 +183,7 @@ Backend rotary positions and causal grouped-query attention now run on CPU or CU
 
 [Resident backend KV caches](docs/research/backend-kv-cache.md) now make cached CPU/CUDA generation the default. Device K/V buffers stay at fixed capacity, cached SmolLM2 logits match Candle, and rejected decodes leave the committed position unchanged.
 
-[Scoped backend autodiff](docs/research/backend-autograd.md) now differentiates matrix/layout, basic arithmetic, SiLU, RMSNorm and rotary-position operations on CPU or CUDA. A resident GPU training test learns `y=2x+1` in 100 steps, reducing loss from9.0 to1.21e-13. A gated transformer MLP also trains with CPU gradient/update parity over20steps, reducing loss0.0951→0.0224. Both restore their allocation baseline after every step. Embedding/attention backward and backend optimizer/checkpoint integration remain open. Enable the separate real-GPU autograd gate with:
+[Scoped backend autodiff](docs/research/backend-autograd.md) now differentiates matrix/layout, basic arithmetic, SiLU, RMSNorm, rotary-position and embedding operations on CPU or CUDA. Resident regression, gated-MLP and tied embedding/projection training tests match CPU gradients or analytical targets and restore their allocation baseline after every step. Attention backward, cross entropy and backend optimizer/checkpoint integration remain open. Enable the separate real-GPU autograd gate with:
 
 ```sh
 sbt --server -Dsbt.io.virtual=false -Dsbt.server.autostart=false -batch ';set autograd / Test / envVars += "SCALATORCH_CUDA_TESTS" -> "1";autograd / Test / testOnly scalatorch.autograd.*'

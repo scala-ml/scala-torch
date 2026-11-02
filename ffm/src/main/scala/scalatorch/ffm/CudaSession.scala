@@ -40,7 +40,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.pointerResult("cuModuleLoadData",Seq(ADDRESS),driver.arena.allocateFrom(opsPtx))
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","rope","attention","cache_append").map { name =>
+  private val kernels=Seq("binary","scale","fill","sum","expand_scalar","silu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -213,6 +213,27 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       execute(output,output.numel,kernels("embedding")) { (arena,result) =>
         Seq(table.address,result.address,address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
           Seq(output.numel.toInt,table.shape.dims(1).toInt).map(v => arena.allocateFrom(JAVA_INT,v))
+      }
+    }
+
+  def embeddingBackward(tableShape: Shape,indices: Tensor[Long],gradient: CudaTensor): CudaTensor =
+    validate(gradient)
+    val ids=EmbeddingGradient.indices(tableShape,indices,gradient.shape)
+    if ids.isEmpty then return fill(tableShape,0f)
+    val rows=tableShape.dims(0).toInt;val width=tableShape.dims(1).toInt
+    val bytes=(tableShape.numel+rows.toLong+ids.length.toLong)*4
+    require(bytes<=maxBytes-used,"embedding gradient workspace budget exceeded")
+    val heads=Array.fill(rows)(-1);val next=new Array[Int](ids.length)
+    // Reverse insertion preserves the original logical token order in each row.
+    var i=ids.length-1
+    while i>=0 do
+      next(i)=heads(ids(i));heads(ids(i))=i;i-=1
+    withInts(heads) { headAddress =>
+      withInts(next) { nextAddress =>
+        execute(tableShape,tableShape.numel,kernels("embedding_backward")) { (arena,result) =>
+          Seq(gradient.address,headAddress,nextAddress,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+            Seq(tableShape.numel.toInt,width).map(v => arena.allocateFrom(JAVA_INT,v))
+        }
       }
     }
 

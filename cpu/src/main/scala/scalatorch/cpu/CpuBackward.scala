@@ -3,6 +3,16 @@ package scalatorch.cpu
 import scalatorch.*
 
 private[cpu] object CpuBackward:
+  def embedding(table: Shape,indices: Tensor[Long],gradient: Tensor[Float]): Tensor[Float] =
+    val ids=EmbeddingGradient.indices(table,indices,gradient.shape)
+    val out=new Array[Float](table.numel.toInt)
+    if ids.nonEmpty then
+      val width=table.dims(1).toInt;val g=gradient.toFloatArray
+      for i <- ids.indices do
+        var j=0
+        while j<width do
+          out(ids(i)*width+j)+=g(i*width+j);j+=1
+    Tensor.fromFloats(out,table)
   def silu(value: Tensor[Float],gradient: Tensor[Float]): Tensor[Float] =
     require(value.shape==gradient.shape,"SiLU gradient shape mismatch")
     val x=value.toFloatArray;val g=gradient.toFloatArray

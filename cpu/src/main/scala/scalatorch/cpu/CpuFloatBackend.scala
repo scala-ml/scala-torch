@@ -4,6 +4,8 @@ import scalatorch.*
 
 /** Immutable CPU Float32 inference backend; release is a no-op for GC-owned storage. */
 object CpuFloatBackend extends TrainingBackend[Tensor[Float]]:
+  def embeddingBackward(tableShape: Shape,indices: Tensor[Long],gradient: Tensor[Float]): Tensor[Float] =
+    CpuBackward.embedding(tableShape,indices,gradient)
   def ropeBackward(gradient: Tensor[Float],positionStart: Int = 0,theta: Double = 10000.0): Tensor[Float] =
     CpuAttention.rope(gradient,positionStart,theta,inverse=true)
   def siluBackward(value: Tensor[Float],gradient: Tensor[Float]): Tensor[Float] = CpuBackward.silu(value,gradient)

@@ -3,6 +3,31 @@
 .target sm_50
 .address_size 64
 
+// One owner per output element; occurrence lists preserve logical token order.
+.visible .entry embedding_backward(.param .u64 gradient, .param .u64 heads, .param .u64 next,
+ .param .u64 out, .param .u32 count, .param .u32 width) {
+ .reg .pred p;
+ .reg .b32 r<11>;
+ .reg .b64 d<7>;
+ .reg .f32 f<2>;
+ ld.param.u64 d0,[gradient]; ld.param.u64 d1,[heads]; ld.param.u64 d2,[next]; ld.param.u64 d3,[out];
+ ld.param.u32 r0,[count]; ld.param.u32 r1,[width];
+ mov.u32 r2,%tid.x; mov.u32 r3,%ctaid.x; mov.u32 r4,%ntid.x;
+ mad.lo.u32 r5,r3,r4,r2; setp.ge.u32 p,r5,r0; @p bra DONE;
+ div.u32 r6,r5,r1; rem.u32 r7,r5,r1;
+ mul.wide.u32 d4,r6,4; add.u64 d5,d1,d4; ld.global.s32 r8,[d5];
+ mov.f32 f0,0f00000000;
+REDUCE:
+ setp.lt.s32 p,r8,0; @p bra STORE;
+ mad.lo.u32 r9,r8,r1,r7; mul.wide.u32 d4,r9,4; add.u64 d5,d0,d4;
+ ld.global.f32 f1,[d5]; add.rn.f32 f0,f0,f1;
+ mul.wide.u32 d4,r8,4; add.u64 d6,d2,d4; ld.global.s32 r8,[d6]; bra REDUCE;
+STORE:
+ mul.wide.u32 d4,r5,4; add.u64 d5,d3,d4; st.global.f32 [d5],f0;
+DONE:
+ ret;
+}
+
 .visible .entry fill(.param .u64 out, .param .u32 count, .param .f32 value) {
  .reg .pred p;
  .reg .b32 r<5>;
