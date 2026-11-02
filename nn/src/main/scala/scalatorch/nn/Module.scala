@@ -9,6 +9,8 @@ trait Module[A]:
   def namedParameters(model: A): Vector[(String, Parameter)]
 
 object Module:
+  given Module[Double] with
+    def namedParameters(model: Double) = Vector.empty
   given Module[Parameter] with
     def namedParameters(model: Parameter) = Vector("" -> model)
   given [A](using inner: Module[A]): Module[Option[A]] with

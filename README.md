@@ -12,7 +12,9 @@ Trainable `Parameter`, `Linear`, SGD and AdamW are available in `scalatorch.nn`.
 
 Persistent training checkpoints now save weights, optimizer configuration, AdamW moments/counters, and a caller-supplied step. Restore validates the whole file before changing training state; deterministic save/reload/resume matches uninterrupted training exactly.
 
-Not implemented yet: Embedding/norm layers, a persistent GPU Tensor backend, cuBLAS acceleration, public model loading, LLM generation, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
+Transformer building blocks include trainable Embedding and RMSNorm modules plus differentiable SiLU. Embedding accepts Int64 token tensors with arbitrary leading shape and accumulates repeated-row gradients. RMSNorm normalizes the last axis using Double accumulations and Float32 output. A small token model trains these layers together in the integration suite.
+
+Not implemented yet: a persistent GPU Tensor backend, cuBLAS acceleration, public model loading, attention/RoPE/KV cache, LLM generation, or diffusion/NUI migration. The small PTX GEMM kernel verifies correctness and FFM execution; it is not intended for model performance.
 
 ```sh
 sbt 'core / Test / testOnly scalatorch.*'
@@ -70,6 +72,15 @@ val restoredStep = Checkpoint.load(model, optimizer, path)
 ```
 
 Checkpoint restore requires matching model aliases/shapes/trainability and optimizer kind, parameter subset, and hyperparameters. Save at optimizer-step boundaries; gradients, RNG and data-loader state are not stored. This [training format](docs/research/checkpoint-format.md) is separate from the planned safetensors model loader.
+
+```scala
+val embedding = Embedding.init(vocabulary = 32, width = 8, seed = 1)
+val norm = RMSNorm.init(width = 8)
+val tokens = Tensor.fromLongs(Array(2L, 7L, 2L), Shape.from(Seq(3L)))
+val hidden = norm(embedding(tokens)).silu() // shape (3, 8)
+```
+
+Embedding gradients are dense; padding-index and sparse-gradient options are not implemented. Module derivation treats Double fields such as RMSNorm epsilon as configuration, not parameters. Checkpoints store tensors, not model architecture/configuration: reconstruct matching layer settings before restoring.
 
 - [Design and roadmap](docs/superpowers/specs/2026-11-02-scala-torch-design.md)
 - [Initial implementation plan](docs/superpowers/plans/2026-11-02-tensor-foundation.md)

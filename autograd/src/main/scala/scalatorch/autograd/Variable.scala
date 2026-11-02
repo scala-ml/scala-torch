@@ -56,6 +56,10 @@ final class Variable private (
     require(data.shape.numel > 0, "mean of empty Variable is unsupported")
     sum() * (1f / data.shape.numel.toFloat)
 
+  def embedding(indices: Tensor[Long]): Variable = TransformerOps.embedding(this, indices)
+  def rmsNorm(weight: Variable, epsilon: Double = 1e-6): Variable = TransformerOps.rmsNorm(this, weight, epsilon)
+  def silu(): Variable = TransformerOps.silu(this)
+
   def relu(): Variable =
     val source = data.toFloatArray
     val value = Tensor.fromFloats(source.map(x => math.max(0f, x)), data.shape)
@@ -119,7 +123,7 @@ object Variable:
   private def scalar(value: Float): Variable =
     Variable(Tensor.fromFloats(Array(value), Shape.from(Seq.empty)), requiresGrad = false)
 
-  private def result(data: Tensor[Float], edges: Vector[(Variable, Tensor[Float] => Tensor[Float])]): Variable =
+  private[autograd] def result(data: Tensor[Float], edges: Vector[(Variable, Tensor[Float] => Tensor[Float])]): Variable =
     val tracked = if Autograd.recording then edges.filter(_._1.requiresGrad) else Vector.empty
     // Frozen transforms still save parameter lineage for version checks. Explicit noGrad/detach are snapshots.
     new Variable(data, tracked.nonEmpty, tracked, if Autograd.recording then edges.map(_._1) else Vector.empty)
