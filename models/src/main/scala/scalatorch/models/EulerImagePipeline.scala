@@ -13,7 +13,7 @@ final case class SdxlImageSize(originalHeight: Int,originalWidth: Int,cropTop: I
     Tensor.fromFloats(Array(originalHeight.toFloat,originalWidth.toFloat,cropTop.toFloat,cropLeft.toFloat,height.toFloat,width.toFloat),Shape.from(Seq(1L,6L)))
 /** Single NCHW image in [-1,1]; optional standard-normal posterior noise for replay. */
 final case class DiffusionImageSource(image: Tensor[Float],strength: Double,posteriorNoise: Option[Tensor[Float]]=None,
-    mask: Option[Tensor[Float]]=None,originalImage: Option[Tensor[Float]]=None):
+    mask: Option[Tensor[Float]]=None,originalImage: Option[Tensor[Float]]=None,finalOverlay: Boolean=true):
   require(mask.isDefined==originalImage.isDefined,"inpaint mask and original image must be supplied together")
 final case class DiffusionImageProgress(completedSteps: Int,totalSteps: Int,timestep: Float,latents: Tensor[Float])
 
@@ -174,7 +174,7 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
       case e: CancellationException => throw e
       case scala.util.control.NonFatal(e) => throw new VaeDecodeFailure(decoderInput.data,e)
     checkCancelled()
-    source.flatMap(s => s.mask.map(mask =>
+    source.flatMap(s => if !s.finalOverlay then None else s.mask.map(mask =>
       val generated=image.toFloatArray
       val original=s.originalImage.get.toFloatArray
       val repaint=mask.toFloatArray

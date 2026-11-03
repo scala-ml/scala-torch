@@ -164,6 +164,25 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       val batchProgress=batchEvents.filter(_.get("batch_size").contains(Number(2)))
       assert(batchProgress.nonEmpty,"progress must report the requested logical batch size")
       assert(batchProgress.forall(_.get("images").contains(Number(4))))
+      val initCanvas=new java.awt.image.BufferedImage(100,60,java.awt.image.BufferedImage.TYPE_INT_RGB)
+      val inpaintMask=new java.awt.image.BufferedImage(100,60,java.awt.image.BufferedImage.TYPE_INT_RGB)
+      for y <- 0 until 60; x <- 0 until 100 do
+        initCanvas.setRGB(x,y,0xffff0000)
+        inpaintMask.setRGB(x,y,if x>=40 && x<60 && y>=20 && y<40 then 0xffffffff else 0xff000000)
+      val initPath=output.resolve("fullres-init.png");val maskPath=output.resolve("fullres-mask.png")
+      javax.imageio.ImageIO.write(initCanvas,"png",initPath.toFile)
+      javax.imageio.ImageIO.write(inpaintMask,"png",maskPath.toFile)
+      val fullRes=run("img2img",Map("output_dir"->Str(output.toString),"params"->Obj(Map(
+        "prompt"->Str("replace the center"),"width"->Number(64),"height"->Number(64),"steps"->Number(1),"seed"->Number(303),
+        "img2img"->Obj(Map("init_image"->Str(initPath.toString),"mask"->Str(maskPath.toString),
+          "denoising_strength"->Number(1),"resize_mode"->Number(0),"mask_blur"->Number(0),
+          "inpaint_full_res"->Bool(true),"inpaint_full_res_padding"->Number(8)))))))
+      val fullResEntry=fullRes("images").asInstanceOf[Arr].values.head.asInstanceOf[Obj].fields
+      assertEquals((fullResEntry("width"),fullResEntry("height")),(Number(100),Number(60)))
+      val fullResImage=javax.imageio.ImageIO.read(Path.of(fullResEntry("path").asInstanceOf[Str].value).toFile)
+      assertEquals((fullResImage.getWidth,fullResImage.getHeight),(100,60))
+      assertEquals((fullResImage.getRGB(0,0)&0xffffff),0xff0000)
+      assert((fullResImage.getRGB(50,30)&0xffffff)!=0xff0000)
       val custom=output.resolve("custom-mappings.txt")
       Files.writeString(custom,s"${metadata("hash").asInstanceOf[Str].value},a red|a blue,${root.getFileName}\n")
       val keywordParams=Map("prompt"->Str("cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(2),

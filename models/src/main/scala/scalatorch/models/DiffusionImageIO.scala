@@ -8,7 +8,7 @@ import scala.util.Using
 
 /** Raw VAE [-1,1] RGB images to PNG. Caller owns staging/publication and parent-directory creation. */
 object DiffusionImageIO:
-  def writePng(images: Tensor[Float],path: Path,index: Int=0,maxPixels: Long=16777216L): Unit =
+  def toBufferedImage(images: Tensor[Float],index: Int=0,maxPixels: Long=16777216L): BufferedImage =
     val dims=images.shape.dims
     require(images.device==Device.Cpu && images.dtype==DType.Float32 && dims.size==4 && dims(1)==3 &&
       dims(2)>0 && dims(3)>0 && index>=0 && index<dims(0),"PNG export requires a valid NCHW RGB image")
@@ -25,6 +25,12 @@ object DiffusionImageIO:
     while i<plane do
       image.setRGB(i%width,i/width,(channel(values(i))<<16)|(channel(values(plane+i))<<8)|channel(values(2*plane+i)))
       i+=1
+    image
+
+  def writePng(images: Tensor[Float],path: Path,index: Int=0,maxPixels: Long=16777216L): Unit =
+    writePngImage(toBufferedImage(images,index,maxPixels),path)
+
+  def writePngImage(image: BufferedImage,path: Path): Unit =
     // Open outside the cleanup block so an existing caller-owned file can never be deleted.
     val stream=Files.newOutputStream(path,StandardOpenOption.CREATE_NEW,StandardOpenOption.WRITE)
     try Using.resource(stream) { output => require(ImageIO.write(image,"png",output),"PNG writer unavailable") }

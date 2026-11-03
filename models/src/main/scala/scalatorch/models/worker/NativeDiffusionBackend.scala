@@ -310,6 +310,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         require(steps>0 && steps<=1000,"steps must be between 1 and 1000")
         val imageRequest=DiffusionImageRequest(str(g,"prompt",""),str(g,"negative_prompt",""),
           integer(g,"width",512),integer(g,"height",512),seed,number(g,"cfg_scale",7).toFloat,clipSkip=integer(g,"clip_skip",1),sdxlSize=sdxlSize)
+        var preparedInpaint: Option[NativeInpaint.Prepared]=None
         val source=if !img2img then None else
           val fields=g.get("img2img") match
             case Some(Obj(fields)) => fields
@@ -332,11 +333,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           val fullResPadding=integer(fields,"inpaint_full_res_padding",32)
           require(fullResPadding>=0 && fullResPadding<=256,"inpaint_full_res_padding must be between 0 and 256")
           val invert=bool(fields,"inpainting_mask_invert",false)
-          if maskName.isEmpty && (maskBlur!=4 || fill!=1 || fullRes || fullResPadding!=32 || invert) then
-            unsupported("inpainting options require an active mask")
           if maskName.nonEmpty then
-            if fullRes then unsupported("full-resolution masked crop is not implemented")
-            if fullResPadding!=32 then unsupported("custom full-resolution mask padding is not implemented")
             if fill!=1 then unsupported("only original-pixel inpainting fill is implemented")
           val name=str(fields,"init_image","")
           require(name.nonEmpty,"init_image is required")
@@ -350,8 +347,11 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
               if pipeline.unet.convIn.weight.data.shape.dims(1)!=pipeline.vae.config.latentChannels then
                 unsupported("nine-channel inpainting U-Nets are not implemented")
               val mask=DiffusionImageInput.readRgb(Path.of(maskPath))
-              val prepared=NativeInpaint.prepare(input,mask,width,height,mode,maskBlur,invert,context.cancelled)
-              Some(DiffusionImageSource(prepared.image,strength,mask=Some(prepared.mask),originalImage=Some(prepared.originalImage)))
+              val prepared=NativeInpaint.prepare(input,mask,width,height,mode,maskBlur,invert,context.cancelled,
+                fullRes=fullRes,fullResPadding=fullResPadding)
+              preparedInpaint=Some(prepared)
+              Some(DiffusionImageSource(prepared.image,strength,mask=Some(prepared.mask),originalImage=Some(prepared.originalImage),
+                finalOverlay=prepared.pasteBox.isEmpty))
             case None =>
               val resized=DiffusionImageResize(input,width,height,mode)
               val plane=width*height
@@ -410,13 +410,19 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
                 val artifact=NativeVaeRecovery.save(failure.decoderInput,recovery)
                 throw new NativeBackendError("vae_decode_failed",s"VAE decode failed; exact decoder input saved to $artifact")
             context.checkCancelled()
+            val fullImage=preparedInpaint.filter(_.pasteBox.nonEmpty)
+              .map(_.pasteBack(DiffusionImageIO.toBufferedImage(image),context.cancelled))
             val name=s"native-${UUID.randomUUID()}.png"
             val temporary=staging.resolve(name)
-            DiffusionImageIO.writePng(image,temporary)
+            fullImage match
+              case Some(value) => DiffusionImageIO.writePngImage(value,temporary)
+              case None => DiffusionImageIO.writePng(image,temporary)
             staged+=temporary
+            val resultWidth=fullImage.fold(current.width)(_.getWidth)
+            val resultHeight=fullImage.fold(current.height)(_.getHeight)
             Obj(Map("path"->Str(output.resolve(name).toString),"seed"->Number(BigDecimal(current.seed)),
               "subseed"->Number(if subseed<0 then subseed else subseed+index),
-              "width"->Number(current.width),"height"->Number(current.height))++keywordPlan.fold(Map.empty[String,NativeJson]) { _ =>
+              "width"->Number(resultWidth),"height"->Number(resultHeight))++keywordPlan.fold(Map.empty[String,NativeJson]) { _ =>
                 Map("effective_prompt"->Str(current.prompt),"model_keyword_source_prompt"->Str(current.prompt))
               })
           }

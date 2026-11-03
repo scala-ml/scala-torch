@@ -84,6 +84,11 @@ class ImageToImageSuite extends munit.FunSuite:
       assert((0 until 3).exists(c => (0 until 8).exists(y => (4 until 8).exists(x =>
         actual(c*64+y*8+x)!=original(c*64+y*8+x)))))
       assertEquals(maskedOutput.toFloatArray.toVector,maskedReplay.toFloatArray.toVector)
+      val rawOutput=if dpm then pipeline.generateDpm(request,layout,Some(noise),source=Some(masked.copy(finalOverlay=false)))
+        else pipeline.generate(request,schedule.euler(2),Some(noise),source=Some(masked.copy(finalOverlay=false)))
+      val raw=rawOutput.toFloatArray
+      assert((0 until 3).exists(c => (0 until 8).exists(y => (0 until 4).exists(x =>
+        raw(c*64+y*8+x)!=original(c*64+y*8+x)))),"disabling final pixel overlay must leave decoded crop pixels intact")
       if sys.env.get("SCALATORCH_CUDA_TESTS").contains("1") then
         val gpu=new EulerImagePipeline(tokenizer,clip,unet,vae,
           vaeExecution=VaeExecution.Cuda(offloadWeights=true),unetExecution=UNetExecution.Cuda(offloadWeights=true))

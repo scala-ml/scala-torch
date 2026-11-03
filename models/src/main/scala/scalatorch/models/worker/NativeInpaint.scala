@@ -4,9 +4,31 @@ import scalatorch.*
 import scalatorch.models.{DiffusionImageInput,DiffusionImageResize}
 import java.awt.image.BufferedImage
 
-/** Bounded mask preprocessing for the basic four-channel inpaint path. */
+/** Bounded mask preprocessing and canvas restoration for the four-channel inpaint path. */
 private[worker] object NativeInpaint:
-  final case class Prepared(image: Tensor[Float],originalImage: Tensor[Float],mask: Tensor[Float])
+  final case class Prepared(image: Tensor[Float],originalImage: Tensor[Float],mask: Tensor[Float],
+      pasteBox: Option[(Int,Int,Int,Int)]=None,fullOriginal: Option[BufferedImage]=None,
+      fullOverlayMask: Option[BufferedImage]=None):
+    def pasteBack(generated: BufferedImage,cancelled: () => Boolean=() => false): BufferedImage = pasteBox match
+      case None => generated
+      case Some((x1,y1,x2,y2)) =>
+        val original=fullOriginal.getOrElse(throw IllegalStateException("full-resolution original image missing"))
+        val mask=fullOverlayMask.getOrElse(throw IllegalStateException("full-resolution overlay mask missing"))
+        require(generated.getWidth>0 && generated.getHeight>0 &&
+          mask.getWidth==original.getWidth && mask.getHeight==original.getHeight,"invalid full-resolution inpaint result")
+        val patch=DiffusionImageResize(generated,x2-x1,y2-y1,0)
+        val output=new BufferedImage(original.getWidth,original.getHeight,BufferedImage.TYPE_INT_RGB)
+        val pixels=new Array[Int](original.getWidth*original.getHeight)
+        for y <- 0 until original.getHeight; x <- 0 until original.getWidth do
+          if x==0 && (cancelled() || Thread.currentThread().isInterrupted) then
+            throw new java.util.concurrent.CancellationException("inpainting paste-back cancelled")
+          val base=original.getRGB(x,y)
+          val edited=if x>=x1 && x<x2 && y>=y1 && y<y2 then patch.getRGB(x-x1,y-y1) else base
+          val amount=mask.getRGB(x,y)&255
+          def mix(shift: Int): Int=((((base>>>shift)&255)*(255-amount)+((edited>>>shift)&255)*amount+127)/255)
+          pixels(y*original.getWidth+x)=0xff000000|(mix(16)<<16)|(mix(8)<<8)|mix(0)
+        output.setRGB(0,0,original.getWidth,original.getHeight,pixels,0,original.getWidth)
+        output
 
   private def grayRgb(source: BufferedImage): BufferedImage =
     val result=new BufferedImage(source.getWidth,source.getHeight,BufferedImage.TYPE_INT_RGB)
@@ -58,12 +80,48 @@ private[worker] object NativeInpaint:
       for _ <- 0 until 3 do output=boxBlur(output,width,height,radius,horizontal=false,cancelled)
       output
 
+  private def cropRegion(mask: Array[Float],width: Int,height: Int,pad: Int): Option[(Int,Int,Int,Int)] =
+    var minX=width;var minY=height;var maxX= -1;var maxY= -1
+    for y <- 0 until height; x <- 0 until width do
+      if mask(y*width+x)>0f then
+        minX=math.min(minX,x);minY=math.min(minY,y);maxX=math.max(maxX,x);maxY=math.max(maxY,y)
+    if maxX<0 then None
+    else Some((math.max(0,minX-pad),math.max(0,minY-pad),math.min(width,maxX+1+pad),math.min(height,maxY+1+pad)))
+
+  private def expandCrop(box: (Int,Int,Int,Int),width: Int,height: Int,targetWidth: Int,targetHeight: Int): (Int,Int,Int,Int) =
+    var (x1,y1,x2,y2)=box
+    val cropWidth=x2-x1;val cropHeight=y2-y1
+    if cropWidth.toDouble/cropHeight>targetWidth.toDouble/targetHeight then
+      val desired=(cropWidth.toDouble/(targetWidth.toDouble/targetHeight)).toInt
+      val diff=desired-cropHeight
+      y1-=diff/2;y2+=diff-diff/2
+      if y2>=height then { val d=y2-height;y2-=d;y1-=d }
+      if y1<0 then { y2-=y1;y1=0 }
+      if y2>=height then y2=height
+    else
+      val desired=(cropHeight.toDouble*(targetWidth.toDouble/targetHeight)).toInt
+      val diff=desired-cropWidth
+      x1-=diff/2;x2+=diff-diff/2
+      if x2>=width then { val d=x2-width;x2-=d;x1-=d }
+      if x1<0 then { x2-=x1;x1=0 }
+      if x2>=width then x2=width
+    (x1,y1,x2,y2)
+
+  private def grayImage(values: Array[Float],width: Int,height: Int): BufferedImage =
+    val image=new BufferedImage(width,height,BufferedImage.TYPE_INT_RGB)
+    val pixels=values.map { value =>
+      val gray=math.max(0,math.min(255,(value*255f).round.toInt))
+      0xff000000|(gray<<16)|(gray<<8)|gray
+    }
+    image.setRGB(0,0,width,height,pixels,0,width)
+    image
+
   def prepare(source: BufferedImage,mask: BufferedImage,width: Int,height: Int,resizeMode: Int,blurRadius: Int,
-      invert: Boolean,cancelled: () => Boolean): Prepared =
+      invert: Boolean,cancelled: () => Boolean,fullRes: Boolean=false,fullResPadding: Int=32): Prepared =
     require(width>0 && height>0 && width.toLong*height<=16777216L,"invalid inpaint output size")
     require(blurRadius>=0 && blurRadius<=64,"mask_blur must be between 0 and 64")
     if cancelled() || Thread.currentThread().isInterrupted then throw new java.util.concurrent.CancellationException("inpainting cancelled")
-    val original=DiffusionImageResize(source,width,height,resizeMode)
+    lazy val original=DiffusionImageResize(source,width,height,resizeMode)
     var maskRgb=grayRgb(mask)
     if invert then
       for y <- 0 until maskRgb.getHeight; x <- 0 until maskRgb.getWidth do
@@ -71,9 +129,35 @@ private[worker] object NativeInpaint:
         maskRgb.setRGB(x,y,(v<<16)|(v<<8)|v)
     if maskRgb.getWidth!=source.getWidth || maskRgb.getHeight!=source.getHeight then
       maskRgb=DiffusionImageResize(maskRgb,source.getWidth,source.getHeight,0)
-    maskRgb=DiffusionImageResize(maskRgb,width,height,resizeMode)
-    val plane=width*height
-    val levels=Array.tabulate(plane) { i => (maskRgb.getRGB(i%width,i/width)&255)/255f }
-    val softened=blur(levels,width,height,blurRadius,cancelled)
-    val image=rgbTensor(original,cancelled)
-    Prepared(image,image,Tensor.fromFloats(softened,Shape.from(Seq(1L,1L,height.toLong,width.toLong))))
+    val fullResPrepared=if fullRes then
+      require(fullResPadding>=0 && fullResPadding<=256,"inpaint_full_res_padding must be between 0 and 256")
+      val fullWidth=source.getWidth;val fullHeight=source.getHeight
+      val fullPlane=fullWidth*fullHeight
+      val fullLevels=Array.tabulate(fullPlane) { i => (maskRgb.getRGB(i%fullWidth,i/fullWidth)&255)/255f }
+      val blurredFull=blur(fullLevels,fullWidth,fullHeight,blurRadius,cancelled)
+      val fullMaskImage=grayImage(blurredFull,fullWidth,fullHeight)
+      val box=cropRegion(blurredFull,fullWidth,fullHeight,fullResPadding)
+        .map(expandCrop(_,fullWidth,fullHeight,width,height))
+      box.map { (x1,y1,x2,y2) =>
+        val imageCrop=source.getSubimage(x1,y1,x2-x1,y2-y1)
+        val maskCrop=fullMaskImage.getSubimage(x1,y1,x2-x1,y2-y1)
+        val resizedImage=DiffusionImageResize(imageCrop,width,height,2)
+        val resizedMask=DiffusionImageResize(maskCrop,width,height,2)
+        val cropPlane=width*height
+        val cropMask=Array.tabulate(cropPlane) { i => (resizedMask.getRGB(i%width,i/width)&255)/255f }
+        val modelImage=rgbTensor(resizedImage,cancelled)
+        val modelMask=Tensor.fromFloats(cropMask,Shape.from(Seq(1L,1L,height.toLong,width.toLong)))
+        val fullCopy=new BufferedImage(fullWidth,fullHeight,BufferedImage.TYPE_INT_RGB)
+        val fullPixels=source.getRGB(0,0,fullWidth,fullHeight,null,0,fullWidth)
+        fullCopy.setRGB(0,0,fullWidth,fullHeight,fullPixels,0,fullWidth)
+        Prepared(modelImage,modelImage,modelMask,Some((x1,y1,x2,y2)),Some(fullCopy),Some(fullMaskImage))
+      }
+    else None
+    fullResPrepared.getOrElse {
+      maskRgb=DiffusionImageResize(maskRgb,width,height,resizeMode)
+      val plane=width*height
+      val levels=Array.tabulate(plane) { i => (maskRgb.getRGB(i%width,i/width)&255)/255f }
+      val softened=blur(levels,width,height,blurRadius,cancelled)
+      val image=rgbTensor(original,cancelled)
+      Prepared(image,image,Tensor.fromFloats(softened,Shape.from(Seq(1L,1L,height.toLong,width.toLong))))
+    }
