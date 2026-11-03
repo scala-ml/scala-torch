@@ -11,12 +11,18 @@ import scala.util.Using
 object PretrainedClip:
   def load(directory: Path,trainable: Boolean=false,maxParameters: Long=1000000000L,
       maxScoreElements: Long=16777216L,maxHiddenElements: Long=16777216L): ClipTextModel =
+    loadWithLinearTargets(directory,trainable,maxParameters,maxScoreElements,maxHiddenElements).model
+
+  def loadWithLinearTargets(directory: Path,trainable: Boolean=false,maxParameters: Long=1000000000L,
+      maxScoreElements: Long=16777216L,maxHiddenElements: Long=16777216L,
+      aliasPrefix: String="text_encoder"): LoadedLinearModel[ClipTextModel] =
     require(maxParameters>=0 && maxScoreElements>=0 && maxHiddenElements>=0,"negative CLIP allocation limit")
     val c=ClipTextConfig.read(directory.resolve("config.json"))
     Using.resource(SafeTensorSet.open(directory)) { archive =>
       val total=archive.tensors.values.foldLeft(BigInt(0))((n,t) => n+t.shape.numel)
       require(total<=maxParameters,"CLIP weights exceed parameter budget")
       val used=mutable.Set.empty[String]
+      val targets=mutable.Map.empty[String,Parameter]
       val positionIds="text_model.embeddings.position_ids"
       archive.tensors.get(positionIds).foreach { info =>
         require(info.shape==Shape.from(Seq(1L,c.maxPositions.toLong)),"CLIP position_ids shape mismatch")
@@ -30,7 +36,9 @@ object PretrainedClip:
         require(used.add(name),s"duplicate CLIP weight use: $name")
         Parameter(archive.readFloat(name),trainable)
       def linear(name: String,in: Int,out: Int): Linear =
-        Linear(parameter(s"$name.weight",out,in),Some(parameter(s"$name.bias",out)))
+        val weight=parameter(s"$name.weight",out,in)
+        targets(s"$aliasPrefix.$name")=weight
+        Linear(weight,Some(parameter(s"$name.bias",out)))
       def norm(name: String): LayerNorm =
         LayerNorm(c.width,Some(parameter(s"$name.weight",c.width)),Some(parameter(s"$name.bias",c.width)),c.epsilon)
       val tokens=Embedding(parameter("text_model.embeddings.token_embedding.weight",c.vocabulary,c.width))
@@ -42,9 +50,13 @@ object PretrainedClip:
           linear(s"$p.self_attn.out_proj",c.width,c.width),norm(s"$p.layer_norm2"),
           linear(s"$p.mlp.fc1",c.width,c.intermediate),linear(s"$p.mlp.fc2",c.intermediate,c.width),c.heads,c.activation)
       }
-      val projection=c.projectionWidth.map(width => Linear(parameter("text_projection.weight",width,c.width),None))
+      val projection=c.projectionWidth.map { width =>
+        val weight=parameter("text_projection.weight",width,c.width)
+        targets(s"$aliasPrefix.text_projection")=weight
+        Linear(weight,None)
+      }
       val model=ClipTextModel(tokens,positions,layers,norm("text_model.final_layer_norm"),maxScoreElements,maxHiddenElements,
         projection,c.eosId.toLong)
       require(used.toSet==archive.tensors.keySet,s"unused CLIP weights: ${(archive.tensors.keySet--used).toVector.sorted.mkString(", ")}")
-      model
+      LoadedLinearModel(model,targets.toMap)
     }

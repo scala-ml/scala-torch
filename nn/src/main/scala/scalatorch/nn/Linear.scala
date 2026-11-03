@@ -10,7 +10,10 @@ final case class Linear(weight: Parameter, bias: Option[Parameter], lora: Option
     a.b.data.shape.dims(0) == weight.data.shape.dims(0), "Linear adapter shape mismatch"))
   def apply(input: Variable): Variable =
     val base = input.matmul(weight.value.transpose(0, 1))
-    val result = lora.fold(base)(a => base + a(input))
+    val attached = lora.fold(base)(a => base + a(input))
+    val result = LinearAdapterScope.forWeight(weight).foldLeft(attached) { case (sum, (adapter, multiplier)) =>
+      sum + adapter(input) * multiplier
+    }
     bias.fold(result)(p => result + p.value)
 
   /** Freeze independent parameter handles; immutable weight storage may be shared. */

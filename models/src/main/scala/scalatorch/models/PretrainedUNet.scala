@@ -11,12 +11,17 @@ import scala.util.Using
 object PretrainedUNet:
   def load(directory: Path,trainable: Boolean=false,maxParameters: Long=1000000000L,
       maxScoreElements: Long=16777216L): ConditionalUNet2d =
+    loadWithLinearTargets(directory,trainable,maxParameters,maxScoreElements).model
+
+  def loadWithLinearTargets(directory: Path,trainable: Boolean=false,maxParameters: Long=1000000000L,
+      maxScoreElements: Long=16777216L): LoadedLinearModel[ConditionalUNet2d] =
     require(maxParameters>=0 && maxScoreElements>=0,"negative U-Net parameter or attention budget")
     val c=UNetConfig.read(directory.resolve("config.json"))
     Using.resource(SafeTensorSet.open(directory,filename="diffusion_pytorch_model.safetensors")) { archive =>
       val total=archive.tensors.values.foldLeft(BigInt(0))((sum,t) => sum+t.shape.numel)
       require(total<=maxParameters,"U-Net weights exceed parameter budget")
       val used=mutable.Set.empty[String]
+      val targets=mutable.Map.empty[String,Parameter]
       def parameter(name: String,dims: Int*): Parameter =
         val shape=Shape.from(dims.map(_.toLong))
         val info=archive.tensors.getOrElse(name,throw IllegalArgumentException(s"missing U-Net weight: $name"))
@@ -24,7 +29,9 @@ object PretrainedUNet:
         require(used.add(name),s"duplicate U-Net parameter use: $name")
         Parameter(archive.readFloat(name),trainable)
       def linear(name: String,in: Int,out: Int,bias: Boolean=true): Linear =
-        Linear(parameter(s"$name.weight",out,in),if bias then Some(parameter(s"$name.bias",out)) else None)
+        val weight=parameter(s"$name.weight",out,in)
+        targets(s"unet.$name")=weight
+        Linear(weight,if bias then Some(parameter(s"$name.bias",out)) else None)
       def conv(name: String,in: Int,out: Int,k: Int=3,stride: Int=1,padding: Int=1): Conv2d =
         Conv2d(parameter(s"$name.weight",out,in,k,k),Some(parameter(s"$name.bias",out)),
           Conv2dConfig(stride=(stride,stride),padding=(padding,padding)))
@@ -91,5 +98,5 @@ object PretrainedUNet:
       val model=ConditionalUNet2d(convIn,time,down,mid,up,group("conv_norm_out",current,c.epsilon),
         conv("conv_out",current,c.outChannels),DiffusionTimeSettings(c.flipSinToCos,c.frequencyShift),addition,c.additionTimeWidth.getOrElse(0))
       require(used.toSet==archive.tensors.keySet,s"unused U-Net weights: ${(archive.tensors.keySet--used).toVector.sorted.mkString(", ")}")
-      model
+      LoadedLinearModel(model,targets.toMap)
     }

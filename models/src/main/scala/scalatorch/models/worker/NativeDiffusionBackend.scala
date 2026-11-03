@@ -1,6 +1,7 @@
 package scalatorch.models.worker
 
 import scalatorch.models.*
+import scalatorch.nn.LinearAdapterScope
 import java.nio.file.{Files,Path}
 import java.util.UUID
 
@@ -15,6 +16,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
   private val root=modelRoot.toRealPath()
   private val config=EulerConfig.read(schedulerConfig)
   private var loaded: Option[EulerImagePipeline]=None
+  private var linearTargets=Map.empty[String,scalatorch.nn.Parameter]
   private var keywordState=ModelKeyword.State()
   @volatile private var modelSummary=Map.empty[String,NativeJson]
   override def device: String=unetExecution.device
@@ -171,21 +173,26 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val tokenizer=if sdxl then ClipFastTokenizer.loadDirectory(root.resolve("tokenizer")) else
           ClipFastTokenizer.load(root.resolve("tokenizer/vocab.json"),root.resolve("tokenizer/merges.txt"))
         context.checkCancelled()
-        val clip=PretrainedClip.load(root.resolve("text_encoder"))
+        val clipLoaded=PretrainedClip.loadWithLinearTargets(root.resolve("text_encoder"))
+        val clip=clipLoaded.model
         context.checkCancelled()
-        val sdxlText=if !sdxl then None else
+        val (sdxlText,clip2Targets)=if !sdxl then (None,Map.empty[String,scalatorch.nn.Parameter]) else
           val tokenizer2=ClipFastTokenizer.loadDirectory(root.resolve("tokenizer_2"))
-          val clip2=PretrainedClip.load(root.resolve("text_encoder_2"))
+          val clip2Loaded=PretrainedClip.loadWithLinearTargets(root.resolve("text_encoder_2"),aliasPrefix="text_encoder_2")
+          val clip2=clip2Loaded.model
           context.checkCancelled()
-          Some(new SdxlTextConditioning(tokenizer,clip,tokenizer2,clip2))
-        val unet=PretrainedUNet.load(root.resolve("unet"),maxScoreElements=maxAttentionScoreElements,
+          (Some(new SdxlTextConditioning(tokenizer,clip,tokenizer2,clip2)),clip2Loaded.linearTargets)
+        val unetLoaded=PretrainedUNet.loadWithLinearTargets(root.resolve("unet"),maxScoreElements=maxAttentionScoreElements,
           maxParameters=if sdxl then 3000000000L else 1000000000L)
+        val unet=unetLoaded.model
+        val nextLinearTargets=clipLoaded.linearTargets++clip2Targets++unetLoaded.linearTargets
         context.checkCancelled()
         val (vae,vaeInfo)=readVae(selectedVae,context)
         val pipeline=new EulerImagePipeline(tokenizer,clip,unet,vae,vaeExecution=vaeExecution,unetExecution=unetExecution,sdxlConditioning=sdxlText)
         val hash=checkpointHash(context)
         context.beginPublication()
         loaded=Some(pipeline)
+        linearTargets=nextLinearTargets
         modelSummary=Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),"kind"->Str("diffusers"),
           "hash"->Str(hash),"family"->Str(if sdxl then "sdxl" else "sd"),"model_token"->Str(UUID.randomUUID().toString))++vaeInfo
         modelSummary
@@ -205,11 +212,24 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         keys(p,Set.empty)
         context.beginPublication()
         loaded=None
+        linearTargets=Map.empty
         modelSummary=Map.empty
         Map.empty
       case "txt2img" | "img2img" =>
         val pipeline=loaded.getOrElse(throw new NativeBackendError("no_model","load a model first"))
-        keys(NativeGenerationDefaults.strip(p,NativeGenerationDefaults.envelope),Set("params","output_dir","preview_every","preview_method","vae_recovery_dir"))
+        val loraPaths=p.get("lora_paths") match
+          case None | Some(Null) => Map.empty[String,String]
+          case Some(Obj(paths)) =>
+            require(paths.size<=32,"too many resolved LoRA paths")
+            paths.map { (name,value) =>
+            require(name.nonEmpty && name.length<=256,"invalid resolved LoRA name")
+            val path=value match
+              case Str(text) if text.nonEmpty && text.length<=4096 => text
+              case _ => throw IllegalArgumentException(s"lora_paths.$name must be a path")
+            name->path
+          }
+          case _ => throw IllegalArgumentException("lora_paths must be an object")
+        keys(NativeGenerationDefaults.strip(p--Set("lora_paths"),NativeGenerationDefaults.envelope),Set("params","output_dir","preview_every","preview_method","vae_recovery_dir"))
         val previewEvery=integer(p,"preview_every",2)
         require(previewEvery>=0,"preview_every must be nonnegative")
         val previewMethod=str(p,"preview_method","approx")
@@ -220,7 +240,46 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val img2img=request.kind=="img2img"
         val defaults=if img2img then NativeGenerationDefaults.generation.removed("img2img") else NativeGenerationDefaults.generation
         val allowed=Set("prompt","negative_prompt","width","height","steps","seed","subseed","cfg_scale","sampler_name","scheduler","clip_skip","n_iter","checkpoint","vae","extra","hooks")
-        keys(NativeGenerationDefaults.strip(g,defaults),if img2img then allowed+"img2img" else allowed)
+        val requestedLoras=g.get("loras") match
+          case None => Vector.empty
+          case Some(Arr(values)) if values.isEmpty => Vector.empty
+          case Some(Arr(values)) =>
+            require(values.size<=16,"at most 16 LoRAs may be applied per request")
+            values.map {
+            case Obj(fields) =>
+              require(fields.keySet.subsetOf(Set("name","weight","unet","lbw","start","stop","dyn")),"unsupported LoRA fields")
+              if Set("lbw","start","stop","dyn").exists(key=>fields.get(key).exists(_!=Null)) then
+                unsupported("LoRA block weights, schedules and dynamic rank are not implemented")
+              val name=fields.get("name") match
+                case Some(Str(value)) if value.nonEmpty => value
+                case _ => throw IllegalArgumentException("LoRA name is required")
+              def scale(key: String,default: Double): Float = fields.get(key) match
+                case None | Some(Null) => default.toFloat
+                case Some(Number(value)) =>
+                  val converted=value.toFloat
+                  require(value.toDouble.isFinite && converted.isFinite,s"LoRA $key scale must be finite")
+                  converted
+                case _ => throw IllegalArgumentException(s"LoRA $key scale must be numeric")
+              val textScale=scale("weight",1.0)
+              (name,textScale,scale("unet",textScale.toDouble))
+            case _ => throw IllegalArgumentException("loras must contain objects")
+          }
+          case _ => throw IllegalArgumentException("loras must be an array")
+        keys(NativeGenerationDefaults.strip(g--Set("loras"),defaults),if img2img then allowed+"img2img"+"loras" else allowed+"loras")
+        var remainingAdapterElements=50000000L
+        val adapters=requestedLoras.flatMap { (name,textScale,unetScale) =>
+          val path=loraPaths.getOrElse(name,throw IllegalArgumentException(s"missing resolved path for LoRA: $name"))
+          val file=Path.of(path).toAbsolutePath.normalize()
+          require(file.getFileName.toString.endsWith(".safetensors") && Files.isRegularFile(file),s"LoRA safetensors file is missing: $name")
+          val loadedAdapter=DiffusionLoRA.load(file,linearTargets,textScale,unetScale,remainingAdapterElements)
+          val used=loadedAdapter.valuesIterator.flatten.map { case (adapter,_) =>
+            adapter.a.data.shape.numel+adapter.b.data.shape.numel
+          }.sum
+          remainingAdapterElements-=used
+          loadedAdapter.toVector.flatMap { (parameter,items) =>
+            items.map(item => parameter->item)
+          }
+        }.groupMap(_._1)(_._2).view.mapValues(_.toVector).toMap
         val prediction=NativeGenerationMetadata.prediction(g.get("extra"),config.prediction)
         val sdxlSize=NativeGenerationMetadata.sdxlSize(g.get("extra"),pipeline.sdxlConditioning.isDefined)
         g.get("checkpoint") match
@@ -333,13 +392,14 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
               if previewEvery>0 && previewMethod!="none" && value.completedSteps%previewEvery==0 && value.completedSteps<value.totalSteps then
                 context.checkCancelled()
                 context.event("preview",Map("step"->Number(value.completedSteps),"jpeg_b64"->Str(NativePreview.jpegBase64(value.latents))))
-            val image=try
+            val image=try LinearAdapterScope.withAdapters(adapters) {
               if sampler=="DPM++ 2M" then
                 val layout=if schedule=="Karras" then DpmSchedule.karras(config.noise,steps) else DpmSchedule.uniform(config.noise,steps)
                 pipeline.generateDpm(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=prediction,source=source)
               else
                 val layout=if schedule=="Karras" then config.noise.karrasEuler(steps) else config.noise.euler(steps,config.spacing,config.stepsOffset)
                 pipeline.generate(current,layout,onProgress=progress,cancelled=context.cancelled,prediction=prediction,source=source)
+            }
             catch
               case failure: VaeDecodeFailure =>
                 context.checkCancelled()

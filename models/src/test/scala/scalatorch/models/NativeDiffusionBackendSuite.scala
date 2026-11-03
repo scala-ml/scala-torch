@@ -1,8 +1,23 @@
 package scalatorch.models.worker
 
 import java.nio.file.{Files,Path}
+import java.nio.{ByteBuffer,ByteOrder}
 
 class NativeDiffusionBackendSuite extends munit.FunSuite:
+  private def writeAdapter(path: Path,name: String,input: Int,output: Int): Unit =
+    val down=Array.fill(input)(1f/input)
+    val up=Array.fill(output)(8f)
+    val entries=Vector((s"$name.lora_down.weight",Vector(1,input),down),
+      (s"$name.lora_up.weight",Vector(output,1),up))
+    var offset=0
+    val header=entries.map { (key,dims,values) =>
+      val begin=offset;offset+=values.length*4
+      s"\"$key\":{\"dtype\":\"F32\",\"shape\":[${dims.mkString(",")}],\"data_offsets\":[$begin,$offset]}"
+    }.mkString("{",",","}").getBytes(java.nio.charset.StandardCharsets.UTF_8)
+    val data=ByteBuffer.allocate(offset).order(ByteOrder.LITTLE_ENDIAN)
+    entries.foreach((_,_,values)=>values.foreach(data.putFloat))
+    Files.write(path,ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putLong(header.length.toLong).array()++header++data.array())
+
   test("public worker loads indexed CLIP UNet and VAE archives and hashes their source files") {
     val configured=sys.props.get("scalatorch.clip.dir")
     assume(configured.nonEmpty,"public tiny model required")
@@ -90,6 +105,22 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
         val decoded=javax.imageio.ImageIO.read(Path.of(file).toFile)
         decoded.getRGB(0,0,10,6,null,0,10).toVector
       val plainPrompt=pixelsFor("a red cat")
+      val target=scalatorch.models.PretrainedUNet.loadWithLinearTargets(root.resolve("unet"),maxParameters=1000000000L)
+        .linearTargets("unet.time_embedding.linear_1")
+      val adapterPath=output.resolve("tiny.safetensors")
+      writeAdapter(adapterPath,"unet.time_embedding.linear_1",target.data.shape.dims(1).toInt,target.data.shape.dims(0).toInt)
+      def loraPixels(weight: Double): Vector[Int]=
+        val response=run("txt2img",Map("output_dir"->Str(output.toString),"lora_paths"->Obj(Map("tiny"->Str(adapterPath.toString))),
+          "params"->Obj(Map("prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(2),
+            "seed"->Number(42),"loras"->Arr(Vector(Obj(Map("name"->Str("tiny"),"weight"->Number(weight),"unet"->Number(weight)))))))))
+        val imagePath=response("images").asInstanceOf[Arr].values.head.asInstanceOf[Obj].fields("path").asInstanceOf[Str].value
+        val decoded=javax.imageio.ImageIO.read(Path.of(imagePath).toFile)
+        decoded.getRGB(0,0,10,6,null,0,10).toVector
+      assertEquals(loraPixels(0),plainPrompt,"zero-scale LoRA must preserve the unadapted image")
+      val adaptedPrompt=loraPixels(1)
+      assert(adaptedPrompt!=plainPrompt,"nonzero native LoRA must affect generated pixels")
+      assertEquals(loraPixels(1),adaptedPrompt,"native LoRA replay must be deterministic")
+      assertEquals(pixelsFor("a red cat"),plainPrompt,"adapter factors must not mutate the base checkpoint")
       val weightedPrompt=pixelsFor("a (red:1.5) cat")
       assert(weightedPrompt!=plainPrompt,"single-CLIP worker must pass prompt emphasis into the U-Net")
       assertEquals(pixelsFor("a (red:1.5) cat"),weightedPrompt,"weighted prompt replay must be deterministic")

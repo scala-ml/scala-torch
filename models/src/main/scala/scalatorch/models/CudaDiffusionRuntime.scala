@@ -26,7 +26,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
 
   private def weight(p: Parameter,use: Using.Manager): CudaTensor =
     check()
-    host.get(p).fold(weights(p))(t => use(session.upload(t)))
+    host.get(p).fold(weights.get(p).fold(use(session.upload(p.data)))(identity))(t => use(session.upload(t)))
 
   def norm(x: CudaTensor,n: GroupNorm): CudaTensor = scope { use =>
     check()
@@ -45,7 +45,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
   }
 
   private def project(x: CudaTensor,p: Parameter): CudaTensor = scope { use =>
-    val transposed=use(host.get(p).fold(session.transpose(weights(p),0,1))(t => session.upload(t.transpose(0,1))))
+    val transposed=use(session.transpose(weight(p,use),0,1))
     val out=use(session.matmul(x,transposed))
     transposed.close()
     out
@@ -53,7 +53,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
 
   def linear(x: CudaTensor,l: Linear): CudaTensor = scope { use =>
     val base=use(project(x,l.weight))
-    val adapted=l.lora.fold(base) { a =>
+    val attached=l.lora.fold(base) { a =>
       val first=use(project(x,a.a));val second=use(project(first,a.b))
       first.close()
       val scaled=use(session.scale(second,(a.alpha/weightShape(a.a).dims.head).toFloat))
@@ -61,6 +61,15 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       val sum=use(session.add(base,scaled))
       base.close();scaled.close()
       sum
+    }
+    val adapted=LinearAdapterScope.forWeight(l.weight).foldLeft(attached) { case (sum,(a,multiplier)) =>
+      val first=use(project(x,a.a));val second=use(project(first,a.b))
+      first.close()
+      val scaled=use(session.scale(second,multiplier*(a.alpha/weightShape(a.a).dims.head).toFloat))
+      second.close()
+      val out=use(session.add(sum,scaled))
+      sum.close();scaled.close()
+      out
     }
     l.bias.fold(adapted) { p =>
       val out=use(session.addBroadcast(adapted,weight(p,use)))
@@ -351,7 +360,7 @@ private[models] object CudaDiffusionRuntime:
     val host=scala.collection.mutable.LinkedHashMap.empty[Parameter,Tensor[Float]]
     val uploaded=scala.collection.mutable.LinkedHashMap.empty[Parameter,CudaTensor]
     try
-      Module.parameters(model).foreach { p =>
+      (Module.parameters(model) ++ LinearAdapterScope.parameters).distinct.foreach { p =>
         VaeExecution.checkCancelled(cancelled)
         if offloadWeights then host(p)=p.data else uploaded(p)=session.upload(p.data)
       }
