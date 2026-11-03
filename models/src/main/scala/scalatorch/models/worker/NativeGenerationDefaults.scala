@@ -8,7 +8,7 @@ private[worker] object NativeGenerationDefaults:
     "denoising_strength"->Number(BigDecimal("0.55")),"sampler_name"->Null,"scheduler"->Null,
     "prompt"->Str(""),"negative_prompt"->Str(""),"cfg_scale"->Null))
   val generation: Map[String,NativeJson]=Map("subseed_strength"->Number(0),
-    "batch_size"->Number(1),"eta"->Null,"hires"->hires,
+    "eta"->Null,"hires"->hires,
     "img2img"->Null,"loras"->Arr(Vector.empty),"controlnet"->Arr(Vector.empty),
     "styles"->Arr(Vector.empty))
   val inpainting: Map[String,NativeJson]=Map("mask"->Null,"mask_blur"->Number(4),

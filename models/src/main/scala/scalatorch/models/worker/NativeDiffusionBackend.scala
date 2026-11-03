@@ -239,7 +239,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           case _ => throw IllegalArgumentException("params must be an object")
         val img2img=request.kind=="img2img"
         val defaults=if img2img then NativeGenerationDefaults.generation.removed("img2img") else NativeGenerationDefaults.generation
-        val allowed=Set("prompt","negative_prompt","width","height","steps","seed","subseed","cfg_scale","sampler_name","scheduler","clip_skip","n_iter","checkpoint","vae","extra","hooks")
+        val allowed=Set("prompt","negative_prompt","width","height","steps","seed","subseed","cfg_scale","sampler_name","scheduler","clip_skip","batch_size","n_iter","checkpoint","vae","extra","hooks")
         val requestedLoras=g.get("loras") match
           case None => Vector.empty
           case Some(Arr(values)) if values.isEmpty => Vector.empty
@@ -296,10 +296,14 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val seedNumber=number(g,"seed",42)
         require(seedNumber.isValidLong,"seed must be a signed 64-bit integer")
         val seed=if seedNumber.toLong == -1 then new java.security.SecureRandom().nextLong() & Long.MaxValue else seedNumber.toLong
-        val iterations=integer(g,"n_iter",1)
+        val batchSize=integer(g,"batch_size",1)
+        val nIter=integer(g,"n_iter",1)
+        val iterations=batchSize*nIter
         val subseed=number(g,"subseed",-1)
         require(subseed.isValidLong,"subseed must be a signed 64-bit integer")
-        require(iterations>=1 && iterations<=100,"n_iter must be between 1 and 100")
+        require(batchSize>=1 && batchSize<=16,"batch_size must be between 1 and 16")
+        require(nIter>=1 && nIter<=100,"n_iter must be between 1 and 100")
+        require(iterations<=1600,"batch_size*n_iter must be at most 1600")
         require(BigInt(seed)+iterations-1<=Long.MaxValue,"iteration seeds exceed signed 64-bit range")
         require(subseed<0 || subseed+iterations-1<=BigDecimal(Long.MaxValue),"iteration subseeds exceed signed 64-bit range")
         val steps=integer(g,"steps",20)
@@ -388,7 +392,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
             val progress: DiffusionImageProgress => Unit = value =>
               context.event("progress",Map(
                 "step"->Number(value.completedSteps),"total"->Number(value.totalSteps),"pass"->Str("base"),
-                "eta_s"->Number(0),"image"->Number(index),"images"->Number(iterations),"batch_size"->Number(1)))
+                "eta_s"->Number(0),"image"->Number(index),"images"->Number(iterations),"batch_size"->Number(batchSize)))
               if previewEvery>0 && previewMethod!="none" && value.completedSteps%previewEvery==0 && value.completedSteps<value.totalSteps then
                 context.checkCancelled()
                 context.event("preview",Map("step"->Number(value.completedSteps),"jpeg_b64"->Str(NativePreview.jpegBase64(value.latents))))

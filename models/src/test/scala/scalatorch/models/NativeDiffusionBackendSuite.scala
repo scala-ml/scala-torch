@@ -153,6 +153,17 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       val iterative=run("txt2img",iterativeParams)("images").asInstanceOf[Arr].values
       assertEquals(iterative.map(_.asInstanceOf[Obj].fields("seed")),Vector(Number(100),Number(101)))
       assertEquals(iterative.map(_.asInstanceOf[Obj].fields("subseed")),Vector(Number(7),Number(8)))
+      val batchEvents=scala.collection.mutable.ArrayBuffer.empty[Map[String,NativeJson]]
+      val batchContext=new NativeWorkContext(() => false,() => true,(_,fields) => batchEvents+=fields)
+      val batchedParams=iterativeParams.updated("params",Obj(Map("prompt"->Str("cat"),"width"->Number(10),
+        "height"->Number(6),"steps"->Number(1),"seed"->Number(200),"subseed"->Number(9),
+        "batch_size"->Number(2),"n_iter"->Number(2))))
+      val batched=backend.execute(NativeRequest("batch-size","txt2img",batchedParams,None),batchContext)("images").asInstanceOf[Arr].values
+      assertEquals(batched.map(_.asInstanceOf[Obj].fields("seed")),Vector(200,201,202,203).map(v=>Number(BigDecimal(v))))
+      assertEquals(batched.map(_.asInstanceOf[Obj].fields("subseed")),Vector(9,10,11,12).map(v=>Number(BigDecimal(v))))
+      val batchProgress=batchEvents.filter(_.get("batch_size").contains(Number(2)))
+      assert(batchProgress.nonEmpty,"progress must report the requested logical batch size")
+      assert(batchProgress.forall(_.get("images").contains(Number(4))))
       val custom=output.resolve("custom-mappings.txt")
       Files.writeString(custom,s"${metadata("hash").asInstanceOf[Str].value},a red|a blue,${root.getFileName}\n")
       val keywordParams=Map("prompt"->Str("cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(2),

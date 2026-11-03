@@ -76,6 +76,18 @@ Two compatibility decisions must be resolved without silently dropping features.
 
 ## Next implementation boundary
 
-Continue generic model capability work in scala-torch: persistent CUDA execution and memory estimates, training loss/LoRA, then diffusion primitives and CLIP/U-Net/VAE/schedulers. Build a separate NUI JVM worker against the existing launch seam, using this inventory as its acceptance ledger. Start with genuine SD1.5 generation and control/publication behavior, then expand through every registered feature. Preserve the full117-plugin/47-request scope and Windows/UI/MCP release gate; do not mark the NUI migration complete at the first image or a dry-run worker.
+The application worker now crosses the existing NUI JSON Lines launch seam and
+supports tiny-checkpoint SD1.5/SDXL text-to-image, standard linear LoRA,
+img2img (including four-channel masked img2img), image metadata/replay, and
+sequential `batch_size × n_iter`. These are verified subsets; the default NUI
+engine remains Python. Continue from the refreshed 48-request/121-plugin
+inventory, porting high-value generation and model capabilities while keeping
+unsupported requests explicit. In particular, normal-checkpoint quality and
+throughput, full-resolution mask crops, ControlNet, textual-inversion
+embeddings, Hires, remaining plugin/runtime extension behavior, packaging, and
+Python-absent JavaFX/MCP acceptance are still open. Preserve the complete
+application scope; the native worker, one image, or a tiny model does not mark
+Python removal complete.
 
-M0 remains open for deeper module behavior, nested operations/control settings, complete fixture mapping and remaining numscala ownership/workspace audit. No runtime engine or GPU image-generation experiment was performed in this audit turn. Existing scala-torch verification remains116 tests; documentation-only changes do not constitute new runtime test coverage.
+M0 remains open for deeper module behavior, nested operations/control settings,
+complete fixture mapping and the remaining numscala ownership/workspace audit.
