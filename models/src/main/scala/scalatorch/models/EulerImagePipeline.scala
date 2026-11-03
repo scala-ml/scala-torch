@@ -36,6 +36,7 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
     unet.convOut.weight.data.shape.dims.head==vae.config.latentChannels,
     "U-Net input/output channels must match the VAE latent width; nine-channel inpainting U-Nets are unsupported")
   private val factor=1 << (vae.decoder.upBlocks.size-1)
+  private lazy val singleClipConditioning=new SingleClipTextConditioning(tokenizer,textEncoder)
 
   /** Noise is unscaled standard-normal data; supplied noise overrides seed. Guidance is enabled above one. */
   def generate(request: DiffusionImageRequest,schedule: EulerSchedule,
@@ -111,14 +112,12 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
       }
       Tensor.fromFloats(values,Shape.from(Seq(1L,1L,height.toLong,width.toLong)))
     }
-    def encode(text: String): Variable =
-      checkCancelled()
-      val ids=tokenizer.batch(Vector(text),truncate=request.truncatePrompt).ids
-      checkCancelled()
-      textEncoder(ids,skipLastLayers=request.clipSkip-1)
     val sdxl=sdxlConditioning.map(_.encode(request.prompt,request.negativePrompt,request.clipSkip,cancelled))
-    val conditional=sdxl.fold(encode(request.prompt))(p => Variable(p.positive,requiresGrad=false))
-    val unconditional=if request.guidanceScale>1 then Some(sdxl.fold(encode(request.negativePrompt))(p => Variable(p.negative,requiresGrad=false))) else None
+    val single=if sdxl.isEmpty then Some(singleClipConditioning.encode(request.prompt,request.negativePrompt,
+      request.clipSkip,request.truncatePrompt,encodeNegative=request.guidanceScale>1,cancelled=cancelled)) else None
+    val conditional=sdxl.fold(Variable(single.get.positive,requiresGrad=false))(p => Variable(p.positive,requiresGrad=false))
+    val unconditional=if request.guidanceScale>1 then Some(sdxl.fold(
+      Variable(single.get.negative.get,requiresGrad=false))(p => Variable(p.negative,requiresGrad=false))) else None
     val positiveAdded=sdxl.map { pair =>
       val size=request.sdxlSize.getOrElse(SdxlImageSize(request.height,request.width))
       DiffusionAddedConditioning(pair.pooled,size.timeIds(request.height,request.width))

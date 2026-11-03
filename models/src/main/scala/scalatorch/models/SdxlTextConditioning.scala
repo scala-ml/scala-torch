@@ -21,32 +21,10 @@ final class SdxlTextConditioning(tokenizer: ClipFastTokenizer,encoder: ClipTextM
       "SDXL conditioning requires 77-token CLIP contexts")
     require(tok.vocabSize==model.tokenEmbedding.weight.data.shape.dims.head,"SDXL tokenizer/encoder vocabulary mismatch")
 
-  private def chunk(text: String,tok: ClipFastTokenizer): Vector[PromptChunk] =
-    val comma=tok.encode(",",false)
-    DiffusionPrompt.chunks(DiffusionPrompt.parse(text),s => tok.encode(s,false),tok.bosId,tok.eosId,tok.padId,
-      if comma.length==1 then Some(comma.head) else None)
-
-  private def emphasize(tensor: Tensor[Float],weights: Vector[Double]): Array[Float] =
-    val data=tensor.toFloatArray
-    val features=tensor.shape.dims.last.toInt
-    val original=(data.iterator.map(_.toDouble).sum/data.length).toFloat
-    var i=0
-    while i<data.length do
-      data(i)*=weights(i/features).toFloat
-      i+=1
-    val changed=(data.iterator.map(_.toDouble).sum/data.length).toFloat
-    if changed!=0f then
-      val scale=original/changed
-      i=0
-      while i<data.length do
-        data(i)*=scale
-        i+=1
-    require(data.forall(_.isFinite),"nonfinite SDXL emphasized features")
-    data
-
   private def encodeText(text: String,skip: Int,cancelled: () => Boolean): (Tensor[Float],Tensor[Float]) =
     VaeExecution.checkCancelled(cancelled)
-    val first=chunk(text,tokenizer);val second=chunk(text,tokenizer2)
+    val first=ClipPromptEncoding.chunks(tokenizer,text)
+    val second=ClipPromptEncoding.chunks(tokenizer2,text)
     val count=math.max(first.size,second.size)
     val elements=count.toLong*77*width
     require(elements<=maxElements && elements<=Int.MaxValue,"SDXL conditioning budget exceeded")
@@ -55,30 +33,16 @@ final class SdxlTextConditioning(tokenizer: ClipFastTokenizer,encoder: ClipTextM
     for index <- 0 until count do
       VaeExecution.checkCancelled(cancelled)
       val a=first(math.min(index,first.size-1));val b=second(math.min(index,second.size-1))
-      val left=encoder.encode(Tensor.fromLongs(a.tokens.toArray,Shape.from(Seq(1L,77L))),skip)
-      VaeExecution.checkCancelled(cancelled)
-      val right=encoder2.encode(Tensor.fromLongs(b.tokens.toArray,Shape.from(Seq(1L,77L))),skip,Some(tokenizer2.eosId))
-      if pooled.isEmpty then pooled=Some(right.projected.get.data)
-      val x=emphasize(left.hidden.data,a.weights);val y=emphasize(right.hidden.data,b.weights)
+      val left=ClipPromptEncoding.encodeChunk(tokenizer,encoder,a,skip,normalizeSelected=false,cancelled=cancelled)
+      val right=ClipPromptEncoding.encodeChunk(tokenizer2,encoder2,b,skip,normalizeSelected=false,cancelled=cancelled,
+        legacyEosOverride=Some(tokenizer2.eosId))
+      if pooled.isEmpty then pooled=right.pooled
+      val x=left.hidden.toFloatArray;val y=right.hidden.toFloatArray
       for token <- 0 until 77 do
         val offset=(index*77+token)*width
         Array.copy(x,token*width1,output,offset,width1)
         Array.copy(y,token*width2,output,offset+width1,width2)
     (Tensor.fromFloats(output,Shape.from(Seq(1L,count.toLong*77,width.toLong))),pooled.get)
-
-  private def pad(input: Tensor[Float],length: Long,empty: Tensor[Float]): Tensor[Float] =
-    if input.shape.dims(1)==length then input
-    else
-      val size=length*width
-      require(size<=maxElements && size<=Int.MaxValue,"SDXL conditioning budget exceeded")
-      val data=new Array[Float](size.toInt)
-      val existing=input.toFloatArray;val extra=empty.toFloatArray
-      Array.copy(existing,0,data,0,existing.length)
-      var offset=existing.length
-      while offset<data.length do
-        Array.copy(extra,0,data,offset,extra.length)
-        offset+=extra.length
-      Tensor.fromFloats(data,Shape.from(Seq(1L,length,width.toLong)))
 
   def encode(prompt: String,negativePrompt: String,clipSkip: Int=1,cancelled: () => Boolean=() => false): SdxlPromptPair = Autograd.noGrad {
     VaeExecution.checkCancelled(cancelled)
@@ -98,5 +62,8 @@ final class SdxlTextConditioning(tokenizer: ClipFastTokenizer,encoder: ClipTextM
       if positive.shape==negative.shape then SdxlPromptPair(positive,negative,pooled,negativePooled)
       else
         val (empty,_)=encodeText("",skip,cancelled)
-        SdxlPromptPair(pad(positive,length,empty),pad(negative,length,empty),pooled,negativePooled)
+        val chunks=(length/77).toInt
+        val emptyChunk=empty.slice(1,0,77)
+        SdxlPromptPair(ClipPromptEncoding.padTo(positive,chunks,emptyChunk,maxElements),
+          ClipPromptEncoding.padTo(negative,chunks,emptyChunk,maxElements),pooled,negativePooled)
   }

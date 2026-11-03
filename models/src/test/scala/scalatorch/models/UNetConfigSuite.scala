@@ -11,10 +11,11 @@ class UNetConfigSuite extends munit.FunSuite:
     assertEquals(c.downAttention,Vector(false,true))
     assertEquals(c.upAttention,Vector(true,false))
     assertEquals(c.layersPerBlock,2)
+    assert(UNetConfig.fromJson(extra("\"use_linear_projection\":true")).linearProjection)
   }
   test("reject unsupported semantics, duplicates and malformed values") {
     for field <- Seq("\"dropout\":0.1","\"only_cross_attention\":true","\"unknown_option\":false",
-      "\"num_attention_heads\":8","\"time_embedding_type\":\"fourier\"","\"use_linear_projection\":true",
+      "\"num_attention_heads\":8","\"time_embedding_type\":\"fourier\"",
       "\"norm_eps\":0","\"layers_per_block\":0","\"layers_per_block\":1.5",
       "\"attention_head_dim\":3","\"in_channels\":2147483647","\"norm_num_groups\":3",
       "\"freq_shift\":16","\"block_out_channels\":[32]","\"cross_attention_dim\":32") do

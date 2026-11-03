@@ -25,6 +25,32 @@ The worker now accepts img2img, but complete NUI img2img support is not establis
 Remaining work: NUI cross-repository request/metadata/replay acceptance;
 practical full-size performance; real
 SD1.5/SDXL acceptance and inpainting. The complete migration goal remains open.
+
+## SD1.5 prompt conditioning
+
+The native single-CLIP path now uses NUI attention weights, `BREAK`, 75-token
+chunking, clip-skip/final LayerNorm, explicit first-chunk truncation, and
+positive/negative alignment via empty-prompt embeddings. When CFG is disabled,
+the negative prompt is not encoded. Shared chunk and padding helpers also serve
+SDXL without changing its dual-encoder pooled outputs or zero blank-negative
+behavior. Tiny-model prompt embeddings match NUI's checked Python oracle below
+`3e-5`; the largest observed error was below `1.6e-6`.
+
+NUI's `_emphasize` and scala-torch share a stability rule: if either global
+mean is no more than eight dtype epsilons of its tensor's mean absolute value,
+skip mean rescaling. LayerNorm makes those means near zero, where the former
+ratio amplified CPU/GPU reduction-order noise into large prompt changes. Stable
+means still use the original mean-preserving correction. NUI's `engine` module
+owns worker selection and process startup; scala-torch model/tensor classes
+remain in its `models` module and are loaded through the separate worker
+classpath, not the NUI assembly. NUI's integration document records this
+boundary.
+
+The single-CLIP conditioning suite, SDXL conditioning and image-pipeline suites,
+and native worker backend suite pass. The complete `models/testOnly *` run
+passed 205 tests with 52 resource/device-gated tests skipped. Slow-tokenizer cleanup,
+textual inversion, LoRA, scheduled prompt edits and composable prompts remain
+outside this prompt path.
 ## RGB resizing foundation
 
 DiffusionImageResize implements Lanczos3 with normalized22-bit coefficients,

@@ -82,6 +82,20 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       val image=javax.imageio.ImageIO.read(path.toFile)
       assertEquals(image.getWidth,10);assertEquals(image.getHeight,6)
       assertEquals(events.toVector,Vector("progress","progress"))
+      def pixelsFor(prompt: String,negative: String="",clipSkip: Int=1): Vector[Int]=
+        val generated=run("txt2img",Map("output_dir"->Str(output.toString),"params"->Obj(Map(
+          "prompt"->Str(prompt),"negative_prompt"->Str(negative),"width"->Number(10),"height"->Number(6),
+          "steps"->Number(2),"seed"->Number(42),"clip_skip"->Number(clipSkip)))))
+        val file=generated("images").asInstanceOf[Arr].values.head.asInstanceOf[Obj].fields("path").asInstanceOf[Str].value
+        val decoded=javax.imageio.ImageIO.read(Path.of(file).toFile)
+        decoded.getRGB(0,0,10,6,null,0,10).toVector
+      val plainPrompt=pixelsFor("a red cat")
+      val weightedPrompt=pixelsFor("a (red:1.5) cat")
+      assert(weightedPrompt!=plainPrompt,"single-CLIP worker must pass prompt emphasis into the U-Net")
+      assertEquals(pixelsFor("a (red:1.5) cat"),weightedPrompt,"weighted prompt replay must be deterministic")
+      val chunkedPrompt=pixelsFor("apple, "*40,"blur BREAK fog")
+      assertEquals(pixelsFor("apple, "*40,"blur BREAK fog"),chunkedPrompt,
+        "single-CLIP worker must handle unequal positive/negative chunk counts deterministically")
       // Exercise the public request boundary, not only metadata parsing: overrides
       // must reach both samplers and must not mutate the checkpoint configuration.
       for sampler <- Vector("Euler","DPM++ 2M") do
