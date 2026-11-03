@@ -333,8 +333,6 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           val fullResPadding=integer(fields,"inpaint_full_res_padding",32)
           require(fullResPadding>=0 && fullResPadding<=256,"inpaint_full_res_padding must be between 0 and 256")
           val invert=bool(fields,"inpainting_mask_invert",false)
-          if maskName.nonEmpty then
-            if fill==0 then unsupported("blurred surrounding-color inpainting fill is not implemented")
           val name=str(fields,"init_image","")
           require(name.nonEmpty,"init_image is required")
           val width=imageRequest.width;val height=imageRequest.height

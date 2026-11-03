@@ -173,10 +173,63 @@ private[worker] object NativeInpaint:
     image.setRGB(0,0,width,height,pixels,0,width)
     image
 
+  /** Approximate Pillow's multi-radius alpha fill with one separable box blur per radius. */
+  private def blurredColorFill(image: BufferedImage,mask: BufferedImage,cancelled: () => Boolean): BufferedImage =
+    require(image.getWidth==mask.getWidth && image.getHeight==mask.getHeight,"inpaint fill image/mask size mismatch")
+    val width=image.getWidth;val height=image.getHeight;val count=width*height
+    val pixels=image.getRGB(0,0,width,height,null,0,width)
+    val levels=mask.getRGB(0,0,width,height,null,0,width)
+    val premultiplied=Array.ofDim[Array[Float]](4)
+    for channel <- 0 until 4 do premultiplied(channel)=new Array[Float](count)
+    for y <- 0 until height do
+      if cancelled() || Thread.currentThread().isInterrupted then
+        throw new java.util.concurrent.CancellationException("inpainting blur-fill preparation cancelled")
+      for x <- 0 until width do
+        val i=y*width+x
+        val alpha=(255-(levels(i)&255))/255f
+        premultiplied(0)(i)=((pixels(i)>>>16)&255)/255f*alpha
+        premultiplied(1)(i)=((pixels(i)>>>8)&255)/255f*alpha
+        premultiplied(2)(i)=(pixels(i)&255)/255f*alpha
+        premultiplied(3)(i)=alpha
+    val result=Array.fill(4)(new Array[Float](count))
+    val radii=Vector((256,1),(64,1),(16,2),(4,4),(2,2),(0,1))
+    for (radius,repeats) <- radii do
+      val blurred=if radius==0 then premultiplied else premultiplied.map { channel =>
+        boxBlur(boxBlur(channel,width,height,radius,horizontal=true,cancelled),width,height,radius,horizontal=false,cancelled)
+      }
+      for _ <- 0 until repeats do
+        for y <- 0 until height do
+          if cancelled() || Thread.currentThread().isInterrupted then
+            throw new java.util.concurrent.CancellationException("inpainting blur-fill cancelled")
+          for x <- 0 until width do
+            val i=y*width+x
+            val alpha=math.max(0f,math.min(1f,blurred(3)(i)))
+            val inverse=1f-alpha
+            result(0)(i)=blurred(0)(i)+result(0)(i)*inverse
+            result(1)(i)=blurred(1)(i)+result(1)(i)*inverse
+            result(2)(i)=blurred(2)(i)+result(2)(i)*inverse
+            result(3)(i)=alpha+result(3)(i)*inverse
+    val output=new Array[Int](count)
+    for y <- 0 until height do
+      if cancelled() || Thread.currentThread().isInterrupted then
+        throw new java.util.concurrent.CancellationException("inpainting blur-fill compositing cancelled")
+      for x <- 0 until width do
+        val i=y*width+x
+        val amount=(levels(i)&255)/255f
+        def channel(index: Int,shift: Int): Int =
+          val fill=if result(3)(i)>0f then result(index)(i)/result(3)(i) else 0f
+          val original=((pixels(i)>>>shift)&255)/255f
+          math.rint(math.max(0f,math.min(1f,fill*amount+original*(1f-amount)))*255f).toInt
+        output(i)=0xff000000|(channel(0,16)<<16)|(channel(1,8)<<8)|channel(2,0)
+    val filled=new BufferedImage(width,height,BufferedImage.TYPE_INT_RGB)
+    filled.setRGB(0,0,width,height,output,0,width)
+    filled
+
   private def applyFill(image: BufferedImage,mask: BufferedImage,mode: Int,seed: Long,
       cancelled: () => Boolean): BufferedImage =
-    require(Set(1,2,3)(mode),"native inpainting supports fill modes 1, 2 and 3")
-    if mode==1 then image
+    require(Set(0,1,2,3)(mode),"invalid inpainting fill mode")
+    if mode==0 then blurredColorFill(image,mask,cancelled)
+    else if mode==1 then image
     else
       require(image.getWidth==mask.getWidth && image.getHeight==mask.getHeight,"inpaint fill image/mask size mismatch")
       val width=image.getWidth;val height=image.getHeight

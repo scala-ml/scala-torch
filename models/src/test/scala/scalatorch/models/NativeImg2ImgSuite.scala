@@ -65,12 +65,14 @@ class NativeImg2ImgSuite extends munit.FunSuite:
       assertEquals(inpainted.getRGB(0,0)&0xffffff,original.getRGB(0,0)&0xffffff)
       assertEquals(inpainted.getRGB(4,5)&0xffffff,original.getRGB(4,5)&0xffffff)
       assert((5 until 10).exists(x => (0 until 6).exists(y => inpainted.getRGB(x,y)!=original.getRGB(x,y))))
-      val beforeUnsupported=names().toSet
-      intercept[NativeBackendError](run("img2img",request("Euler",inpaintParams.updated("inpaint_full_res",Bool(true)))))
-      intercept[NativeBackendError](run("img2img",request("Euler",inpaintParams.updated("inpainting_fill",Number(0)))))
+      val beforeSupportedJobs=names().toSet
+      val fullRes=run("img2img",request("Euler",inpaintParams.updated("inpaint_full_res",Bool(true))))
+      assertEquals(fullRes("images").asInstanceOf[Arr].values.size,1)
+      val blurFill=run("img2img",request("Euler",inpaintParams.updated("inpainting_fill",Number(0))))
+      assertEquals(blurFill("images").asInstanceOf[Arr].values.size,1)
       intercept[IllegalArgumentException](run("img2img",request("Euler",inpaintParams.updated("mask",Str(output.resolve("missing-mask.png").toString)))))
       intercept[IllegalArgumentException](run("img2img",request("Euler",inpaintParams.updated("mask_blur",Number(65)))))
-      assertEquals(names().toSet,beforeUnsupported)
+      assert(names().toSet.size>=beforeSupportedJobs.size+2,"supported full-resolution and blur-fill jobs should publish images")
       intercept[IllegalArgumentException](run("img2img",request("Euler",imageParams.updated("init_image",Str("")))))
       intercept[IllegalArgumentException](run("img2img",request("Euler",imageParams.updated("denoising_strength",Number(2)))))
       val denied=new NativeWorkContext(() => false,() => false,(_,_) => ())

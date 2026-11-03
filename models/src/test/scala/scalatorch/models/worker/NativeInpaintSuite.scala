@@ -61,6 +61,25 @@ class NativeInpaintSuite extends munit.FunSuite:
     val grayImage=scalatorch.models.DiffusionImageIO.toBufferedImage(gray.image)
     assertEquals((grayImage.getRGB(0,0)&0xffffff),0x112233)
     assertEquals((grayImage.getRGB(6,0)&0xffffff),0x7f7f7f)
-    intercept[IllegalArgumentException](NativeInpaint.prepare(source,mask,12,8,0,0,false,() => false,fill=0))
+  }
+
+  test("blur fill replaces masked pixels with surrounding color and handles a fully masked image") {
+    val source=new BufferedImage(7,7,BufferedImage.TYPE_INT_RGB)
+    val mask=new BufferedImage(7,7,BufferedImage.TYPE_INT_RGB)
+    for y <- 0 until 7; x <- 0 until 7 do
+      source.setRGB(x,y,if x==3 && y==3 then 0xffff0000 else 0xff0000ff)
+      mask.setRGB(x,y,if x==3 && y==3 then 0xffffffff else 0xff000000)
+    val filled=NativeInpaint.prepare(source,mask,7,7,0,0,false,() => false,fill=0)
+    val result=scalatorch.models.DiffusionImageIO.toBufferedImage(filled.image)
+    assert((result.getRGB(0,0)&0xffffff)==0x0000ff,
+      f"unmasked pixel changed: 0x${result.getRGB(0,0)&0xffffff}%06x")
+    assert((result.getRGB(3,3)&0x0000ff)>(result.getRGB(3,3)&0xff0000),
+      f"blur-fill did not use surrounding blue: 0x${result.getRGB(3,3)&0xffffff}%06x")
+    val allMask=new BufferedImage(7,7,BufferedImage.TYPE_INT_RGB)
+    for y <- 0 until 7; x <- 0 until 7 do allMask.setRGB(x,y,0xffffffff)
+    val emptyContext=NativeInpaint.prepare(source,allMask,7,7,0,0,false,() => false,fill=0)
+    val black=scalatorch.models.DiffusionImageIO.toBufferedImage(emptyContext.image)
+    assert((black.getRGB(3,3)&0xffffff)<=0x010101,
+      f"fully masked context should be black: 0x${black.getRGB(3,3)&0xffffff}%06x")
   }
 

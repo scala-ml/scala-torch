@@ -83,8 +83,8 @@ sequential `batch_size × n_iter`. These are verified subsets; the default NUI
 engine remains Python. Continue from the refreshed 48-request/121-plugin
 inventory, porting high-value generation and model capabilities while keeping
 unsupported requests explicit. In particular, normal-checkpoint quality and
-throughput, Pillow-exact mask blur and blurred-color inpaint fill mode 0,
-nine-channel inpainting U-Nets, ControlNet, textual-inversion embeddings,
+throughput, Pillow-exact mask blur and exact Pillow parity for blurred-color
+inpaint fill mode 0, nine-channel inpainting U-Nets, ControlNet, textual-inversion embeddings,
 Hires, remaining plugin/runtime extension behavior, packaging, and Python-absent
 JavaFX/MCP acceptance are still open. Preserve the complete
 application scope; the native worker, one image, or a tiny model does not mark

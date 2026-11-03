@@ -175,7 +175,7 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       val fullRes=run("img2img",Map("output_dir"->Str(output.toString),"params"->Obj(Map(
         "prompt"->Str("replace the center"),"width"->Number(64),"height"->Number(64),"steps"->Number(1),"seed"->Number(303),
         "img2img"->Obj(Map("init_image"->Str(initPath.toString),"mask"->Str(maskPath.toString),
-          "denoising_strength"->Number(1),"resize_mode"->Number(0),"mask_blur"->Number(0),"inpainting_fill"->Number(3),
+          "denoising_strength"->Number(1),"resize_mode"->Number(0),"mask_blur"->Number(0),"inpainting_fill"->Number(0),
           "inpaint_full_res"->Bool(true),"inpaint_full_res_padding"->Number(8)))))))
       val fullResEntry=fullRes("images").asInstanceOf[Arr].values.head.asInstanceOf[Obj].fields
       assertEquals((fullResEntry("width"),fullResEntry("height")),(Number(100),Number(60)))
