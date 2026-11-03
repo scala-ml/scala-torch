@@ -42,3 +42,25 @@ class NativeInpaintSuite extends munit.FunSuite:
       scalatorch.models.DiffusionImageIO.toBufferedImage(generated),() => true))
   }
 
+  test("pixel noise fill matches Python random bytes and gray fill preserves unmasked pixels") {
+    val source=new BufferedImage(12,8,BufferedImage.TYPE_INT_RGB)
+    val mask=new BufferedImage(12,8,BufferedImage.TYPE_INT_RGB)
+    for y <- 0 until 8; x <- 0 until 12 do
+      source.setRGB(x,y,0xff112233)
+      mask.setRGB(x,y,if x<6 then 0xff000000 else 0xffffffff)
+    assertEquals(NativeInpaint.pythonRandomBytes(42,24).map(b=>f"${b&255}%02x").mkString,
+      "9d79b1a37f31801cd11a6706fb40d6bd57526846903bb13e")
+    assertEquals(NativeInpaint.pythonRandomBytes(42,5).map(b=>f"${b&255}%02x").mkString,"9d79b1a31c")
+    assertEquals(NativeInpaint.pythonRandomBytes(9223372036854775807L,16).map(b=>f"${b&255}%02x").mkString,
+      "9fa30f51c89413a8cb359aa160a7f721")
+    val noise=NativeInpaint.prepare(source,mask,12,8,0,0,false,() => false,fill=2,seed=42)
+    val noiseImage=scalatorch.models.DiffusionImageIO.toBufferedImage(noise.image)
+    assertEquals((noiseImage.getRGB(0,0)&0xffffff),0x112233)
+    assertEquals((noiseImage.getRGB(6,0)&0xffffff),0x684690)
+    val gray=NativeInpaint.prepare(source,mask,12,8,0,0,false,() => false,fill=3)
+    val grayImage=scalatorch.models.DiffusionImageIO.toBufferedImage(gray.image)
+    assertEquals((grayImage.getRGB(0,0)&0xffffff),0x112233)
+    assertEquals((grayImage.getRGB(6,0)&0xffffff),0x7f7f7f)
+    intercept[IllegalArgumentException](NativeInpaint.prepare(source,mask,12,8,0,0,false,() => false,fill=0))
+  }
+

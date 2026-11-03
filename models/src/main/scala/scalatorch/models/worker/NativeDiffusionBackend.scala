@@ -334,7 +334,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           require(fullResPadding>=0 && fullResPadding<=256,"inpaint_full_res_padding must be between 0 and 256")
           val invert=bool(fields,"inpainting_mask_invert",false)
           if maskName.nonEmpty then
-            if fill!=1 then unsupported("only original-pixel inpainting fill is implemented")
+            if fill==0 then unsupported("blurred surrounding-color inpainting fill is not implemented")
           val name=str(fields,"init_image","")
           require(name.nonEmpty,"init_image is required")
           val width=imageRequest.width;val height=imageRequest.height
@@ -348,7 +348,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
                 unsupported("nine-channel inpainting U-Nets are not implemented")
               val mask=DiffusionImageInput.readRgb(Path.of(maskPath))
               val prepared=NativeInpaint.prepare(input,mask,width,height,mode,maskBlur,invert,context.cancelled,
-                fullRes=fullRes,fullResPadding=fullResPadding)
+                fullRes=fullRes,fullResPadding=fullResPadding,fill=fill,seed=seed)
               preparedInpaint=Some(prepared)
               Some(DiffusionImageSource(prepared.image,strength,mask=Some(prepared.mask),originalImage=Some(prepared.originalImage),
                 finalOverlay=prepared.pasteBox.isEmpty))
