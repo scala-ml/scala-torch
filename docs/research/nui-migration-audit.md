@@ -78,14 +78,16 @@ Two compatibility decisions must be resolved without silently dropping features.
 
 The application worker now crosses the existing NUI JSON Lines launch seam and
 supports tiny-checkpoint SD1.5/SDXL text-to-image, standard linear LoRA,
-img2img (including four-channel masked img2img), image metadata/replay, and
-sequential `batch_size × n_iter`. These are verified subsets; the default NUI
+img2img (including four- and nine-channel masked U-Nets), image metadata/replay,
+and sequential `batch_size × n_iter`. Nine-channel routing is verified with
+synthetic widened tiny weights; trained inpaint weights are not locally tested.
+These are verified subsets; the default NUI
 engine remains Python. Continue from the refreshed 48-request/121-plugin
 inventory, porting high-value generation and model capabilities while keeping
 unsupported requests explicit. In particular, normal-checkpoint quality and
 throughput, Pillow-exact mask blur and exact Pillow parity for blurred-color
-inpaint fill mode 0, nine-channel inpainting U-Nets, ControlNet, textual-inversion embeddings,
-Hires, remaining plugin/runtime extension behavior, packaging, and Python-absent
+inpaint fill mode 0, trained inpaint-checkpoint quality, ControlNet,
+textual-inversion embeddings, Hires, remaining plugin/runtime extension behavior, packaging, and Python-absent
 JavaFX/MCP acceptance are still open. Preserve the complete
 application scope; the native worker, one image, or a tiny model does not mark
 Python removal complete.

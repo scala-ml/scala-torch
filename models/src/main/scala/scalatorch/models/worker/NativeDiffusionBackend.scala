@@ -342,14 +342,15 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           context.checkCancelled()
           val source=maskName match
             case Some(maskPath) =>
-              if pipeline.unet.convIn.weight.data.shape.dims(1)!=pipeline.vae.config.latentChannels then
-                unsupported("nine-channel inpainting U-Nets are not implemented")
               val mask=DiffusionImageInput.readRgb(Path.of(maskPath))
               val prepared=NativeInpaint.prepare(input,mask,width,height,mode,maskBlur,invert,context.cancelled,
                 fullRes=fullRes,fullResPadding=fullResPadding,fill=fill,seed=seed)
               preparedInpaint=Some(prepared)
+              val unetInputs=pipeline.unet.convIn.weight.data.shape.dims(1)
+              val maskedImage=if unetInputs==2*pipeline.vae.config.latentChannels+1 then
+                Some(NativeInpaint.maskedImage(prepared.image,prepared.mask,context.cancelled)) else None
               Some(DiffusionImageSource(prepared.image,strength,mask=Some(prepared.mask),originalImage=Some(prepared.originalImage),
-                finalOverlay=prepared.pasteBox.isEmpty))
+                finalOverlay=prepared.pasteBox.isEmpty,maskedImage=maskedImage))
             case None =>
               val resized=DiffusionImageResize(input,width,height,mode)
               val plane=width*height

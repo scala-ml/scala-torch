@@ -1,5 +1,9 @@
 # Native Basic Inpainting Implementation Plan
 
+> This plan records the initial four-channel milestone. Its deferred list was
+> historical; fill modes/full-resolution were added later, and nine-channel
+> support is tracked in `2026-11-03-native-nine-channel-inpaint.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Support deterministic mask-based img2img with the existing four-channel Diffusers U-Net path used by NUI.

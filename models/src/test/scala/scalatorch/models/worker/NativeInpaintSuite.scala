@@ -1,8 +1,16 @@
 package scalatorch.models.worker
 
+import scalatorch.*
 import java.awt.image.BufferedImage
 
 class NativeInpaintSuite extends munit.FunSuite:
+  test("nine-channel masked pixels preserve values below 0.5 and zero values at or above it") {
+    val image=Tensor.fromFloats(Array(.2f,.4f,.6f,.3f,.5f,.7f,.4f,.6f,.8f),Shape.from(Seq(1L,3L,1L,3L)))
+    val mask=Tensor.fromFloats(Array(.49f,.5f,.51f),Shape.from(Seq(1L,1L,1L,3L)))
+    val actual=NativeInpaint.maskedImage(image,mask,() => false).toFloatArray
+    assertEquals(actual.toVector,Vector(.2f,0f,0f,.3f,0f,0f,.4f,0f,0f))
+  }
+
   test("mask inversion, resize and blur preserve white-means-repaint semantics") {
     val source=new BufferedImage(12,8,BufferedImage.TYPE_INT_RGB)
     val mask=new BufferedImage(12,8,BufferedImage.TYPE_INT_RGB)

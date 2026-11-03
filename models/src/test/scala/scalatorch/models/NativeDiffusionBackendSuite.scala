@@ -4,6 +4,90 @@ import java.nio.file.{Files,Path}
 import java.nio.{ByteBuffer,ByteOrder}
 
 class NativeDiffusionBackendSuite extends munit.FunSuite:
+  test("worker runs masked img2img with a synthetic nine-channel U-Net") {
+    val configured=sys.props.get("scalatorch.clip.dir")
+    assume(configured.nonEmpty,"public tiny model required")
+    val root=Path.of(configured.get).getParent
+    val model=Files.createTempDirectory("native-nine-channel")
+    val output=Files.createTempDirectory("native-nine-output")
+    val scheduler=output.resolve("scheduler.json")
+    Files.writeString(scheduler,"""{"num_train_timesteps":1000,"beta_start":0.00085,"beta_end":0.012,"beta_schedule":"scaled_linear"}""")
+    import NativeJson.*
+    try
+      makeNineChannelModel(root,model)
+      val backend=new NativeDiffusionBackend(model,scheduler)
+      val context=new NativeWorkContext(() => false,() => true,(_,_) => ())
+      backend.execute(NativeRequest("load","load_model",Map("path"->Str(model.toString)),None),context)
+      val source=new java.awt.image.BufferedImage(16,16,java.awt.image.BufferedImage.TYPE_INT_RGB)
+      val mask=new java.awt.image.BufferedImage(16,16,java.awt.image.BufferedImage.TYPE_INT_RGB)
+      for y <- 0 until 16; x <- 0 until 16 do
+        source.setRGB(x,y,0xff204060)
+        mask.setRGB(x,y,if x>=8 then 0xffffffff else 0xff000000)
+      val sourcePath=output.resolve("source.png");val maskPath=output.resolve("mask.png")
+      javax.imageio.ImageIO.write(source,"png",sourcePath.toFile)
+      javax.imageio.ImageIO.write(mask,"png",maskPath.toFile)
+      val img2img=Obj(Map("init_image"->Str(sourcePath.toString),"mask"->Str(maskPath.toString),
+        "mask_blur"->Number(0),"inpainting_fill"->Number(1),"denoising_strength"->Number(1)))
+      val generation=Obj(Map("prompt"->Str("edit right half"),"width"->Number(16),"height"->Number(16),
+        "steps"->Number(1),"seed"->Number(42),"img2img"->img2img))
+      val params=Map("output_dir"->Str(output.toString),"params"->generation)
+      val result=backend.execute(NativeRequest("inpaint","img2img",params,None),context)
+      val entry=result("images").asInstanceOf[Arr].values.head.asInstanceOf[Obj].fields
+      val image=javax.imageio.ImageIO.read(Path.of(entry("path").asInstanceOf[Str].value).toFile)
+      assertEquals((image.getWidth,image.getHeight),(16,16))
+      assertEquals(image.getRGB(2,2)&0xffffff,source.getRGB(2,2)&0xffffff)
+      assert((8 until 16).exists(x => (0 until 16).exists(y => image.getRGB(x,y)!=source.getRGB(x,y))))
+      assert(!Files.exists(model.resolve("python")))
+    finally
+      for directory <- Vector(model,output) do
+        val paths=Files.walk(directory)
+        try
+          import scala.jdk.CollectionConverters.*
+          paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.delete(_))
+        finally paths.close()
+  }
+
+  private def makeNineChannelModel(source: Path,target: Path): Unit =
+    import scala.jdk.CollectionConverters.*
+    val paths=Files.walk(source)
+    try paths.iterator().asScala.foreach { path =>
+      val destination=target.resolve(source.relativize(path))
+      if Files.isDirectory(path) then Files.createDirectories(destination)
+      else Files.copy(path,destination)
+    } finally paths.close()
+    val unet=target.resolve("unet")
+    val weights=unet.resolve("diffusion_pytorch_model.safetensors")
+    val entries=scala.util.Using.resource(scalatorch.io.SafeTensors.open(weights)) { archive =>
+      archive.tensors.toVector.sortBy(_._1).map { (name,info) =>
+        val tensor=archive.readFloat(name)
+        if name=="conv_in.weight" then
+          val dims=info.shape.dims
+          require(dims.size==4 && dims(1)==4,"fixture U-Net conv_in must have four latent channels")
+          val out=dims(0).toInt;val height=dims(2).toInt;val width=dims(3).toInt
+          val input=tensor.toFloatArray
+          val widened=Array.fill(out*9*height*width)(0f)
+          for o <- 0 until out; c <- 0 until 9; y <- 0 until height; x <- 0 until width do
+            val destination=((o*9+c)*height+y)*width+x
+            if c<4 then widened(destination)=input(((o*4+c)*height+y)*width+x)
+            else widened(destination)=.025f*(c-3)
+          (name,Vector(out.toLong,9L,height.toLong,width.toLong),widened)
+        else (name,info.shape.dims,tensor.toFloatArray)
+      }
+    }
+    var offset=0L
+    val header=entries.map { (name,dims,values) =>
+      val begin=offset;offset+=values.length.toLong*4
+      s"\"$name\":{\"dtype\":\"F32\",\"shape\":[${dims.mkString(",")}],\"data_offsets\":[$begin,$offset]}"
+    }.mkString("{",",","}").getBytes(java.nio.charset.StandardCharsets.UTF_8)
+    val data=ByteBuffer.allocate(Math.toIntExact(offset)).order(ByteOrder.LITTLE_ENDIAN)
+    entries.foreach((_,_,values)=>values.foreach(data.putFloat))
+    Files.write(weights,ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putLong(header.length.toLong).array()++header++data.array())
+    val config=unet.resolve("config.json")
+    val original=Files.readString(config)
+    val widened=original.replaceFirst("\"in_channels\"\\s*:\\s*4","\"in_channels\": 9")
+    require(widened!=original,"fixture U-Net config has no four-channel input declaration")
+    Files.writeString(config,widened)
+
   private def writeAdapter(path: Path,name: String,input: Int,output: Int): Unit =
     val down=Array.fill(input)(1f/input)
     val up=Array.fill(output)(8f)

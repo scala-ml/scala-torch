@@ -63,6 +63,29 @@ private[worker] object NativeInpaint:
 
   private[worker] def pythonRandomBytes(seed: Long,length: Int): Array[Byte]=PythonRandom(seed).bytes(length)
 
+  def maskedImage(image: Tensor[Float],mask: Tensor[Float],cancelled: () => Boolean): Tensor[Float] =
+    if cancelled() || Thread.currentThread().isInterrupted then
+      throw new java.util.concurrent.CancellationException("masked image preparation cancelled")
+    val dims=image.shape.dims
+    require(image.device==Device.Cpu && image.dtype==DType.Float32 && dims.size==4 &&
+      dims(0)==1 && dims(1)==3 && dims(2)>0 && dims(3)>0,"masked image must be single-image NCHW RGB Float32")
+    require(mask.device==Device.Cpu && mask.dtype==DType.Float32 &&
+      mask.shape==Shape.from(Seq(1L,1L,dims(2),dims(3))),"masked image mask shape/device mismatch")
+    val pixels=(dims(2)*dims(3)).toInt
+    val source=image.toFloatArray
+    val levels=mask.toFloatArray
+    require(source.forall(x => x.isFinite && x>= -1f && x<=1f),"masked image pixels must be finite and in [-1,1]")
+    require(levels.forall(x => x.isFinite && x>=0f && x<=1f),"masked image mask must be finite and in [0,1]")
+    val output=new Array[Float](source.length)
+    for y <- 0 until dims(2).toInt do
+      if cancelled() || Thread.currentThread().isInterrupted then
+        throw new java.util.concurrent.CancellationException("masked image preparation cancelled")
+      for x <- 0 until dims(3).toInt do
+        val pixel=y*dims(3).toInt+x
+        if levels(pixel)<.5f then
+          for channel <- 0 until 3 do output(channel*pixels+pixel)=source(channel*pixels+pixel)
+    Tensor.fromFloats(output,image.shape)
+
   final case class Prepared(image: Tensor[Float],originalImage: Tensor[Float],mask: Tensor[Float],
       pasteBox: Option[(Int,Int,Int,Int)]=None,fullOriginal: Option[BufferedImage]=None,
       fullOverlayMask: Option[BufferedImage]=None):

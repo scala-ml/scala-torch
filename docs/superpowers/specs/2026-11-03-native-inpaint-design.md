@@ -1,5 +1,8 @@
 # Native basic inpainting design
 
+> This document records the initial four-channel scope. Nine-channel support is
+> specified in [native nine-channel inpainting](2026-11-03-native-nine-channel-inpaint.md).
+
 ## Intent
 
 Add mask-aware img2img to the Python-free Scala worker so NUI can repaint selected
