@@ -1,0 +1,314 @@
+{
+  "source_sha256": "cac7d0510d7bc7058dd1d50a4884d2ee27f409e16b65536b682ba037929aeca2",
+  "torch": "2.7.1+cpu",
+  "transformers": "4.49.0",
+  "model_revision": "hf-internal-testing/tiny-stable-diffusion-pipe@39f7e1819d772fbbd978486616c6dae068519e85",
+  "inputs": {
+    "text_encoder\\config.json": "aae70cf2c528c154e5cbd2eba1249e759b91bbce15a9be74698f4a6492ec4879",
+    "text_encoder\\model.safetensors": "57f8ef72a6c2d5abd52829b83ed38d217cce0d515021db79147baf60dd94175f",
+    "tokenizer\\merges.txt": "38e3006b0c2382dc853454c0643ce3d6f62544c7d6ded433d8d15dab639f0b5b",
+    "tokenizer\\vocab.json": "f27915ca8a787e651ea25684f581739403b46354a9a5be29a5afad0112d60d46"
+  },
+  "cases": [
+    {
+      "name": "plain",
+      "prompt": "a red apple",
+      "negative": "blur",
+      "clip_skip": 1,
+      "truncate": false,
+      "custom_pad": false,
+      "shapes": {
+        "positive": [
+          1,
+          77,
+          32
+        ],
+        "negative": [
+          1,
+          77,
+          32
+        ]
+      },
+      "files": {
+        "positive": {
+          "name": "plain-positive.bin",
+          "sha256": "00d8c7a6756b9b545c158f9c909565391291dd40ea3c89408043022fa9bf83e7"
+        },
+        "negative": {
+          "name": "plain-negative.bin",
+          "sha256": "31cf56ad76980c26fc4365c506601d1e1d674ad54576f18adcc662d7512910af"
+        }
+      }
+    },
+    {
+      "name": "empty-negative",
+      "prompt": "a red apple",
+      "negative": "",
+      "clip_skip": 1,
+      "truncate": false,
+      "custom_pad": false,
+      "shapes": {
+        "positive": [
+          1,
+          77,
+          32
+        ],
+        "negative": [
+          1,
+          77,
+          32
+        ]
+      },
+      "files": {
+        "positive": {
+          "name": "empty-negative-positive.bin",
+          "sha256": "00d8c7a6756b9b545c158f9c909565391291dd40ea3c89408043022fa9bf83e7"
+        },
+        "negative": {
+          "name": "empty-negative-negative.bin",
+          "sha256": "ea9ad45066d4b203cce32092d058f5151470679473279e78bd48509e2299126e"
+        }
+      }
+    },
+    {
+      "name": "skip2",
+      "prompt": "a red apple",
+      "negative": "blur",
+      "clip_skip": 2,
+      "truncate": false,
+      "custom_pad": false,
+      "shapes": {
+        "positive": [
+          1,
+          77,
+          32
+        ],
+        "negative": [
+          1,
+          77,
+          32
+        ]
+      },
+      "files": {
+        "positive": {
+          "name": "skip2-positive.bin",
+          "sha256": "bd0978a34f393d50c68d7d1c239e9a96bca46d5c7457f5651a314d4cc6a41551"
+        },
+        "negative": {
+          "name": "skip2-negative.bin",
+          "sha256": "10f9627eb4a2e387f687867be6230284d449624d8e3c65ba8c8e82cd15881026"
+        }
+      }
+    },
+    {
+      "name": "skip3-plain",
+      "prompt": "a red apple",
+      "negative": "blur",
+      "clip_skip": 3,
+      "truncate": false,
+      "custom_pad": false,
+      "shapes": {
+        "positive": [
+          1,
+          77,
+          32
+        ],
+        "negative": [
+          1,
+          77,
+          32
+        ]
+      },
+      "files": {
+        "positive": {
+          "name": "skip3-plain-positive.bin",
+          "sha256": "88f937bc699240decbd0d4a2f6cb922e6c7b899157c76b54fc71e23f50b44a3f"
+        },
+        "negative": {
+          "name": "skip3-plain-negative.bin",
+          "sha256": "491d0bc879e7c883146f4ea9da96ca3ded0fb28294853d8075dc510cdc2edbbf"
+        }
+      }
+    },
+    {
+      "name": "weighted-skip2",
+      "prompt": "(red:1.5) [apple] \\(table\\)",
+      "negative": "(blur:0.5)",
+      "clip_skip": 2,
+      "truncate": false,
+      "custom_pad": false,
+      "shapes": {
+        "positive": [
+          1,
+          77,
+          32
+        ],
+        "negative": [
+          1,
+          77,
+          32
+        ]
+      },
+      "files": {
+        "positive": {
+          "name": "weighted-skip2-positive.bin",
+          "sha256": "53ebd791cc8d43d524a0b743202b1da6ac1e5d4e23542a1bca2420de7fae7107"
+        },
+        "negative": {
+          "name": "weighted-skip2-negative.bin",
+          "sha256": "c549a7a6e144a3c05dda67782c512be6532af70ac0930eb02de5c26a00f0a077"
+        }
+      }
+    },
+    {
+      "name": "skip3-weighted",
+      "prompt": "(red:1.5) [apple] \\(table\\)",
+      "negative": "(blur:0.5)",
+      "clip_skip": 3,
+      "truncate": false,
+      "custom_pad": false,
+      "shapes": {
+        "positive": [
+          1,
+          77,
+          32
+        ],
+        "negative": [
+          1,
+          77,
+          32
+        ]
+      },
+      "files": {
+        "positive": {
+          "name": "skip3-weighted-positive.bin",
+          "sha256": "7646896c0f2feab764769c2323e1c32e3e455eaf2f0f64614f5bb4d44b392940"
+        },
+        "negative": {
+          "name": "skip3-weighted-negative.bin",
+          "sha256": "9cbca5780a24ea54a7b7453e04ee03fad6a88b41fe24661e82f8b2cabfc7aca3"
+        }
+      }
+    },
+    {
+      "name": "long-positive",
+      "prompt": "apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, ",
+      "negative": "blur",
+      "clip_skip": 1,
+      "truncate": false,
+      "custom_pad": false,
+      "shapes": {
+        "positive": [
+          1,
+          231,
+          32
+        ],
+        "negative": [
+          1,
+          231,
+          32
+        ]
+      },
+      "files": {
+        "positive": {
+          "name": "long-positive-positive.bin",
+          "sha256": "5ca7da9b11249b7a965db87cbd23145590f08349da24cc7c44705716d40f7602"
+        },
+        "negative": {
+          "name": "long-positive-negative.bin",
+          "sha256": "e4095ab321da31a07cbccb0627d4db9e0d7b9cd132bfdac65f5e44b7e56a690d"
+        }
+      }
+    },
+    {
+      "name": "long-negative",
+      "prompt": "apple",
+      "negative": "blur BREAK noise BREAK fog",
+      "clip_skip": 1,
+      "truncate": false,
+      "custom_pad": false,
+      "shapes": {
+        "positive": [
+          1,
+          231,
+          32
+        ],
+        "negative": [
+          1,
+          231,
+          32
+        ]
+      },
+      "files": {
+        "positive": {
+          "name": "long-negative-positive.bin",
+          "sha256": "efdda76f54f7c8ce58cc5ea8514b5efd4f611d87e04cf536fbcaa6addd120598"
+        },
+        "negative": {
+          "name": "long-negative-negative.bin",
+          "sha256": "b8c14f1ff22315977edc96581f436d0bec63584444a32af8d7a173e9c34928a3"
+        }
+      }
+    },
+    {
+      "name": "truncated",
+      "prompt": "apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, ",
+      "negative": "blur",
+      "clip_skip": 1,
+      "truncate": true,
+      "custom_pad": false,
+      "shapes": {
+        "positive": [
+          1,
+          77,
+          32
+        ],
+        "negative": [
+          1,
+          77,
+          32
+        ]
+      },
+      "files": {
+        "positive": {
+          "name": "truncated-positive.bin",
+          "sha256": "7837f118ed0cf194cccd23c7200ac924e44fa0272991d829d7b85a7985b9b6a2"
+        },
+        "negative": {
+          "name": "truncated-negative.bin",
+          "sha256": "31cf56ad76980c26fc4365c506601d1e1d674ad54576f18adcc662d7512910af"
+        }
+      }
+    },
+    {
+      "name": "custom-pad",
+      "prompt": "apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, ",
+      "negative": "blur",
+      "clip_skip": 1,
+      "truncate": false,
+      "custom_pad": true,
+      "shapes": {
+        "positive": [
+          1,
+          231,
+          32
+        ],
+        "negative": [
+          1,
+          231,
+          32
+        ]
+      },
+      "files": {
+        "positive": {
+          "name": "custom-pad-positive.bin",
+          "sha256": "a65ccfe5010bd19aad31a427de48fefadecb6a59000922bf623d6ac746c1022b"
+        },
+        "negative": {
+          "name": "custom-pad-negative.bin",
+          "sha256": "051c60575ffb3ef0f09cdfdeabb05ff97b5a4c647706f6302adecb258bb82724"
+        }
+      }
+    }
+  ]
+}

@@ -9,10 +9,13 @@ final class Tensor[A] private[scalatorch] (
 
   private[scalatorch] def logicalArray: Array[A] =
     val out = storage.allocate(shape.numel.toInt)
-    var i = 0
-    while i < out.length do
-      out(i) = storage.data(layout.index(i))
-      i += 1
+    if layout.isContiguous then
+      System.arraycopy(storage.data,layout.offset.toInt,out,0,out.length)
+    else
+      var i = 0
+      while i < out.length do
+        out(i) = storage.data(layout.index(i))
+        i += 1
     out
 
   private def copyAs[B](expected: DType[B]): Array[B] =

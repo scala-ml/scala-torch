@@ -55,7 +55,7 @@ final case class VaeEncoder(convIn: Conv2d,downBlocks: Vector[VaeDownBlock],midB
   VaeGraph.preserving(convOut,3,Some(current))
   quantConv.foreach(c => VaeGraph.projection(c,outputChannels))
 
-  def apply(input: Variable): Variable =
+  private[models] def preflight(input: Shape): Unit =
     var shape=VaeGraph.input(input,convIn,maxFeatureElements)
     shape=VaeGraph.convShape(convIn,shape,maxFeatureElements)
     downBlocks.foreach { b =>
@@ -65,6 +65,9 @@ final case class VaeEncoder(convIn: Conv2d,downBlocks: Vector[VaeDownBlock],midB
     shape=VaeGraph.midShape(midBlock,shape,maxFeatureElements)
     shape=VaeGraph.convShape(convOut,shape,maxFeatureElements)
     quantConv.foreach(c => shape=VaeGraph.convShape(c,shape,maxFeatureElements))
+
+  def apply(input: Variable): Variable =
+    preflight(input.data.shape)
     var hidden=convIn(input)
     downBlocks.foreach { b =>
       b.layers.foreach(r => hidden=r(hidden))
@@ -93,7 +96,7 @@ final case class VaeDecoder(convIn: Conv2d,midBlock: VaeMidBlock,upBlocks: Vecto
   require(normOut.channels==current,"VAE decoder output norm mismatch")
   VaeGraph.preserving(convOut,3,Some(current))
 
-  def apply(input: Variable): Variable =
+  private[models] def preflight(input: Shape): Unit =
     var shape=VaeGraph.input(input,convIn,maxFeatureElements)
     postQuantConv.foreach(c => shape=VaeGraph.convShape(c,shape,maxFeatureElements))
     shape=VaeGraph.convShape(convIn,shape,maxFeatureElements)
@@ -103,6 +106,9 @@ final case class VaeDecoder(convIn: Conv2d,midBlock: VaeMidBlock,upBlocks: Vecto
       b.upsample.foreach(u => shape=VaeGraph.upShape(u,shape,maxFeatureElements))
     }
     VaeGraph.convShape(convOut,shape,maxFeatureElements)
+
+  def apply(input: Variable): Variable =
+    preflight(input.data.shape)
     var hidden=midBlock(convIn(postQuantConv.fold(input)(_(input))))
     upBlocks.foreach { b =>
       b.layers.foreach(r => hidden=r(hidden))
@@ -131,7 +137,9 @@ private[models] object VaeGraph:
     require(shape.numel<=limit && shape.numel<=Int.MaxValue,"VAE feature allocation budget exceeded")
     shape
   def input(x: Variable,c: Conv2d,limit: Long): Shape =
-    val shape=checked(x.data.shape,limit)
+    input(x.data.shape,c,limit)
+  def input(x: Shape,c: Conv2d,limit: Long): Shape =
+    val shape=checked(x,limit)
     require(shape.dims(1)==c.weight.data.shape.dims(1),"VAE input channel mismatch")
     shape
   def convShape(c: Conv2d,shape: Shape,limit: Long): Shape =

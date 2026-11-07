@@ -10,7 +10,8 @@ import scala.util.Using
 
 final case class ClipTextConfig(vocabulary: Int,width: Int,intermediate: Int,layers: Int,heads: Int,
     maxPositions: Int,epsilon: Double=1e-5,activation: ClipActivation=ClipActivation.QuickGelu,
-    bosId: Int=0,eosId: Int=2,padId: Int=1):
+    bosId: Int=0,eosId: Int=2,padId: Int=1,projectionWidth: Option[Int]=None):
+  require(projectionWidth.forall(n => n>0 && n<=16384),"invalid CLIP projection width")
   require(vocabulary>0 && vocabulary<=2000000 && width>0 && width<=16384 && intermediate>0 && intermediate<=65536,
     "invalid CLIP dimensions")
   require(layers>0 && layers<=512 && heads>0 && width%heads==0 && maxPositions>0 && maxPositions<=65536,
@@ -66,7 +67,10 @@ object ClipTextConfig:
         case Number(n) if n.toDouble.isFinite => n.toDouble
         case _ => throw IllegalArgumentException(s"invalid CLIP number: $key")
       require(take("model_type")==Text("clip_text_model"),"only CLIP text model supported")
-      exact("architectures",Strings(Vector("CLIPTextModel")))
+      val projected=take("architectures",Strings(Vector("CLIPTextModel"))) match
+        case Strings(Vector("CLIPTextModel")) => false
+        case Strings(Vector("CLIPTextModelWithProjection")) => true
+        case _ => throw IllegalArgumentException("unsupported CLIP architecture")
       exact("attention_dropout",Number(0));exact("dropout",Number(0));exact("use_attention_mask",Bool(false))
       exact("is_decoder",Bool(false));exact("add_cross_attention",Bool(false))
       for key <- Vector("_name_or_path","transformers_version") do
@@ -75,7 +79,8 @@ object ClipTextConfig:
           case _ => throw IllegalArgumentException(s"invalid CLIP metadata: $key")
       require(Set[Value](Null,Text("float32"),Text("float16"),Text("bfloat16"))(take("torch_dtype")),"unsupported CLIP dtype metadata")
       require(number("initializer_factor",1)>0 && number("initializer_range",.02)>=0,"invalid CLIP initializer metadata")
-      require(integer("projection_dim",Number(512))>0,"invalid CLIP projection metadata")
+      val projection=integer("projection_dim",Number(512))
+      require(projection>0,"invalid CLIP projection metadata")
       val activation=take("hidden_act",Text("quick_gelu")) match
         case Text("quick_gelu") => ClipActivation.QuickGelu
         case Text("gelu") => ClipActivation.Gelu
@@ -84,7 +89,7 @@ object ClipTextConfig:
       val c=ClipTextConfig(integer("vocab_size"),integer("hidden_size"),integer("intermediate_size"),
         integer("num_hidden_layers"),integer("num_attention_heads"),integer("max_position_embeddings"),
         number("layer_norm_eps",1e-5),activation,integer("bos_token_id",Number(0)),integer("eos_token_id",Number(2)),
-        integer("pad_token_id",Number(1)))
+        integer("pad_token_id",Number(1)),if projected then Some(projection) else None)
       require(fields.isEmpty,s"unknown CLIP config fields: ${fields.keys.toVector.sorted.mkString(", ")}")
       c
     }

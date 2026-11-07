@@ -5,6 +5,19 @@ import java.nio.file.{Files, Path}
 import scala.util.Using
 
 class ShardSuite extends munit.FunSuite:
+  test("Diffusers archive names support validated indexed shards and source inventory") {
+    directory { dir =>
+      fixture(dir)
+      Files.move(dir.resolve("model.safetensors.index.json"),dir.resolve("diffusion_pytorch_model.safetensors.index.json"))
+      Using.resource(SafeTensorSet.open(dir,filename="diffusion_pytorch_model.safetensors")) { set =>
+        assertEquals(set.readFloat("a").toFloatArray.toVector,Vector(1.25f))
+        assertEquals(set.sourceFiles.map(_.getFileName.toString).toSet,
+          Set("diffusion_pytorch_model.safetensors.index.json","a.safetensors","b.safetensors"))
+      }
+      for name <- Vector("../model.safetensors","a/b.safetensors","C:model.safetensors","bad.bin","") do
+        intercept[IllegalArgumentException](SafeTensorSet.open(dir,filename=name))
+    }
+  }
   private def directory[A](f: Path => A): A =
     val dir = Files.createTempDirectory("scala-torch-shards-")
     try f(dir)

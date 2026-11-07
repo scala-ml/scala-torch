@@ -5,15 +5,24 @@ import java.lang.foreign.ValueLayout.{ADDRESS, JAVA_INT, JAVA_LONG}
 import java.nio.charset.StandardCharsets
 import scala.util.Using
 
-/** Linux 64-bit driver-only feasibility probes; not a Tensor CUDA backend. */
+/** Windows/Linux 64-bit driver-only feasibility probes; not a Tensor CUDA backend. */
 object CudaProbe:
   final case class Result(driverVersion: Int, deviceName: String, values: Array[Float])
+  final case class MemoryInfo(freeBytes: Long,totalBytes: Long,driverVersion: Int,deviceName: String):
+    def usedBytes: Long=totalBytes-freeBytes
 
   def roundTrip(values: Array[Float], deviceIndex: Int = 0): Result =
     require(values.nonEmpty, "probe requires nonempty input")
     CudaDriver.withDevice(deviceIndex) { (driver, version, name) =>
       val address = driver.upload(values)
       Result(version, name, driver.download(address, values.length))
+    }
+
+  /** Reads device-wide free and total VRAM through the CUDA Driver API. */
+  def memoryInfo(deviceIndex: Int = 0): MemoryInfo =
+    CudaDriver.withDevice(deviceIndex) { (driver,version,name) =>
+      val (free,total)=driver.memoryInfo()
+      MemoryInfo(free,total,version,name)
     }
 
   /** Packed row-major GEMM. Every invocation owns its context reference, buffers, stream and event. */

@@ -4,7 +4,7 @@
 
 The 0.1.0 release is **prepared locally, not published**. The build generates seven Maven modules under `com.github.kmizu`. A source-independent consumer has resolved all seven staged jars and executed CPU autodiff and public CLIP-to-U-Net inference. No Central upload, release tag or GitHub repository creation has occurred.
 
-Publication is authorized by the user for a coherent milestone. Remaining required inputs are the project license, source repository location, and access to the existing Central publisher credentials/PGP signing key. Those choices are pending; the current POMs intentionally do not invent license, homepage or SCM metadata. They are not yet Central-ready. The local environment has neither Central environment credentials nor a secret GPG key. GitHub CLI authentication is available, but does not grant access to Central credentials or recover GitHub Actions secret values.
+Publication is authorized by the user for a coherent milestone. The project license and verified Central publisher credentials are still required; the current POMs intentionally do not invent license, homepage or SCM metadata. The existing release-signing key and passphrase files are present in the user's synced `Dropbox/release-signing-key` directory, but have not yet been imported or exercised by this build. No GPG command-line executable is installed in the current environment. The Git remote is `git@github.com:scala-ml/scala-torch.git`; confirm that this is the intended public SCM URL and Central namespace metadata before final publication. GitHub CLI authentication is available, but does not grant access to Central credentials or recover GitHub Actions secret values.
 
 ## Coordinates
 
@@ -58,9 +58,9 @@ The consumer has no `dependsOn` source-build reference. Its classpath must conta
 
 ## Final publication sequence
 
-Complete the pending license and repository metadata first. Include the selected license and required notices in the distribution. Verify namespace publishing rights using the authorized Central account; the existing numscala coordinates establish the intended organization, not proof of current credential authorization.
+Complete the pending license and repository metadata first. Include the selected license and required notices in the distribution. Verify namespace publishing rights using the authorized Central account; the existing numscala coordinates and available signing key establish the intended organization, not proof of current credential authorization.
 
-Configure the existing signing key and Central credentials outside version control. sbt 2 recognizes `SONATYPE_USERNAME`/`SONATYPE_PASSWORD`; local credentials may instead be configured in `~/.config/sbt/2/credentials.sbt`. Signing requires access to the appropriate secret key and any passphrase. For GitHub Actions, provision repository/organization secrets through the account owner; they cannot be read back from GitHub.
+Configure the existing signing key and Central credentials outside version control. Keep the Dropbox key material and passphrase out of the repository and command output; import/configure them for `sbt-pgp` only when preparing the signed release. sbt 2 recognizes `SONATYPE_USERNAME`/`SONATYPE_PASSWORD`; local credentials may instead be configured in `~/.config/sbt/2/credentials.sbt`. For GitHub Actions, provision repository/organization secrets through the account owner; they cannot be read back from GitHub.
 
 Use a clean staging directory for the final signed build, inspect the exact artifacts, and re-run the standalone consumer against them. Record the clean release commit and tag only after the full CPU, public-model and actual-GPU gates pass. Preliminary unsigned staging is not proof of a signed deployment bundle.
 

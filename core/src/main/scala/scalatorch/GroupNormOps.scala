@@ -5,9 +5,12 @@ object GroupNormOps:
   private def width(input: Tensor[Float],groups: Int,epsilon: Double): Int =
     require(input.device==Device.Cpu && input.dtype==DType.Float32 && input.shape.rank>=2,
       "GroupNorm requires CPU Float32 (N,C,...) input")
+    width(input.shape,groups,epsilon)
+  private[scalatorch] def width(shape: Shape,groups: Int,epsilon: Double): Int =
+    require(shape.rank>=2,"GroupNorm requires (N,C,...) input")
     require(epsilon.isFinite && epsilon>0,"GroupNorm epsilon must be finite and positive")
-    val dims=input.shape.dims
-    require(dims.forall(_<=Int.MaxValue) && input.shape.numel<=Int.MaxValue,"GroupNorm exceeds Int indexing")
+    val dims=shape.dims
+    require(dims.forall(_<=Int.MaxValue) && shape.numel<=Int.MaxValue,"GroupNorm exceeds Int indexing")
     require(dims.tail.forall(_>0),"GroupNorm channels/spatial dimensions must be positive")
     require(groups>0 && dims(1)%groups==0,"GroupNorm channels must divide into groups")
     val groupShape=Shape.from((dims(1)/groups)+:dims.drop(2))

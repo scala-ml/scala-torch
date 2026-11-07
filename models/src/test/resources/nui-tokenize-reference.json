@@ -1,0 +1,3669 @@
+{
+  "source": "b8c0ede7e304cba83280d2bb05fb267aee755c75ea87cd34ba81f7b1767dc1e7",
+  "cases": [
+    {
+      "profile": "tiny-sd-pipe",
+      "mode": "text",
+      "text": "Hello, world!",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 8,
+            "ids": [
+              73,
+              759,
+              198,
+              279,
+              88,
+              377,
+              559,
+              345
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "hello , world !",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 73,
+                "piece": "h",
+                "text": "h",
+                "bytes_hex": "68",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 759,
+                "piece": "ell",
+                "text": "ell",
+                "bytes_hex": "65 6c 6c",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 198,
+                "piece": "o</w>",
+                "text": "o ",
+                "bytes_hex": "6f 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 279,
+                "piece": ",</w>",
+                "text": ", ",
+                "bytes_hex": "2c 20",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 88,
+                "piece": "w",
+                "text": "w",
+                "bytes_hex": "77",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 377,
+                "piece": "or",
+                "text": "or",
+                "bytes_hex": "6f 72",
+                "special": false
+              },
+              {
+                "index": 7,
+                "id": 559,
+                "piece": "ld</w>",
+                "text": "ld ",
+                "bytes_hex": "6c 64 20",
+                "special": false
+              },
+              {
+                "index": 8,
+                "id": 345,
+                "piece": "!</w>",
+                "text": "! ",
+                "bytes_hex": "21 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  73
+                ],
+                "text": "h"
+              },
+              {
+                "ids": [
+                  759
+                ],
+                "text": "ell"
+              },
+              {
+                "ids": [
+                  198
+                ],
+                "text": "o "
+              },
+              {
+                "ids": [
+                  279
+                ],
+                "text": ", "
+              },
+              {
+                "ids": [
+                  88
+                ],
+                "text": "w"
+              },
+              {
+                "ids": [
+                  377
+                ],
+                "text": "or"
+              },
+              {
+                "ids": [
+                  559
+                ],
+                "text": "ld "
+              },
+              {
+                "ids": [
+                  345
+                ],
+                "text": "! "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sd-pipe",
+      "mode": "text",
+      "text": "猫 ☕ café",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 11,
+            "ids": [
+              153,
+              173,
+              266,
+              148,
+              185,
+              314,
+              68,
+              66,
+              71,
+              126,
+              259
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "猫 ☕ café",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 153,
+                "piece": "ç",
+                "text": "�",
+                "bytes_hex": "e7",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 173,
+                "piece": "Į",
+                "text": "�",
+                "bytes_hex": "8c",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 266,
+                "piece": "«</w>",
+                "text": "� ",
+                "bytes_hex": "ab 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 148,
+                "piece": "â",
+                "text": "�",
+                "bytes_hex": "e2",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 185,
+                "piece": "ĺ",
+                "text": "�",
+                "bytes_hex": "98",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 314,
+                "piece": "ķ</w>",
+                "text": "� ",
+                "bytes_hex": "95 20",
+                "special": false
+              },
+              {
+                "index": 7,
+                "id": 68,
+                "piece": "c",
+                "text": "c",
+                "bytes_hex": "63",
+                "special": false
+              },
+              {
+                "index": 8,
+                "id": 66,
+                "piece": "a",
+                "text": "a",
+                "bytes_hex": "61",
+                "special": false
+              },
+              {
+                "index": 9,
+                "id": 71,
+                "piece": "f",
+                "text": "f",
+                "bytes_hex": "66",
+                "special": false
+              },
+              {
+                "index": 10,
+                "id": 126,
+                "piece": "Ã",
+                "text": "�",
+                "bytes_hex": "c3",
+                "special": false
+              },
+              {
+                "index": 11,
+                "id": 259,
+                "piece": "©</w>",
+                "text": "� ",
+                "bytes_hex": "a9 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  153,
+                  173,
+                  266
+                ],
+                "text": "猫 "
+              },
+              {
+                "ids": [
+                  148,
+                  185,
+                  314
+                ],
+                "text": "☕ "
+              },
+              {
+                "ids": [
+                  68
+                ],
+                "text": "c"
+              },
+              {
+                "ids": [
+                  66
+                ],
+                "text": "a"
+              },
+              {
+                "ids": [
+                  71
+                ],
+                "text": "f"
+              },
+              {
+                "ids": [
+                  126,
+                  259
+                ],
+                "text": "é "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sd-pipe",
+      "mode": "text",
+      "text": "日本語 中国語",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 18,
+            "ids": [
+              152,
+              184,
+              339,
+              152,
+              189,
+              319,
+              154,
+              104,
+              293,
+              150,
+              117,
+              297,
+              151,
+              188,
+              294,
+              154,
+              104,
+              293
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "日 本 語 中 国 語",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 152,
+                "piece": "æ",
+                "text": "�",
+                "bytes_hex": "e6",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 184,
+                "piece": "Ĺ",
+                "text": "�",
+                "bytes_hex": "97",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 339,
+                "piece": "¥</w>",
+                "text": "� ",
+                "bytes_hex": "a5 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 152,
+                "piece": "æ",
+                "text": "�",
+                "bytes_hex": "e6",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 189,
+                "piece": "ľ",
+                "text": "�",
+                "bytes_hex": "9c",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 319,
+                "piece": "¬</w>",
+                "text": "� ",
+                "bytes_hex": "ac 20",
+                "special": false
+              },
+              {
+                "index": 7,
+                "id": 154,
+                "piece": "è",
+                "text": "�",
+                "bytes_hex": "e8",
+                "special": false
+              },
+              {
+                "index": 8,
+                "id": 104,
+                "piece": "ª",
+                "text": "�",
+                "bytes_hex": "aa",
+                "special": false
+              },
+              {
+                "index": 9,
+                "id": 293,
+                "piece": "ŀ</w>",
+                "text": "� ",
+                "bytes_hex": "9e 20",
+                "special": false
+              },
+              {
+                "index": 10,
+                "id": 150,
+                "piece": "ä",
+                "text": "�",
+                "bytes_hex": "e4",
+                "special": false
+              },
+              {
+                "index": 11,
+                "id": 117,
+                "piece": "¸",
+                "text": "�",
+                "bytes_hex": "b8",
+                "special": false
+              },
+              {
+                "index": 12,
+                "id": 297,
+                "piece": "Ń</w>",
+                "text": "� ",
+                "bytes_hex": "ad 20",
+                "special": false
+              },
+              {
+                "index": 13,
+                "id": 151,
+                "piece": "å",
+                "text": "�",
+                "bytes_hex": "e5",
+                "special": false
+              },
+              {
+                "index": 14,
+                "id": 188,
+                "piece": "Ľ",
+                "text": "�",
+                "bytes_hex": "9b",
+                "special": false
+              },
+              {
+                "index": 15,
+                "id": 294,
+                "piece": "½</w>",
+                "text": "� ",
+                "bytes_hex": "bd 20",
+                "special": false
+              },
+              {
+                "index": 16,
+                "id": 154,
+                "piece": "è",
+                "text": "�",
+                "bytes_hex": "e8",
+                "special": false
+              },
+              {
+                "index": 17,
+                "id": 104,
+                "piece": "ª",
+                "text": "�",
+                "bytes_hex": "aa",
+                "special": false
+              },
+              {
+                "index": 18,
+                "id": 293,
+                "piece": "ŀ</w>",
+                "text": "� ",
+                "bytes_hex": "9e 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  152,
+                  184,
+                  339
+                ],
+                "text": "日 "
+              },
+              {
+                "ids": [
+                  152,
+                  189,
+                  319
+                ],
+                "text": "本 "
+              },
+              {
+                "ids": [
+                  154,
+                  104,
+                  293
+                ],
+                "text": "語 "
+              },
+              {
+                "ids": [
+                  150,
+                  117,
+                  297
+                ],
+                "text": "中 "
+              },
+              {
+                "ids": [
+                  151,
+                  188,
+                  294
+                ],
+                "text": "国 "
+              },
+              {
+                "ids": [
+                  154,
+                  104,
+                  293
+                ],
+                "text": "語 "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sd-pipe",
+      "mode": "text",
+      "text": "A\u0000B​C�D",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 3,
+            "ids": [
+              555,
+              68,
+              196
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "abcd",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 555,
+                "piece": "ab",
+                "text": "ab",
+                "bytes_hex": "61 62",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 68,
+                "piece": "c",
+                "text": "c",
+                "bytes_hex": "63",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 196,
+                "piece": "d</w>",
+                "text": "d ",
+                "bytes_hex": "64 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  555
+                ],
+                "text": "ab"
+              },
+              {
+                "ids": [
+                  68
+                ],
+                "text": "c"
+              },
+              {
+                "ids": [
+                  196
+                ],
+                "text": "d "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sd-pipe",
+      "mode": "text",
+      "text": "ΟΣ όΣ ABC",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 10,
+            "ids": [
+              137,
+              124,
+              138,
+              262,
+              138,
+              173,
+              138,
+              262,
+              555,
+              224
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "ος ός abc",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 137,
+                "piece": "Î",
+                "text": "�",
+                "bytes_hex": "ce",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 124,
+                "piece": "¿",
+                "text": "�",
+                "bytes_hex": "bf",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 138,
+                "piece": "Ï",
+                "text": "�",
+                "bytes_hex": "cf",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 262,
+                "piece": "Ĥ</w>",
+                "text": "� ",
+                "bytes_hex": "82 20",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 138,
+                "piece": "Ï",
+                "text": "�",
+                "bytes_hex": "cf",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 173,
+                "piece": "Į",
+                "text": "�",
+                "bytes_hex": "8c",
+                "special": false
+              },
+              {
+                "index": 7,
+                "id": 138,
+                "piece": "Ï",
+                "text": "�",
+                "bytes_hex": "cf",
+                "special": false
+              },
+              {
+                "index": 8,
+                "id": 262,
+                "piece": "Ĥ</w>",
+                "text": "� ",
+                "bytes_hex": "82 20",
+                "special": false
+              },
+              {
+                "index": 9,
+                "id": 555,
+                "piece": "ab",
+                "text": "ab",
+                "bytes_hex": "61 62",
+                "special": false
+              },
+              {
+                "index": 10,
+                "id": 224,
+                "piece": "c</w>",
+                "text": "c ",
+                "bytes_hex": "63 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  137,
+                  124
+                ],
+                "text": "ο"
+              },
+              {
+                "ids": [
+                  138,
+                  262
+                ],
+                "text": "ς "
+              },
+              {
+                "ids": [
+                  138,
+                  173
+                ],
+                "text": "ό"
+              },
+              {
+                "ids": [
+                  138,
+                  262
+                ],
+                "text": "ς "
+              },
+              {
+                "ids": [
+                  555
+                ],
+                "text": "ab"
+              },
+              {
+                "ids": [
+                  224
+                ],
+                "text": "c "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sd-pipe",
+      "mode": "text",
+      "text": "ΟΣ\u0000Α",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 6,
+            "ids": [
+              137,
+              124,
+              138,
+              164,
+              137,
+              200
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "οσα",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 137,
+                "piece": "Î",
+                "text": "�",
+                "bytes_hex": "ce",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 124,
+                "piece": "¿",
+                "text": "�",
+                "bytes_hex": "bf",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 138,
+                "piece": "Ï",
+                "text": "�",
+                "bytes_hex": "cf",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 164,
+                "piece": "ĥ",
+                "text": "�",
+                "bytes_hex": "83",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 137,
+                "piece": "Î",
+                "text": "�",
+                "bytes_hex": "ce",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 200,
+                "piece": "±</w>",
+                "text": "� ",
+                "bytes_hex": "b1 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  137,
+                  124
+                ],
+                "text": "ο"
+              },
+              {
+                "ids": [
+                  138,
+                  164
+                ],
+                "text": "σ"
+              },
+              {
+                "ids": [
+                  137,
+                  200
+                ],
+                "text": "α "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sd-pipe",
+      "mode": "text",
+      "text": "a\u000bb",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 2,
+            "ids": [
+              66,
+              212
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "ab",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 66,
+                "piece": "a",
+                "text": "a",
+                "bytes_hex": "61",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 212,
+                "piece": "b</w>",
+                "text": "b ",
+                "bytes_hex": "62 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  66
+                ],
+                "text": "a"
+              },
+              {
+                "ids": [
+                  212
+                ],
+                "text": "b "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sd-pipe",
+      "mode": "text",
+      "text": "&amp; test",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 6,
+            "ids": [
+              352,
+              426,
+              217,
+              317,
+              85,
+              584
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "& amp ; test",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 352,
+                "piece": "&</w>",
+                "text": "& ",
+                "bytes_hex": "26 20",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 426,
+                "piece": "am",
+                "text": "am",
+                "bytes_hex": "61 6d",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 217,
+                "piece": "p</w>",
+                "text": "p ",
+                "bytes_hex": "70 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 317,
+                "piece": ";</w>",
+                "text": "; ",
+                "bytes_hex": "3b 20",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 85,
+                "piece": "t",
+                "text": "t",
+                "bytes_hex": "74",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 584,
+                "piece": "est</w>",
+                "text": "est ",
+                "bytes_hex": "65 73 74 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  352
+                ],
+                "text": "& "
+              },
+              {
+                "ids": [
+                  426
+                ],
+                "text": "am"
+              },
+              {
+                "ids": [
+                  217
+                ],
+                "text": "p "
+              },
+              {
+                "ids": [
+                  317
+                ],
+                "text": "; "
+              },
+              {
+                "ids": [
+                  85
+                ],
+                "text": "t"
+              },
+              {
+                "ids": [
+                  584
+                ],
+                "text": "est "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sd-pipe",
+      "mode": "text",
+      "text": "",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 0,
+            "ids": [],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "",
+            "tokens": [],
+            "groups": []
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sd-pipe",
+      "mode": "text",
+      "text": "<|startoftext|> cat <|endoftext|>",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 4,
+            "ids": [
+              0,
+              68,
+              434,
+              1
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "<|startoftext|>cat <|endoftext|>",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 0,
+                "piece": "<|startoftext|>",
+                "text": "<|startoftext|>",
+                "bytes_hex": "3c 7c 73 74 61 72 74 6f 66 74 65 78 74 7c 3e",
+                "special": true
+              },
+              {
+                "index": 2,
+                "id": 68,
+                "piece": "c",
+                "text": "c",
+                "bytes_hex": "63",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 434,
+                "piece": "at</w>",
+                "text": "at ",
+                "bytes_hex": "61 74 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 1,
+                "piece": "<|endoftext|>",
+                "text": "<|endoftext|>",
+                "bytes_hex": "3c 7c 65 6e 64 6f 66 74 65 78 74 7c 3e",
+                "special": true
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  0
+                ],
+                "text": "<|startoftext|>"
+              },
+              {
+                "ids": [
+                  68
+                ],
+                "text": "c"
+              },
+              {
+                "ids": [
+                  434
+                ],
+                "text": "at "
+              },
+              {
+                "ids": [
+                  1
+                ],
+                "text": "<|endoftext|>"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sd-pipe",
+      "mode": "ids",
+      "text": "0, 1, 2, 512, 513",
+      "result": {
+        "input_mode": "ids",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 5,
+            "ids": [
+              0,
+              1,
+              2,
+              512,
+              513
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "<|startoftext|><|endoftext|>! his  sh",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 0,
+                "piece": "<|startoftext|>",
+                "text": "<|startoftext|>",
+                "bytes_hex": "3c 7c 73 74 61 72 74 6f 66 74 65 78 74 7c 3e",
+                "special": true
+              },
+              {
+                "index": 2,
+                "id": 1,
+                "piece": "<|endoftext|>",
+                "text": "<|endoftext|>",
+                "bytes_hex": "3c 7c 65 6e 64 6f 66 74 65 78 74 7c 3e",
+                "special": true
+              },
+              {
+                "index": 3,
+                "id": 2,
+                "piece": "!",
+                "text": "!",
+                "bytes_hex": "21",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 512,
+                "piece": "Ġhis</w>",
+                "text": " his ",
+                "bytes_hex": "20 68 69 73 20",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 513,
+                "piece": "Ġsh",
+                "text": " sh",
+                "bytes_hex": "20 73 68",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  0
+                ],
+                "text": "<|startoftext|>"
+              },
+              {
+                "ids": [
+                  1
+                ],
+                "text": "<|endoftext|>"
+              },
+              {
+                "ids": [
+                  2
+                ],
+                "text": "!"
+              },
+              {
+                "ids": [
+                  512
+                ],
+                "text": " his "
+              },
+              {
+                "ids": [
+                  513
+                ],
+                "text": " sh"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sdxl-pipe",
+      "mode": "text",
+      "text": "Hello, world!",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 8,
+            "ids": [
+              73,
+              759,
+              198,
+              279,
+              88,
+              377,
+              559,
+              345
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "hello , world !",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 73,
+                "piece": "h",
+                "text": "h",
+                "bytes_hex": "68",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 759,
+                "piece": "ell",
+                "text": "ell",
+                "bytes_hex": "65 6c 6c",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 198,
+                "piece": "o</w>",
+                "text": "o ",
+                "bytes_hex": "6f 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 279,
+                "piece": ",</w>",
+                "text": ", ",
+                "bytes_hex": "2c 20",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 88,
+                "piece": "w",
+                "text": "w",
+                "bytes_hex": "77",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 377,
+                "piece": "or",
+                "text": "or",
+                "bytes_hex": "6f 72",
+                "special": false
+              },
+              {
+                "index": 7,
+                "id": 559,
+                "piece": "ld</w>",
+                "text": "ld ",
+                "bytes_hex": "6c 64 20",
+                "special": false
+              },
+              {
+                "index": 8,
+                "id": 345,
+                "piece": "!</w>",
+                "text": "! ",
+                "bytes_hex": "21 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  73
+                ],
+                "text": "h"
+              },
+              {
+                "ids": [
+                  759
+                ],
+                "text": "ell"
+              },
+              {
+                "ids": [
+                  198
+                ],
+                "text": "o "
+              },
+              {
+                "ids": [
+                  279
+                ],
+                "text": ", "
+              },
+              {
+                "ids": [
+                  88
+                ],
+                "text": "w"
+              },
+              {
+                "ids": [
+                  377
+                ],
+                "text": "or"
+              },
+              {
+                "ids": [
+                  559
+                ],
+                "text": "ld "
+              },
+              {
+                "ids": [
+                  345
+                ],
+                "text": "! "
+              }
+            ]
+          },
+          {
+            "name": "tokenizer_2",
+            "source": "",
+            "count": 8,
+            "ids": [
+              73,
+              759,
+              198,
+              279,
+              88,
+              377,
+              559,
+              345
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "hello , world !",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 73,
+                "piece": "h",
+                "text": "h",
+                "bytes_hex": "68",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 759,
+                "piece": "ell",
+                "text": "ell",
+                "bytes_hex": "65 6c 6c",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 198,
+                "piece": "o</w>",
+                "text": "o ",
+                "bytes_hex": "6f 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 279,
+                "piece": ",</w>",
+                "text": ", ",
+                "bytes_hex": "2c 20",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 88,
+                "piece": "w",
+                "text": "w",
+                "bytes_hex": "77",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 377,
+                "piece": "or",
+                "text": "or",
+                "bytes_hex": "6f 72",
+                "special": false
+              },
+              {
+                "index": 7,
+                "id": 559,
+                "piece": "ld</w>",
+                "text": "ld ",
+                "bytes_hex": "6c 64 20",
+                "special": false
+              },
+              {
+                "index": 8,
+                "id": 345,
+                "piece": "!</w>",
+                "text": "! ",
+                "bytes_hex": "21 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  73
+                ],
+                "text": "h"
+              },
+              {
+                "ids": [
+                  759
+                ],
+                "text": "ell"
+              },
+              {
+                "ids": [
+                  198
+                ],
+                "text": "o "
+              },
+              {
+                "ids": [
+                  279
+                ],
+                "text": ", "
+              },
+              {
+                "ids": [
+                  88
+                ],
+                "text": "w"
+              },
+              {
+                "ids": [
+                  377
+                ],
+                "text": "or"
+              },
+              {
+                "ids": [
+                  559
+                ],
+                "text": "ld "
+              },
+              {
+                "ids": [
+                  345
+                ],
+                "text": "! "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sdxl-pipe",
+      "mode": "text",
+      "text": "猫 ☕ café",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 11,
+            "ids": [
+              153,
+              173,
+              266,
+              148,
+              185,
+              314,
+              68,
+              66,
+              71,
+              126,
+              259
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "猫 ☕ café",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 153,
+                "piece": "ç",
+                "text": "�",
+                "bytes_hex": "e7",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 173,
+                "piece": "Į",
+                "text": "�",
+                "bytes_hex": "8c",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 266,
+                "piece": "«</w>",
+                "text": "� ",
+                "bytes_hex": "ab 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 148,
+                "piece": "â",
+                "text": "�",
+                "bytes_hex": "e2",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 185,
+                "piece": "ĺ",
+                "text": "�",
+                "bytes_hex": "98",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 314,
+                "piece": "ķ</w>",
+                "text": "� ",
+                "bytes_hex": "95 20",
+                "special": false
+              },
+              {
+                "index": 7,
+                "id": 68,
+                "piece": "c",
+                "text": "c",
+                "bytes_hex": "63",
+                "special": false
+              },
+              {
+                "index": 8,
+                "id": 66,
+                "piece": "a",
+                "text": "a",
+                "bytes_hex": "61",
+                "special": false
+              },
+              {
+                "index": 9,
+                "id": 71,
+                "piece": "f",
+                "text": "f",
+                "bytes_hex": "66",
+                "special": false
+              },
+              {
+                "index": 10,
+                "id": 126,
+                "piece": "Ã",
+                "text": "�",
+                "bytes_hex": "c3",
+                "special": false
+              },
+              {
+                "index": 11,
+                "id": 259,
+                "piece": "©</w>",
+                "text": "� ",
+                "bytes_hex": "a9 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  153,
+                  173,
+                  266
+                ],
+                "text": "猫 "
+              },
+              {
+                "ids": [
+                  148,
+                  185,
+                  314
+                ],
+                "text": "☕ "
+              },
+              {
+                "ids": [
+                  68
+                ],
+                "text": "c"
+              },
+              {
+                "ids": [
+                  66
+                ],
+                "text": "a"
+              },
+              {
+                "ids": [
+                  71
+                ],
+                "text": "f"
+              },
+              {
+                "ids": [
+                  126,
+                  259
+                ],
+                "text": "é "
+              }
+            ]
+          },
+          {
+            "name": "tokenizer_2",
+            "source": "",
+            "count": 11,
+            "ids": [
+              153,
+              173,
+              266,
+              148,
+              185,
+              314,
+              68,
+              66,
+              71,
+              126,
+              259
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "猫 ☕ café",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 153,
+                "piece": "ç",
+                "text": "�",
+                "bytes_hex": "e7",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 173,
+                "piece": "Į",
+                "text": "�",
+                "bytes_hex": "8c",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 266,
+                "piece": "«</w>",
+                "text": "� ",
+                "bytes_hex": "ab 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 148,
+                "piece": "â",
+                "text": "�",
+                "bytes_hex": "e2",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 185,
+                "piece": "ĺ",
+                "text": "�",
+                "bytes_hex": "98",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 314,
+                "piece": "ķ</w>",
+                "text": "� ",
+                "bytes_hex": "95 20",
+                "special": false
+              },
+              {
+                "index": 7,
+                "id": 68,
+                "piece": "c",
+                "text": "c",
+                "bytes_hex": "63",
+                "special": false
+              },
+              {
+                "index": 8,
+                "id": 66,
+                "piece": "a",
+                "text": "a",
+                "bytes_hex": "61",
+                "special": false
+              },
+              {
+                "index": 9,
+                "id": 71,
+                "piece": "f",
+                "text": "f",
+                "bytes_hex": "66",
+                "special": false
+              },
+              {
+                "index": 10,
+                "id": 126,
+                "piece": "Ã",
+                "text": "�",
+                "bytes_hex": "c3",
+                "special": false
+              },
+              {
+                "index": 11,
+                "id": 259,
+                "piece": "©</w>",
+                "text": "� ",
+                "bytes_hex": "a9 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  153,
+                  173,
+                  266
+                ],
+                "text": "猫 "
+              },
+              {
+                "ids": [
+                  148,
+                  185,
+                  314
+                ],
+                "text": "☕ "
+              },
+              {
+                "ids": [
+                  68
+                ],
+                "text": "c"
+              },
+              {
+                "ids": [
+                  66
+                ],
+                "text": "a"
+              },
+              {
+                "ids": [
+                  71
+                ],
+                "text": "f"
+              },
+              {
+                "ids": [
+                  126,
+                  259
+                ],
+                "text": "é "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sdxl-pipe",
+      "mode": "text",
+      "text": "日本語 中国語",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 18,
+            "ids": [
+              152,
+              184,
+              339,
+              152,
+              189,
+              319,
+              154,
+              104,
+              293,
+              150,
+              117,
+              297,
+              151,
+              188,
+              294,
+              154,
+              104,
+              293
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "日 本 語 中 国 語",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 152,
+                "piece": "æ",
+                "text": "�",
+                "bytes_hex": "e6",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 184,
+                "piece": "Ĺ",
+                "text": "�",
+                "bytes_hex": "97",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 339,
+                "piece": "¥</w>",
+                "text": "� ",
+                "bytes_hex": "a5 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 152,
+                "piece": "æ",
+                "text": "�",
+                "bytes_hex": "e6",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 189,
+                "piece": "ľ",
+                "text": "�",
+                "bytes_hex": "9c",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 319,
+                "piece": "¬</w>",
+                "text": "� ",
+                "bytes_hex": "ac 20",
+                "special": false
+              },
+              {
+                "index": 7,
+                "id": 154,
+                "piece": "è",
+                "text": "�",
+                "bytes_hex": "e8",
+                "special": false
+              },
+              {
+                "index": 8,
+                "id": 104,
+                "piece": "ª",
+                "text": "�",
+                "bytes_hex": "aa",
+                "special": false
+              },
+              {
+                "index": 9,
+                "id": 293,
+                "piece": "ŀ</w>",
+                "text": "� ",
+                "bytes_hex": "9e 20",
+                "special": false
+              },
+              {
+                "index": 10,
+                "id": 150,
+                "piece": "ä",
+                "text": "�",
+                "bytes_hex": "e4",
+                "special": false
+              },
+              {
+                "index": 11,
+                "id": 117,
+                "piece": "¸",
+                "text": "�",
+                "bytes_hex": "b8",
+                "special": false
+              },
+              {
+                "index": 12,
+                "id": 297,
+                "piece": "Ń</w>",
+                "text": "� ",
+                "bytes_hex": "ad 20",
+                "special": false
+              },
+              {
+                "index": 13,
+                "id": 151,
+                "piece": "å",
+                "text": "�",
+                "bytes_hex": "e5",
+                "special": false
+              },
+              {
+                "index": 14,
+                "id": 188,
+                "piece": "Ľ",
+                "text": "�",
+                "bytes_hex": "9b",
+                "special": false
+              },
+              {
+                "index": 15,
+                "id": 294,
+                "piece": "½</w>",
+                "text": "� ",
+                "bytes_hex": "bd 20",
+                "special": false
+              },
+              {
+                "index": 16,
+                "id": 154,
+                "piece": "è",
+                "text": "�",
+                "bytes_hex": "e8",
+                "special": false
+              },
+              {
+                "index": 17,
+                "id": 104,
+                "piece": "ª",
+                "text": "�",
+                "bytes_hex": "aa",
+                "special": false
+              },
+              {
+                "index": 18,
+                "id": 293,
+                "piece": "ŀ</w>",
+                "text": "� ",
+                "bytes_hex": "9e 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  152,
+                  184,
+                  339
+                ],
+                "text": "日 "
+              },
+              {
+                "ids": [
+                  152,
+                  189,
+                  319
+                ],
+                "text": "本 "
+              },
+              {
+                "ids": [
+                  154,
+                  104,
+                  293
+                ],
+                "text": "語 "
+              },
+              {
+                "ids": [
+                  150,
+                  117,
+                  297
+                ],
+                "text": "中 "
+              },
+              {
+                "ids": [
+                  151,
+                  188,
+                  294
+                ],
+                "text": "国 "
+              },
+              {
+                "ids": [
+                  154,
+                  104,
+                  293
+                ],
+                "text": "語 "
+              }
+            ]
+          },
+          {
+            "name": "tokenizer_2",
+            "source": "",
+            "count": 18,
+            "ids": [
+              152,
+              184,
+              339,
+              152,
+              189,
+              319,
+              154,
+              104,
+              293,
+              150,
+              117,
+              297,
+              151,
+              188,
+              294,
+              154,
+              104,
+              293
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "日 本 語 中 国 語",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 152,
+                "piece": "æ",
+                "text": "�",
+                "bytes_hex": "e6",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 184,
+                "piece": "Ĺ",
+                "text": "�",
+                "bytes_hex": "97",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 339,
+                "piece": "¥</w>",
+                "text": "� ",
+                "bytes_hex": "a5 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 152,
+                "piece": "æ",
+                "text": "�",
+                "bytes_hex": "e6",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 189,
+                "piece": "ľ",
+                "text": "�",
+                "bytes_hex": "9c",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 319,
+                "piece": "¬</w>",
+                "text": "� ",
+                "bytes_hex": "ac 20",
+                "special": false
+              },
+              {
+                "index": 7,
+                "id": 154,
+                "piece": "è",
+                "text": "�",
+                "bytes_hex": "e8",
+                "special": false
+              },
+              {
+                "index": 8,
+                "id": 104,
+                "piece": "ª",
+                "text": "�",
+                "bytes_hex": "aa",
+                "special": false
+              },
+              {
+                "index": 9,
+                "id": 293,
+                "piece": "ŀ</w>",
+                "text": "� ",
+                "bytes_hex": "9e 20",
+                "special": false
+              },
+              {
+                "index": 10,
+                "id": 150,
+                "piece": "ä",
+                "text": "�",
+                "bytes_hex": "e4",
+                "special": false
+              },
+              {
+                "index": 11,
+                "id": 117,
+                "piece": "¸",
+                "text": "�",
+                "bytes_hex": "b8",
+                "special": false
+              },
+              {
+                "index": 12,
+                "id": 297,
+                "piece": "Ń</w>",
+                "text": "� ",
+                "bytes_hex": "ad 20",
+                "special": false
+              },
+              {
+                "index": 13,
+                "id": 151,
+                "piece": "å",
+                "text": "�",
+                "bytes_hex": "e5",
+                "special": false
+              },
+              {
+                "index": 14,
+                "id": 188,
+                "piece": "Ľ",
+                "text": "�",
+                "bytes_hex": "9b",
+                "special": false
+              },
+              {
+                "index": 15,
+                "id": 294,
+                "piece": "½</w>",
+                "text": "� ",
+                "bytes_hex": "bd 20",
+                "special": false
+              },
+              {
+                "index": 16,
+                "id": 154,
+                "piece": "è",
+                "text": "�",
+                "bytes_hex": "e8",
+                "special": false
+              },
+              {
+                "index": 17,
+                "id": 104,
+                "piece": "ª",
+                "text": "�",
+                "bytes_hex": "aa",
+                "special": false
+              },
+              {
+                "index": 18,
+                "id": 293,
+                "piece": "ŀ</w>",
+                "text": "� ",
+                "bytes_hex": "9e 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  152,
+                  184,
+                  339
+                ],
+                "text": "日 "
+              },
+              {
+                "ids": [
+                  152,
+                  189,
+                  319
+                ],
+                "text": "本 "
+              },
+              {
+                "ids": [
+                  154,
+                  104,
+                  293
+                ],
+                "text": "語 "
+              },
+              {
+                "ids": [
+                  150,
+                  117,
+                  297
+                ],
+                "text": "中 "
+              },
+              {
+                "ids": [
+                  151,
+                  188,
+                  294
+                ],
+                "text": "国 "
+              },
+              {
+                "ids": [
+                  154,
+                  104,
+                  293
+                ],
+                "text": "語 "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sdxl-pipe",
+      "mode": "text",
+      "text": "A\u0000B​C�D",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 3,
+            "ids": [
+              555,
+              68,
+              196
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "abcd",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 555,
+                "piece": "ab",
+                "text": "ab",
+                "bytes_hex": "61 62",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 68,
+                "piece": "c",
+                "text": "c",
+                "bytes_hex": "63",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 196,
+                "piece": "d</w>",
+                "text": "d ",
+                "bytes_hex": "64 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  555
+                ],
+                "text": "ab"
+              },
+              {
+                "ids": [
+                  68
+                ],
+                "text": "c"
+              },
+              {
+                "ids": [
+                  196
+                ],
+                "text": "d "
+              }
+            ]
+          },
+          {
+            "name": "tokenizer_2",
+            "source": "",
+            "count": 3,
+            "ids": [
+              555,
+              68,
+              196
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "abcd",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 555,
+                "piece": "ab",
+                "text": "ab",
+                "bytes_hex": "61 62",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 68,
+                "piece": "c",
+                "text": "c",
+                "bytes_hex": "63",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 196,
+                "piece": "d</w>",
+                "text": "d ",
+                "bytes_hex": "64 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  555
+                ],
+                "text": "ab"
+              },
+              {
+                "ids": [
+                  68
+                ],
+                "text": "c"
+              },
+              {
+                "ids": [
+                  196
+                ],
+                "text": "d "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sdxl-pipe",
+      "mode": "text",
+      "text": "ΟΣ όΣ ABC",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 10,
+            "ids": [
+              137,
+              124,
+              138,
+              262,
+              138,
+              173,
+              138,
+              262,
+              555,
+              224
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "ος ός abc",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 137,
+                "piece": "Î",
+                "text": "�",
+                "bytes_hex": "ce",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 124,
+                "piece": "¿",
+                "text": "�",
+                "bytes_hex": "bf",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 138,
+                "piece": "Ï",
+                "text": "�",
+                "bytes_hex": "cf",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 262,
+                "piece": "Ĥ</w>",
+                "text": "� ",
+                "bytes_hex": "82 20",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 138,
+                "piece": "Ï",
+                "text": "�",
+                "bytes_hex": "cf",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 173,
+                "piece": "Į",
+                "text": "�",
+                "bytes_hex": "8c",
+                "special": false
+              },
+              {
+                "index": 7,
+                "id": 138,
+                "piece": "Ï",
+                "text": "�",
+                "bytes_hex": "cf",
+                "special": false
+              },
+              {
+                "index": 8,
+                "id": 262,
+                "piece": "Ĥ</w>",
+                "text": "� ",
+                "bytes_hex": "82 20",
+                "special": false
+              },
+              {
+                "index": 9,
+                "id": 555,
+                "piece": "ab",
+                "text": "ab",
+                "bytes_hex": "61 62",
+                "special": false
+              },
+              {
+                "index": 10,
+                "id": 224,
+                "piece": "c</w>",
+                "text": "c ",
+                "bytes_hex": "63 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  137,
+                  124
+                ],
+                "text": "ο"
+              },
+              {
+                "ids": [
+                  138,
+                  262
+                ],
+                "text": "ς "
+              },
+              {
+                "ids": [
+                  138,
+                  173
+                ],
+                "text": "ό"
+              },
+              {
+                "ids": [
+                  138,
+                  262
+                ],
+                "text": "ς "
+              },
+              {
+                "ids": [
+                  555
+                ],
+                "text": "ab"
+              },
+              {
+                "ids": [
+                  224
+                ],
+                "text": "c "
+              }
+            ]
+          },
+          {
+            "name": "tokenizer_2",
+            "source": "",
+            "count": 10,
+            "ids": [
+              137,
+              124,
+              138,
+              262,
+              138,
+              173,
+              138,
+              262,
+              555,
+              224
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "ος ός abc",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 137,
+                "piece": "Î",
+                "text": "�",
+                "bytes_hex": "ce",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 124,
+                "piece": "¿",
+                "text": "�",
+                "bytes_hex": "bf",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 138,
+                "piece": "Ï",
+                "text": "�",
+                "bytes_hex": "cf",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 262,
+                "piece": "Ĥ</w>",
+                "text": "� ",
+                "bytes_hex": "82 20",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 138,
+                "piece": "Ï",
+                "text": "�",
+                "bytes_hex": "cf",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 173,
+                "piece": "Į",
+                "text": "�",
+                "bytes_hex": "8c",
+                "special": false
+              },
+              {
+                "index": 7,
+                "id": 138,
+                "piece": "Ï",
+                "text": "�",
+                "bytes_hex": "cf",
+                "special": false
+              },
+              {
+                "index": 8,
+                "id": 262,
+                "piece": "Ĥ</w>",
+                "text": "� ",
+                "bytes_hex": "82 20",
+                "special": false
+              },
+              {
+                "index": 9,
+                "id": 555,
+                "piece": "ab",
+                "text": "ab",
+                "bytes_hex": "61 62",
+                "special": false
+              },
+              {
+                "index": 10,
+                "id": 224,
+                "piece": "c</w>",
+                "text": "c ",
+                "bytes_hex": "63 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  137,
+                  124
+                ],
+                "text": "ο"
+              },
+              {
+                "ids": [
+                  138,
+                  262
+                ],
+                "text": "ς "
+              },
+              {
+                "ids": [
+                  138,
+                  173
+                ],
+                "text": "ό"
+              },
+              {
+                "ids": [
+                  138,
+                  262
+                ],
+                "text": "ς "
+              },
+              {
+                "ids": [
+                  555
+                ],
+                "text": "ab"
+              },
+              {
+                "ids": [
+                  224
+                ],
+                "text": "c "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sdxl-pipe",
+      "mode": "text",
+      "text": "ΟΣ\u0000Α",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 6,
+            "ids": [
+              137,
+              124,
+              138,
+              164,
+              137,
+              200
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "οσα",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 137,
+                "piece": "Î",
+                "text": "�",
+                "bytes_hex": "ce",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 124,
+                "piece": "¿",
+                "text": "�",
+                "bytes_hex": "bf",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 138,
+                "piece": "Ï",
+                "text": "�",
+                "bytes_hex": "cf",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 164,
+                "piece": "ĥ",
+                "text": "�",
+                "bytes_hex": "83",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 137,
+                "piece": "Î",
+                "text": "�",
+                "bytes_hex": "ce",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 200,
+                "piece": "±</w>",
+                "text": "� ",
+                "bytes_hex": "b1 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  137,
+                  124
+                ],
+                "text": "ο"
+              },
+              {
+                "ids": [
+                  138,
+                  164
+                ],
+                "text": "σ"
+              },
+              {
+                "ids": [
+                  137,
+                  200
+                ],
+                "text": "α "
+              }
+            ]
+          },
+          {
+            "name": "tokenizer_2",
+            "source": "",
+            "count": 6,
+            "ids": [
+              137,
+              124,
+              138,
+              164,
+              137,
+              200
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "οσα",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 137,
+                "piece": "Î",
+                "text": "�",
+                "bytes_hex": "ce",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 124,
+                "piece": "¿",
+                "text": "�",
+                "bytes_hex": "bf",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 138,
+                "piece": "Ï",
+                "text": "�",
+                "bytes_hex": "cf",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 164,
+                "piece": "ĥ",
+                "text": "�",
+                "bytes_hex": "83",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 137,
+                "piece": "Î",
+                "text": "�",
+                "bytes_hex": "ce",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 200,
+                "piece": "±</w>",
+                "text": "� ",
+                "bytes_hex": "b1 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  137,
+                  124
+                ],
+                "text": "ο"
+              },
+              {
+                "ids": [
+                  138,
+                  164
+                ],
+                "text": "σ"
+              },
+              {
+                "ids": [
+                  137,
+                  200
+                ],
+                "text": "α "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sdxl-pipe",
+      "mode": "text",
+      "text": "a\u000bb",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 2,
+            "ids": [
+              66,
+              212
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "ab",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 66,
+                "piece": "a",
+                "text": "a",
+                "bytes_hex": "61",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 212,
+                "piece": "b</w>",
+                "text": "b ",
+                "bytes_hex": "62 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  66
+                ],
+                "text": "a"
+              },
+              {
+                "ids": [
+                  212
+                ],
+                "text": "b "
+              }
+            ]
+          },
+          {
+            "name": "tokenizer_2",
+            "source": "",
+            "count": 2,
+            "ids": [
+              66,
+              212
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "ab",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 66,
+                "piece": "a",
+                "text": "a",
+                "bytes_hex": "61",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 212,
+                "piece": "b</w>",
+                "text": "b ",
+                "bytes_hex": "62 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  66
+                ],
+                "text": "a"
+              },
+              {
+                "ids": [
+                  212
+                ],
+                "text": "b "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sdxl-pipe",
+      "mode": "text",
+      "text": "&amp; test",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 6,
+            "ids": [
+              352,
+              426,
+              217,
+              317,
+              85,
+              584
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "& amp ; test",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 352,
+                "piece": "&</w>",
+                "text": "& ",
+                "bytes_hex": "26 20",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 426,
+                "piece": "am",
+                "text": "am",
+                "bytes_hex": "61 6d",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 217,
+                "piece": "p</w>",
+                "text": "p ",
+                "bytes_hex": "70 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 317,
+                "piece": ";</w>",
+                "text": "; ",
+                "bytes_hex": "3b 20",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 85,
+                "piece": "t",
+                "text": "t",
+                "bytes_hex": "74",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 584,
+                "piece": "est</w>",
+                "text": "est ",
+                "bytes_hex": "65 73 74 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  352
+                ],
+                "text": "& "
+              },
+              {
+                "ids": [
+                  426
+                ],
+                "text": "am"
+              },
+              {
+                "ids": [
+                  217
+                ],
+                "text": "p "
+              },
+              {
+                "ids": [
+                  317
+                ],
+                "text": "; "
+              },
+              {
+                "ids": [
+                  85
+                ],
+                "text": "t"
+              },
+              {
+                "ids": [
+                  584
+                ],
+                "text": "est "
+              }
+            ]
+          },
+          {
+            "name": "tokenizer_2",
+            "source": "",
+            "count": 6,
+            "ids": [
+              352,
+              426,
+              217,
+              317,
+              85,
+              584
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "& amp ; test",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 352,
+                "piece": "&</w>",
+                "text": "& ",
+                "bytes_hex": "26 20",
+                "special": false
+              },
+              {
+                "index": 2,
+                "id": 426,
+                "piece": "am",
+                "text": "am",
+                "bytes_hex": "61 6d",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 217,
+                "piece": "p</w>",
+                "text": "p ",
+                "bytes_hex": "70 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 317,
+                "piece": ";</w>",
+                "text": "; ",
+                "bytes_hex": "3b 20",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 85,
+                "piece": "t",
+                "text": "t",
+                "bytes_hex": "74",
+                "special": false
+              },
+              {
+                "index": 6,
+                "id": 584,
+                "piece": "est</w>",
+                "text": "est ",
+                "bytes_hex": "65 73 74 20",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  352
+                ],
+                "text": "& "
+              },
+              {
+                "ids": [
+                  426
+                ],
+                "text": "am"
+              },
+              {
+                "ids": [
+                  217
+                ],
+                "text": "p "
+              },
+              {
+                "ids": [
+                  317
+                ],
+                "text": "; "
+              },
+              {
+                "ids": [
+                  85
+                ],
+                "text": "t"
+              },
+              {
+                "ids": [
+                  584
+                ],
+                "text": "est "
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sdxl-pipe",
+      "mode": "text",
+      "text": "",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 0,
+            "ids": [],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "",
+            "tokens": [],
+            "groups": []
+          },
+          {
+            "name": "tokenizer_2",
+            "source": "",
+            "count": 0,
+            "ids": [],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "",
+            "tokens": [],
+            "groups": []
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sdxl-pipe",
+      "mode": "text",
+      "text": "<|startoftext|> cat <|endoftext|>",
+      "result": {
+        "input_mode": "text",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 4,
+            "ids": [
+              0,
+              68,
+              434,
+              1
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "<|startoftext|>cat <|endoftext|>",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 0,
+                "piece": "<|startoftext|>",
+                "text": "<|startoftext|>",
+                "bytes_hex": "3c 7c 73 74 61 72 74 6f 66 74 65 78 74 7c 3e",
+                "special": true
+              },
+              {
+                "index": 2,
+                "id": 68,
+                "piece": "c",
+                "text": "c",
+                "bytes_hex": "63",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 434,
+                "piece": "at</w>",
+                "text": "at ",
+                "bytes_hex": "61 74 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 1,
+                "piece": "<|endoftext|>",
+                "text": "<|endoftext|>",
+                "bytes_hex": "3c 7c 65 6e 64 6f 66 74 65 78 74 7c 3e",
+                "special": true
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  0
+                ],
+                "text": "<|startoftext|>"
+              },
+              {
+                "ids": [
+                  68
+                ],
+                "text": "c"
+              },
+              {
+                "ids": [
+                  434
+                ],
+                "text": "at "
+              },
+              {
+                "ids": [
+                  1
+                ],
+                "text": "<|endoftext|>"
+              }
+            ]
+          },
+          {
+            "name": "tokenizer_2",
+            "source": "",
+            "count": 4,
+            "ids": [
+              0,
+              68,
+              434,
+              1
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "<|startoftext|>cat <|endoftext|>",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 0,
+                "piece": "<|startoftext|>",
+                "text": "<|startoftext|>",
+                "bytes_hex": "3c 7c 73 74 61 72 74 6f 66 74 65 78 74 7c 3e",
+                "special": true
+              },
+              {
+                "index": 2,
+                "id": 68,
+                "piece": "c",
+                "text": "c",
+                "bytes_hex": "63",
+                "special": false
+              },
+              {
+                "index": 3,
+                "id": 434,
+                "piece": "at</w>",
+                "text": "at ",
+                "bytes_hex": "61 74 20",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 1,
+                "piece": "<|endoftext|>",
+                "text": "<|endoftext|>",
+                "bytes_hex": "3c 7c 65 6e 64 6f 66 74 65 78 74 7c 3e",
+                "special": true
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  0
+                ],
+                "text": "<|startoftext|>"
+              },
+              {
+                "ids": [
+                  68
+                ],
+                "text": "c"
+              },
+              {
+                "ids": [
+                  434
+                ],
+                "text": "at "
+              },
+              {
+                "ids": [
+                  1
+                ],
+                "text": "<|endoftext|>"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "profile": "tiny-sdxl-pipe",
+      "mode": "ids",
+      "text": "0, 1, 2, 512, 513",
+      "result": {
+        "input_mode": "ids",
+        "streams": [
+          {
+            "name": "tokenizer",
+            "source": "",
+            "count": 5,
+            "ids": [
+              0,
+              1,
+              2,
+              512,
+              513
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "<|startoftext|><|endoftext|>! his  sh",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 0,
+                "piece": "<|startoftext|>",
+                "text": "<|startoftext|>",
+                "bytes_hex": "3c 7c 73 74 61 72 74 6f 66 74 65 78 74 7c 3e",
+                "special": true
+              },
+              {
+                "index": 2,
+                "id": 1,
+                "piece": "<|endoftext|>",
+                "text": "<|endoftext|>",
+                "bytes_hex": "3c 7c 65 6e 64 6f 66 74 65 78 74 7c 3e",
+                "special": true
+              },
+              {
+                "index": 3,
+                "id": 2,
+                "piece": "!",
+                "text": "!",
+                "bytes_hex": "21",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 512,
+                "piece": "Ġhis</w>",
+                "text": " his ",
+                "bytes_hex": "20 68 69 73 20",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 513,
+                "piece": "Ġsh",
+                "text": " sh",
+                "bytes_hex": "20 73 68",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  0
+                ],
+                "text": "<|startoftext|>"
+              },
+              {
+                "ids": [
+                  1
+                ],
+                "text": "<|endoftext|>"
+              },
+              {
+                "ids": [
+                  2
+                ],
+                "text": "!"
+              },
+              {
+                "ids": [
+                  512
+                ],
+                "text": " his "
+              },
+              {
+                "ids": [
+                  513
+                ],
+                "text": " sh"
+              }
+            ]
+          },
+          {
+            "name": "tokenizer_2",
+            "source": "",
+            "count": 5,
+            "ids": [
+              0,
+              1,
+              2,
+              512,
+              513
+            ],
+            "content_capacity": 75,
+            "bos_id": 0,
+            "eos_id": 1,
+            "pad_id": 1,
+            "decoded": "<|startoftext|><|endoftext|>! his  sh",
+            "tokens": [
+              {
+                "index": 1,
+                "id": 0,
+                "piece": "<|startoftext|>",
+                "text": "<|startoftext|>",
+                "bytes_hex": "3c 7c 73 74 61 72 74 6f 66 74 65 78 74 7c 3e",
+                "special": true
+              },
+              {
+                "index": 2,
+                "id": 1,
+                "piece": "<|endoftext|>",
+                "text": "<|endoftext|>",
+                "bytes_hex": "3c 7c 65 6e 64 6f 66 74 65 78 74 7c 3e",
+                "special": true
+              },
+              {
+                "index": 3,
+                "id": 2,
+                "piece": "!",
+                "text": "!",
+                "bytes_hex": "21",
+                "special": false
+              },
+              {
+                "index": 4,
+                "id": 512,
+                "piece": "Ġhis</w>",
+                "text": " his ",
+                "bytes_hex": "20 68 69 73 20",
+                "special": false
+              },
+              {
+                "index": 5,
+                "id": 513,
+                "piece": "Ġsh",
+                "text": " sh",
+                "bytes_hex": "20 73 68",
+                "special": false
+              }
+            ],
+            "groups": [
+              {
+                "ids": [
+                  0
+                ],
+                "text": "<|startoftext|>"
+              },
+              {
+                "ids": [
+                  1
+                ],
+                "text": "<|endoftext|>"
+              },
+              {
+                "ids": [
+                  2
+                ],
+                "text": "!"
+              },
+              {
+                "ids": [
+                  512
+                ],
+                "text": " his "
+              },
+              {
+                "ids": [
+                  513
+                ],
+                "text": " sh"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

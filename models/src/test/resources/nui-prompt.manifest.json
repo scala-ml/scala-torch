@@ -1,0 +1,10 @@
+{
+  "source": "stablediffusion-nui/python/sdfx/prompt.py",
+  "source_sha256": "397e6198cefc5920c19e43e39a776dd57d21e4ba394de21e6bad579e441ef59b",
+  "fixture_sha256": "90e7d29d846f4c954dd39e4caffc29e30db1d50d2474ad4dcbbcd08d944a61dd",
+  "cases": 122,
+  "tokenizer": "Unicode code points; BOS=1 EOS=2 PAD=0 comma=44",
+  "chunk_length": 75,
+  "comma_backtrack": 20,
+  "random_seed": 42
+}

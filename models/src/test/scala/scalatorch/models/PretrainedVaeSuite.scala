@@ -294,8 +294,66 @@ class PretrainedVaeSuite extends munit.FunSuite:
     val pipeline=new EulerImagePipeline(tokenizer,PretrainedClip.load(clipDir),PretrainedUNet.load(unetDir),PretrainedVae.load(vaeDir))
     val schedule=DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true).euler(2)
     val request=DiffusionImageRequest("a red cat","a blue boat",10,6,42L,guidanceScale=3f)
+    val dpmSchedule=DpmSchedule.karras(DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true),3)
+    val dpmProgress=scala.collection.mutable.ArrayBuffer.empty[Int]
+    val dpmImage=pipeline.generateDpm(request,dpmSchedule,onProgress=p => dpmProgress+=p.completedSteps)
+    val referenceNoise=Tensor.fromFloats(Array.tabulate(60)(i => (i%7-3)*.125f),Shape.from(Seq(1,4,3,5)))
+    val referenceImage=pipeline.generateDpm(request,dpmSchedule,noise=Some(referenceNoise))
+    val referenceStream=getClass.getResourceAsStream("/dpm/image-f32.bin")
+    val referenceBytes=try referenceStream.readAllBytes() finally referenceStream.close()
+    verify(new java.io.ByteArrayInputStream(referenceBytes),
+      "4dbb24c34998d8f1bce8a241cc875573f039485a819cec5eff1f527b1c4c4db4")
+    val referenceBuffer=ByteBuffer.wrap(referenceBytes).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+    val expectedImage=new Array[Float](referenceBuffer.remaining())
+    referenceBuffer.get(expectedImage)
+    assertEquals(referenceImage.toFloatArray.length,expectedImage.length)
+    val imageError=referenceImage.toFloatArray.zip(expectedImage).map((a,b) => math.abs(a-b)).max
+    println(s"DPM full-image Diffusers maxAbsError=$imageError")
+    assert(imageError<1e-4f)
+    val brokenVae=pipeline.vae.copy(decoder=pipeline.vae.decoder.copy(maxFeatureElements=0))
+    val brokenPipeline=new EulerImagePipeline(pipeline.tokenizer,pipeline.textEncoder,pipeline.unet,brokenVae)
+    var finalLatents=referenceNoise
+    val decodeFailure=intercept[VaeDecodeFailure] {
+      brokenPipeline.generateDpm(request,dpmSchedule,noise=Some(referenceNoise),onProgress=p => finalLatents=p.latents)
+    }
+    assertEquals(decodeFailure.decoderInput.toFloatArray.toVector,
+      finalLatents.toFloatArray.toVector.map(_*(1/pipeline.vae.config.scalingFactor).toFloat))
+    val skipped=pipeline.generateDpm(request.copy(clipSkip=2),dpmSchedule,noise=Some(referenceNoise))
+    val skippedStream=getClass.getResourceAsStream("/dpm/image-clip-skip2-f32.bin")
+    val skippedBytes=try skippedStream.readAllBytes() finally skippedStream.close()
+    verify(new java.io.ByteArrayInputStream(skippedBytes),"7bcc17a2d2a1321816f913ad65a564e5fd0dae4e5dbf59522e299d40085e75ee")
+    val skippedBuffer=ByteBuffer.wrap(skippedBytes).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+    val skippedExpected=new Array[Float](skippedBuffer.remaining())
+    skippedBuffer.get(skippedExpected)
+    val skippedError=skipped.toFloatArray.zip(skippedExpected).map((a,b) => math.abs(a-b)).max
+    println(s"CLIP skip2 full-image Diffusers maxAbsError=$skippedError")
+    assert(skippedError<1e-4f)
+    assert(skipped.toFloatArray.toVector!=referenceImage.toFloatArray.toVector)
+    intercept[IllegalArgumentException](pipeline.generateDpm(request.copy(clipSkip=0),dpmSchedule))
+    intercept[IllegalArgumentException](pipeline.generateDpm(request.copy(clipSkip=1000),dpmSchedule))
+    assertEquals(dpmProgress.toVector,Vector(1,2,3))
+    assert(dpmImage.toFloatArray.forall(_.isFinite))
+    assertEquals(dpmImage.toFloatArray.toVector,pipeline.generateDpm(request,dpmSchedule).toFloatArray.toVector)
+    val baseLatents=pipeline.generateDpmLatents(request,dpmSchedule)
+    assertEquals(baseLatents.shape,Shape.from(Seq(1L,4L,3L,5L)),"latent output geometry")
+    val encoderMustNotRun=pipeline.vae.copy(encoder=pipeline.vae.encoder.copy(maxFeatureElements=0))
+    val latentSourcePipeline=new EulerImagePipeline(pipeline.tokenizer,pipeline.textEncoder,pipeline.unet,encoderMustNotRun)
+    val secondPass=latentSourcePipeline.generateDpm(request,dpmSchedule,
+      latentSource=Some(DiffusionLatentSource(baseLatents,0.5)))
+    assertEquals(secondPass.shape,Shape.from(Seq(1L,3L,6L,10L)),"latent source decode geometry")
+    assert(secondPass.toFloatArray.forall(_.isFinite),"latent-source output must be finite")
+    var dpmCancel=false
+    intercept[java.util.concurrent.CancellationException] {
+      pipeline.generateDpm(request,dpmSchedule,onProgress=_ => dpmCancel=true,cancelled=() => dpmCancel)
+    }
+    assertEquals(dpmImage.toFloatArray.toVector,pipeline.generateDpm(request,dpmSchedule).toFloatArray.toVector)
     val progress=scala.collection.mutable.ArrayBuffer.empty[Int]
     val image=pipeline.generate(request,schedule,onProgress=p => progress+=p.completedSteps)
+    assertEquals(image.toFloatArray.toVector,
+      pipeline.generate(request,schedule,prediction=DiffusionPrediction.Epsilon).toFloatArray.toVector)
+    val velocityImage=pipeline.generate(request,schedule,prediction=DiffusionPrediction.VPrediction)
+    assert(velocityImage.toFloatArray.forall(_.isFinite))
+    assert(image.toFloatArray.zip(velocityImage.toFloatArray).exists((a,b) => math.abs(a-b)>1e-5))
     assertEquals(progress.toVector,Vector(1,2))
     assertEquals(image.shape,Shape.from(Seq(1,3,6,10)))
     assert(image.toFloatArray.forall(_.isFinite))

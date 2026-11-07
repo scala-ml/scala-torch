@@ -2,6 +2,140 @@
 .version 6.0
 .target sm_50
 .address_size 64
+.visible .entry gemm_tiled(
+  .param .u64 a, .param .u64 b, .param .u64 c,
+  .param .u32 m, .param .u32 n, .param .u32 k, .param .u32 ldc
+) {
+  .reg .pred p;
+  .reg .b32 r<32>;
+  .reg .b64 d<16>;
+  .reg .f32 f<4>;
+  .shared .align 4 .b8 tileA[1024];
+  .shared .align 4 .b8 tileB[1024];
+  ld.param.u64 d0,[a]; ld.param.u64 d1,[b]; ld.param.u64 d2,[c];
+  ld.param.u32 r0,[m]; ld.param.u32 r1,[n]; ld.param.u32 r2,[k]; ld.param.u32 r3,[ldc];
+  mov.u32 r4,%tid.x; and.b32 r5,r4,15; shr.u32 r6,r4,4;
+  mov.u32 r7,%ctaid.x; add.u32 r8,r1,15; shr.u32 r8,r8,4;
+  rem.u32 r9,r7,r8; div.u32 r10,r7,r8; shl.b32 r9,r9,4; shl.b32 r10,r10,4;
+  add.u32 r11,r9,r5; add.u32 r12,r10,r6;
+  mov.f32 f0,0f00000000; mov.u32 r13,0;
+TILE_LOOP:
+  setp.lt.u32 p,r13,r2; @!p bra TILE_DONE;
+  add.u32 r14,r13,r5; setp.lt.u32 p,r12,r0; @p setp.lt.u32 p,r14,r2;
+  @!p bra A_ZERO;
+  mad.lo.u32 r15,r12,r2,r14; mul.wide.u32 d3,r15,4; add.u64 d4,d0,d3;
+  ld.global.f32 f1,[d4]; bra A_READY;
+A_ZERO:
+  mov.f32 f1,0f00000000;
+A_READY:
+  shl.b32 r16,r6,4; add.u32 r16,r16,r5; shl.b32 r16,r16,2;
+  mov.u64 d5,tileA; cvt.u64.u32 d13,r16; add.u64 d5,d5,d13; st.shared.f32 [d5],f1;
+  add.u32 r17,r13,r6; setp.lt.u32 p,r17,r2; @p setp.lt.u32 p,r11,r1;
+  @!p bra B_ZERO;
+  mad.lo.u32 r18,r17,r1,r11; mul.wide.u32 d6,r18,4; add.u64 d7,d1,d6;
+  ld.global.f32 f2,[d7]; bra B_READY;
+B_ZERO:
+  mov.f32 f2,0f00000000;
+B_READY:
+  shl.b32 r19,r6,4; add.u32 r19,r19,r5; shl.b32 r19,r19,2;
+  mov.u64 d8,tileB; cvt.u64.u32 d13,r19; add.u64 d8,d8,d13; st.shared.f32 [d8],f2;
+  bar.sync 0;
+  mov.u32 r20,0;
+K_LOOP:
+  setp.ge.u32 p,r20,16; @p bra K_DONE;
+  shl.b32 r21,r6,4; add.u32 r21,r21,r20; shl.b32 r21,r21,2;
+  mov.u64 d9,tileA; cvt.u64.u32 d13,r21; add.u64 d9,d9,d13; ld.shared.f32 f1,[d9];
+  shl.b32 r22,r20,4; add.u32 r22,r22,r5; shl.b32 r22,r22,2;
+  mov.u64 d10,tileB; cvt.u64.u32 d13,r22; add.u64 d10,d10,d13; ld.shared.f32 f2,[d10];
+  fma.rn.f32 f0,f1,f2,f0; add.u32 r20,r20,1; bra K_LOOP;
+K_DONE:
+  bar.sync 0; add.u32 r13,r13,16; bra TILE_LOOP;
+TILE_DONE:
+  setp.lt.u32 p,r12,r0; @!p bra GEMM_DONE; setp.lt.u32 p,r11,r1; @!p bra GEMM_DONE;
+  mad.lo.u32 r23,r12,r3,r11; mul.wide.u32 d11,r23,4; add.u64 d12,d2,d11;
+  st.global.f32 [d12],f0;
+GEMM_DONE:
+  ret;
+}
+
+.visible .entry gemm_conv_n32(
+  .param .u64 a, .param .u64 b, .param .u64 c,
+  .param .u32 m, .param .u32 n, .param .u32 k, .param .u32 ldc, .param .u32 ldb
+) {
+  .reg .pred p<4>;
+  .reg .b32 r<32>;
+  .reg .b64 d<16>;
+  .reg .f32 f<8>;
+  .shared .align 4 .b8 tileA[2048];
+  .shared .align 4 .b8 tileB[4096];
+  ld.param.u64 d0,[a]; ld.param.u64 d1,[b]; ld.param.u64 d2,[c];
+  ld.param.u32 r0,[m]; ld.param.u32 r1,[n]; ld.param.u32 r2,[k]; ld.param.u32 r3,[ldc]; ld.param.u32 r24,[ldb];
+  mov.u32 r4,%tid.x; and.b32 r5,r4,15; shr.u32 r6,r4,4;
+  mov.u32 r7,%ctaid.x; add.u32 r8,r1,31; shr.u32 r8,r8,5;
+  rem.u32 r9,r7,r8; div.u32 r10,r7,r8; shl.b32 r9,r9,5; shl.b32 r10,r10,4;
+  add.u32 r11,r10,r6; add.u32 r12,r9,r5; add.u32 r13,r12,16;
+  mov.f32 f0,0f00000000; mov.f32 f1,0f00000000; mov.u32 r14,0;
+CONV_N32_K:
+  setp.ge.u32 p0,r14,r2; @p0 bra CONV_N32_STORE;
+  add.u32 r15,r14,r5; add.u32 r16,r15,16;
+  mad.lo.u32 r20,r11,r2,r15; mul.wide.u32 d3,r20,4; add.u64 d4,d0,d3;
+  mov.f32 f2,0f00000000; setp.lt.u32 p0,r11,r0; setp.lt.u32 p1,r15,r2; and.pred p0,p0,p1;
+  @p0 ld.global.f32 f2,[d4];
+  mul.lo.u32 r20,r6,32; add.u32 r20,r20,r5; mul.wide.u32 d5,r20,4;
+  mov.u64 d6,tileA; add.u64 d7,d6,d5; st.shared.f32 [d7],f2;
+  mad.lo.u32 r20,r11,r2,r16; mul.wide.u32 d3,r20,4; add.u64 d4,d0,d3;
+  mov.f32 f2,0f00000000; setp.lt.u32 p0,r11,r0; setp.lt.u32 p1,r16,r2; and.pred p0,p0,p1;
+  @p0 ld.global.f32 f2,[d4];
+  mul.lo.u32 r21,r6,32; add.u32 r21,r21,r5; add.u32 r21,r21,16;
+  mul.wide.u32 d5,r21,4; add.u64 d7,d6,d5; st.shared.f32 [d7],f2;
+
+  add.u32 r17,r14,r6; add.u32 r18,r17,16;
+  mad.lo.u32 r20,r17,r24,r12; mul.wide.u32 d3,r20,4; add.u64 d4,d1,d3;
+  mov.f32 f2,0f00000000; setp.lt.u32 p0,r17,r2; setp.lt.u32 p1,r12,r1; and.pred p0,p0,p1;
+  @p0 ld.global.f32 f2,[d4];
+  mul.lo.u32 r20,r6,32; add.u32 r20,r20,r5; mul.wide.u32 d5,r20,4;
+  mov.u64 d8,tileB; add.u64 d9,d8,d5; st.shared.f32 [d9],f2;
+  mad.lo.u32 r20,r17,r24,r13; mul.wide.u32 d3,r20,4; add.u64 d4,d1,d3;
+  mov.f32 f2,0f00000000; setp.lt.u32 p0,r17,r2; setp.lt.u32 p1,r13,r1; and.pred p0,p0,p1;
+  @p0 ld.global.f32 f2,[d4];
+  mul.lo.u32 r21,r6,32; add.u32 r21,r21,r5; add.u32 r21,r21,16;
+  mul.wide.u32 d5,r21,4; add.u64 d9,d8,d5; st.shared.f32 [d9],f2;
+  mad.lo.u32 r20,r18,r24,r12; mul.wide.u32 d3,r20,4; add.u64 d4,d1,d3;
+  mov.f32 f2,0f00000000; setp.lt.u32 p0,r18,r2; setp.lt.u32 p1,r12,r1; and.pred p0,p0,p1;
+  @p0 ld.global.f32 f2,[d4];
+  mul.lo.u32 r20,r6,32; add.u32 r20,r20,r5; add.u32 r20,r20,512; mul.wide.u32 d5,r20,4;
+  add.u64 d9,d8,d5; st.shared.f32 [d9],f2;
+  mad.lo.u32 r20,r18,r24,r13; mul.wide.u32 d3,r20,4; add.u64 d4,d1,d3;
+  mov.f32 f2,0f00000000; setp.lt.u32 p0,r18,r2; setp.lt.u32 p1,r13,r1; and.pred p0,p0,p1;
+  @p0 ld.global.f32 f2,[d4];
+  add.u32 r20,r6,16; mul.lo.u32 r20,r20,32; add.u32 r20,r20,r5; add.u32 r20,r20,16; mul.wide.u32 d5,r20,4;
+  add.u64 d9,d8,d5; st.shared.f32 [d9],f2;
+  bar.sync 0;
+  mov.u32 r19,0;
+CONV_N32_DOT:
+  setp.ge.u32 p0,r19,32; @p0 bra CONV_N32_DOT_DONE;
+  mul.lo.u32 r20,r6,32; add.u32 r20,r20,r19; mul.wide.u32 d3,r20,4;
+  mov.u64 d4,tileA; add.u64 d5,d4,d3; ld.shared.f32 f3,[d5];
+  mul.lo.u32 r20,r19,32; add.u32 r20,r20,r5; mul.wide.u32 d3,r20,4;
+  mov.u64 d4,tileB; add.u64 d5,d4,d3; ld.shared.f32 f4,[d5];
+  fma.rn.f32 f0,f3,f4,f0;
+  add.u32 r20,r20,16; mul.wide.u32 d3,r20,4; add.u64 d5,d4,d3; ld.shared.f32 f4,[d5];
+  fma.rn.f32 f1,f3,f4,f1;
+  add.u32 r19,r19,1; bra CONV_N32_DOT;
+CONV_N32_DOT_DONE:
+  bar.sync 0; add.u32 r14,r14,32; bra CONV_N32_K;
+CONV_N32_STORE:
+  setp.lt.u32 p0,r11,r0; setp.lt.u32 p1,r12,r1; and.pred p0,p0,p1;
+  @!p0 bra CONV_N32_STORE1;
+  mad.lo.u32 r20,r11,r3,r12; mul.wide.u32 d3,r20,4; add.u64 d4,d2,d3; st.global.f32 [d4],f0;
+CONV_N32_STORE1:
+  setp.lt.u32 p0,r11,r0; setp.lt.u32 p1,r13,r1; and.pred p0,p0,p1;
+  @!p0 bra CONV_N32_DONE;
+  mad.lo.u32 r20,r11,r3,r13; mul.wide.u32 d3,r20,4; add.u64 d4,d2,d3; st.global.f32 [d4],f1;
+CONV_N32_DONE:
+  ret;
+}
+
 .visible .entry gemm(
   .param .u64 a, .param .u64 b, .param .u64 c,
   .param .u32 m, .param .u32 n, .param .u32 k

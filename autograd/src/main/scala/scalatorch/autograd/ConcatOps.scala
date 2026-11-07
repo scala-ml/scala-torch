@@ -5,17 +5,8 @@ import scalatorch.*
 private[autograd] object ConcatOps:
   def apply(inputs: Seq[Variable],dim: Int): Variable =
     val values=inputs.toVector
-    require(values.nonEmpty,"concatenation requires at least one input")
-    val first=values.head.data.shape
-    require(dim>=0 && dim<first.rank,"concatenation axis out of range")
-    values.foreach { v =>
-      require(v.data.shape.rank==first.rank && first.dims.indices.forall(i =>
-        i==dim || v.data.shape.dims(i)==first.dims(i)),"concatenation dimensions mismatch")
-    }
-    val total=try values.foldLeft(0L)((n,v) => Math.addExact(n,v.data.shape.dims(dim)))
-      catch case _: ArithmeticException => throw IllegalArgumentException("concatenation axis overflows Long")
-    val shape=Shape.from(first.dims.updated(dim,total))
-    require(shape.numel<=Int.MaxValue,"concatenation output exceeds Int indexing")
+    val shape=ConcatLayout.outputShape(values.map(_.data.shape),dim)
+    val total=shape.dims(dim)
     val out=new Array[Float](shape.numel.toInt)
     if shape.numel>0 then
       val suffix=Shape.from(shape.dims.drop(dim+1)).numel

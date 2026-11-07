@@ -1,0 +1,169 @@
+# SD1.5 native acceptance work (2026-11-03)
+
+## Completed512x512 native txt2img
+
+The immutable-runtime retry completed512x512,20steps,DPM++2M/Karras,seed42,
+CFG7.5 with the prompt "a photograph of a red apple on a wooden table".
+No Python process was invoked. The standard FP32 SD1.5 weights below were used;
+CUDA U-Net/VAE offload with1GiB session limits, CPU CLIP/scheduler.
+Protocol result timing_s=1190.2307244 (~19m50s), process exit0, empty stderr.
+Other short GPU tests ran concurrently, so this is not a clean benchmark.
+
+Output: .superpowers/sd15-512-20-snapshot/native-597b8a88-ee25-482c-9dd4-9c1ec5692287.png
+SHA256:91bf121f5ae3a4bf0f4ad86110d91207a8400af5701dd3243bfe7196844421fd.
+Visually inspected at512px: one clearly recognizable red apple, stem/highlights,
+on brown wooden planks. This establishes a normal-resolution, recognizable
+SD1.5 native output for this request. It is not universal quality/parity,
+SDXL, complete extension support or packaged NUI acceptance.
+
+session80265 is now terminal/success; do not poll/restart it as live.
+A new immutable512px img2img run is active in session62925,output
+.superpowers/sd15-img2img-512-20. It uses this output as source, requests a green
+apple,20scheduled/10active steps,strength0.5,seed42. Result not yet observed.
+
+## Native img2img smoke
+
+After CUDA encoder implementation, the same standard FP32 SD1.5 checkpoint
+completed64x64 img2img,4scheduled/2active DPM++2M Karras steps,strength0.5,seed42,
+CFG7.5. Input was the previous64x64 txt2img smoke PNG. Both VAE encoder/decoder
+and U-Net use CUDA weight offload; posterior sampling,CLIP,scheduler stay CPU.
+Reported generation time40.1588288s includes concurrent original512px GPU work,
+so it is not an isolated benchmark. Process exited0 with empty stderr.
+Output: .superpowers/sd15-img2img-64-4/native-e6b913c1-1134-46cf-aa9a-0f2715d21db1.png
+SHA256:464c7367ee56f2d95886bd568e4de8d20458364aea24a7aa367c7890a1fac14e.
+Visually inspected: green/cyan/blue/black blobs, not recognizable apple content.
+This proves the normal-checkpoint execution path, not image quality.
+
+Reproducible direct-Java harness: scripts/run-native-diffusion.ps1, requiring
+ModelRoot,ClasspathFile,SchedulerConfig,OutputDirectory; optional InputImage
+switches to img2img, Strength defaults0.5. Side/Steps default512/20.
+It preserves request.json,protocol.jsonl,stderr.txt in a required-new output
+directory. CUDA offload1GiB per component and134217728 attention score work
+are explicit. No timeout/restart and no Python invocation. Supply an explicit
+compatible scheduler config; the harness does not claim PNDM support.
+
+Original512x512/20step txt2img reached step20 but did not publish a PNG.
+The worker thread exited with NoClassDefFoundError for NativeVaeRecovery during
+VAE failure recovery. Thread dumps confirmed no generation worker remained;
+GPU had returned to idle. Only then the orphaned Java33796 process was stopped
+to retrieve stderr (session11471 now terminal). The original VAE exception was
+masked by recovery class loading, so it does not identify a decoder math fault.
+The class exists in the current jar. Concurrent sbt jar replacement is suspected:
+the old process lazily loaded classes from mutable build output for44minutes.
+
+The acceptance harness now copies all14 classpath jars into output/.runtime
+before launch and records their SHA256 in runtime-manifest.json. A new512px20step
+run started in .superpowers/sd15-512-20-snapshot,session80265. It uses the current
+parallel attention implementation. Keep this same process until terminal;
+no final image or runtime speed claim is established yet.
+
+## Checkpoint and initial txt2img work
+
+Source: https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5
+Pinned revision:451f4fe16113bff5a5d2269ed5ad43b0592e9a14 (public SD1.5 mirror).
+The model card identifies CreativeML OpenRAIL-M. This local test does not publish
+or redistribute the weights. All model/config/tokenizer files are under ignored
+.superpowers/models/sd15; source-metadata.json records the upstream manifest.
+
+Downloaded original FP32 safetensors, verified against upstream SHA-256:
+- text_encoder/model.safetensors,492265874 bytes:
+  d008943c017f0092921106440254dbbe00b6a285f7883ec8ba160c3faad88334
+- unet/diffusion_pytorch_model.safetensors,3438167540 bytes:
+  19da7aaa4b880e59d56843f1fcb4dd9b599c28a1d9d9af7c1143057c8ffae9f1
+- vae/diffusion_pytorch_model.safetensors,334643276 bytes:
+  a2b5134f4dbc140d9c11f11cba3233099e00af40f262f136c691fb7d38d2194c
+
+Standard CLIP has a persistent text_model.embeddings.position_ids I64 buffer,
+absent in the tiny checkpoint. Loader now accepts only shape(1,maxPositions)
+and values0..maxPositions-1, matching implicit positions, without treating it as
+a trainable parameter. Unknown extra tensors remain rejected. A new single and
+sharded archive test failed before the fix and passed after; corrupt values and
+incorrect shape are rejected. PretrainedClipSuite passed8, including existing
+independent Candle outputs and dtype conversion tests.
+
+The local .superpowers/run-sd15.ps1 harness launches Java with-Xmx12g, CUDA U-Net
+and VAE operation-scoped weight offload,1GiB session budgets,134217728 score work
+limit. CLIP/schedulers remain CPU. It explicitly writes Euler-compatible noise
+settings from the original beta schedule; this is DPM++2M/Karras testing, not a
+claim to implement the checkpoint's original PNDM scheduler. Prompt is a photo
+of a red apple on a wooden table, seed42,CFG7.5. Protocol/stderr/output are under
+.superpowers/sd15-<side>-<steps>. No Python process is launched by this harness.
+64x64/two-step smoke completed in77.9136696s reported generation time. PNG:
+.superpowers/sd15-64-2/native-b0278d12-d2f4-4923-b4ac-3722b8832b1c.png
+Visually inspected: coarse green/yellow/black blobs, not recognizable prompt
+content or quality acceptance. Full512x512 and adequate sampling remain untested.
+Live jcmd sampling at53s showed the worker in Tensor.logicalArray/Layout.index
+while preparing a convolution weight upload. This identifies a host-copy
+optimization candidate; one stack sample is not a complete time profile.
+## Contiguous host-copy optimization
+
+Tensor.logicalArray uses System.arraycopy for contiguous layouts, including an
+explicit nonzero storage offset; strided layouts retain existing indexing.
+Fresh64x64/two-step run with otherwise identical Java/model/sampler settings
+reported31.6210033s versus77.9136696s before (~2.46x for this smoke run, not a
+controlled general benchmark). Both PNG files have SHA256
+92a0f854009740b088f484a538e401661333aff5c466df60f7ba5a7d478ecd86.
+Output remains the same coarse blobs. Core20, CUDA session/ops13, offloaded
+model2 tests passed; additional extraction coverage includes offsets, raw NaN/
+negative-zero bits and independent primitive arrays. Existing transpose/reverse/
+broadcast/empty cases pass. Further normal-resolution verification is in progress.
+## Live512px investigation
+
+During the first512px/20-step run (worker33796), jcmd at86s sampled CUDA
+attention in a Transformer. At131s it again sampled attention, now in the
+negative CFG prediction (UNetExecution line61) in the up path. Thus computation
+had advanced despite no completed-step event yet. GPU utilization was100% with
+about791MiB total memory at the earlier observation. No timeout/restart was done.
+The current kernel assigns an entire query row to one thread, including serial
+key dot products, exponentials and weighted sums across all value channels.
+At4096 keys the16MiB scratch cap admits512 query rows per slice; this limits
+parallelism. Candidate follow-up: parallel score generation and per-output-channel
+weighted sums while preserving per-dot/reduction arithmetic order and scratch cap.
+This is a code/stack observation, not a completed benchmark or proven speedup.
+## Parallel noncausal attention output channels
+
+Noncausal attention now has a prepare kernel that computes scores, maxima,
+exponentials and probabilities in the previous order, followed by one thread
+per(query row,value channel) for the weighted sum. Each key reduction retains
+serial ordering and Double multiply/add without fusion. Probability division is
+performed once per score instead of once per score/output channel. The same
+bounded scratch buffer is reused; no new activation allocation is introduced.
+The original attention entry is retained unchanged for causal/cache execution
+and as a serial reference with all keys visible. Existing running workers retain
+compatible original entry behavior even if resources are rebuilt for tests.
+
+Tests compare raw Float32 bits against that serial reference for multiple slice
+sizes, batches, GQA, unequal token/value widths, NaN/Infinity and diffusion head
+widths40/80/160. Performance of the new path has not yet been measured in isolation.
+The original512px run remains active (session11471, actual Java PID33796); step2
+and a preview were received. Short GPU regression tests ran concurrently, so its
+wall time is no longer an uncontended baseline. Do not use that time as a clean
+before/after benchmark. Final image correctness is still useful evidence.
+## Parallel score generation
+
+Noncausal attention now launches one thread per(query,key) dot product, then a
+row-wise max/exp/sum/normalize kernel, then parallel weighted output channels.
+Each dot/reduction keeps its previous serial order and Double rounding. Scratch
+remains bounded by the existing byte/session limits and is reused across stages.
+Causal/cache attention entry and its ABI are unchanged. Query-row offset and GQA
+mapping are covered by exact comparisons with the original serial kernel.
+
+Added a512-query/4096-key/width40 exact-output regression using16MiB score scratch.
+One observed comparison was278.9792ms serial versus32.5511ms parallel, but the
+original512px image job was concurrently using the GPU. Treat these as diagnostic
+samples, not an isolated benchmark or full-pipeline speed claim. The image job
+reached step3/20; it remains on the old loaded CudaSession/attention path.
+## Completed512px img2img (2026-11-03)
+
+Native Java/CUDA worker session62925 completed with exit0 and empty stderr.
+20 scheduled DPM++2M/Karras steps,10 active steps,strength0.5,seed42,CFG7.5.
+Input: successful native redapple512px output recorded below. Prompt:
+`a photograph of a green apple on a wooden table`. Timing669.8015785s.
+Output `.superpowers/sd15-img2img-512-20/native-f36f021a-36d1-47d0-b63a-46d939eed3a5.png`.
+SHA256 `d98545a527ad2a83798edc93871727b275f3b9ba7860d5456a455f499aa28fed`.
+Visually inspected512x512: coherent wooden planks and recognizable red apple.
+The requested green color was not achieved; do not treat this as color-edit
+fidelity acceptance. Real image-input/VAE encoder/U-Net/decoder/output path
+completed without Python. Runtime14 jars were copied and hashed before launch.
+No active acceptance worker remains. Historical active-process notes below are
+superseded by terminal results, not instructions to restart old runs.

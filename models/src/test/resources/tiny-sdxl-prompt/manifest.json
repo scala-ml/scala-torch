@@ -1,0 +1,529 @@
+{
+  "source_sha256": "397e6198cefc5920c19e43e39a776dd57d21e4ba394de21e6bad579e441ef59b",
+  "torch": "2.7.1+cpu",
+  "transformers": "4.49.0",
+  "tokenizer": "CLIPTokenizerFast",
+  "cases": [
+    {
+      "name": "plain",
+      "prompt": "a red apple",
+      "negative": "blur",
+      "clip_skip": 1,
+      "tensors": {
+        "positive": {
+          "file": "plain-positive.bin",
+          "shape": [
+            1,
+            77,
+            64
+          ],
+          "sha256": "c6c53ce1597984ce882d5d7ffa6a2fd325f1929ff7a3dfc42d81c1fa441c97ba"
+        },
+        "negative": {
+          "file": "plain-negative.bin",
+          "shape": [
+            1,
+            77,
+            64
+          ],
+          "sha256": "0789093b4e6b34f56240c29105d28f8536f7d28b1892fab3009b45afbd85c166"
+        },
+        "pooled": {
+          "file": "plain-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "618f4b76f2b737a113aed2dc99b08d672033b193c792d6632868cd91b2abe712"
+        },
+        "negative-pooled": {
+          "file": "plain-negative-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "4f3a1290d88c9c52c33470b55bf15142460d110fe0c6719064d19f42340a3a44"
+        }
+      },
+      "encoder_chunks": [
+        1,
+        1
+      ]
+    },
+    {
+      "name": "skip2",
+      "prompt": "a red apple",
+      "negative": "blur",
+      "clip_skip": 2,
+      "tensors": {
+        "positive": {
+          "file": "skip2-positive.bin",
+          "shape": [
+            1,
+            77,
+            64
+          ],
+          "sha256": "c6c53ce1597984ce882d5d7ffa6a2fd325f1929ff7a3dfc42d81c1fa441c97ba"
+        },
+        "negative": {
+          "file": "skip2-negative.bin",
+          "shape": [
+            1,
+            77,
+            64
+          ],
+          "sha256": "0789093b4e6b34f56240c29105d28f8536f7d28b1892fab3009b45afbd85c166"
+        },
+        "pooled": {
+          "file": "skip2-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "618f4b76f2b737a113aed2dc99b08d672033b193c792d6632868cd91b2abe712"
+        },
+        "negative-pooled": {
+          "file": "skip2-negative-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "4f3a1290d88c9c52c33470b55bf15142460d110fe0c6719064d19f42340a3a44"
+        }
+      },
+      "encoder_chunks": [
+        1,
+        1
+      ]
+    },
+    {
+      "name": "skip3",
+      "prompt": "a red apple",
+      "negative": "blur",
+      "clip_skip": 3,
+      "tensors": {
+        "positive": {
+          "file": "skip3-positive.bin",
+          "shape": [
+            1,
+            77,
+            64
+          ],
+          "sha256": "e538be8b88aa7f4925eb7cbea8d74d97911e4b5626aecab1c81816a930585330"
+        },
+        "negative": {
+          "file": "skip3-negative.bin",
+          "shape": [
+            1,
+            77,
+            64
+          ],
+          "sha256": "ef9a948fbf36e00818f87db94559d64cb50b5d32f2bdc316b80e24affb7d2c29"
+        },
+        "pooled": {
+          "file": "skip3-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "618f4b76f2b737a113aed2dc99b08d672033b193c792d6632868cd91b2abe712"
+        },
+        "negative-pooled": {
+          "file": "skip3-negative-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "4f3a1290d88c9c52c33470b55bf15142460d110fe0c6719064d19f42340a3a44"
+        }
+      },
+      "encoder_chunks": [
+        1,
+        1
+      ]
+    },
+    {
+      "name": "empty",
+      "prompt": "a red apple",
+      "negative": "",
+      "clip_skip": 1,
+      "tensors": {
+        "positive": {
+          "file": "empty-positive.bin",
+          "shape": [
+            1,
+            77,
+            64
+          ],
+          "sha256": "c6c53ce1597984ce882d5d7ffa6a2fd325f1929ff7a3dfc42d81c1fa441c97ba"
+        },
+        "negative": {
+          "file": "empty-negative.bin",
+          "shape": [
+            1,
+            77,
+            64
+          ],
+          "sha256": "d0d114a159f590f7a3ce150c7544bda866495f16f03d847631046c7242fa62f2"
+        },
+        "pooled": {
+          "file": "empty-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "618f4b76f2b737a113aed2dc99b08d672033b193c792d6632868cd91b2abe712"
+        },
+        "negative-pooled": {
+          "file": "empty-negative-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "38723a2e5e8a17aa7950dc008209944e898f69a7bd10a23c839d341e935fd5ca"
+        }
+      },
+      "encoder_chunks": [
+        1,
+        1
+      ]
+    },
+    {
+      "name": "whitespace",
+      "prompt": "a red apple",
+      "negative": " \t\n　",
+      "clip_skip": 1,
+      "tensors": {
+        "positive": {
+          "file": "whitespace-positive.bin",
+          "shape": [
+            1,
+            77,
+            64
+          ],
+          "sha256": "c6c53ce1597984ce882d5d7ffa6a2fd325f1929ff7a3dfc42d81c1fa441c97ba"
+        },
+        "negative": {
+          "file": "whitespace-negative.bin",
+          "shape": [
+            1,
+            77,
+            64
+          ],
+          "sha256": "d0d114a159f590f7a3ce150c7544bda866495f16f03d847631046c7242fa62f2"
+        },
+        "pooled": {
+          "file": "whitespace-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "618f4b76f2b737a113aed2dc99b08d672033b193c792d6632868cd91b2abe712"
+        },
+        "negative-pooled": {
+          "file": "whitespace-negative-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "38723a2e5e8a17aa7950dc008209944e898f69a7bd10a23c839d341e935fd5ca"
+        }
+      },
+      "encoder_chunks": [
+        1,
+        1
+      ]
+    },
+    {
+      "name": "weighted",
+      "prompt": "(red:1.5) [apple] \\(table\\)",
+      "negative": "(blur:0.5)",
+      "clip_skip": 1,
+      "tensors": {
+        "positive": {
+          "file": "weighted-positive.bin",
+          "shape": [
+            1,
+            77,
+            64
+          ],
+          "sha256": "dce95b760c933c2f05bd675a1d49ca377026552070f2c1b20d2aa83e6bc6e258"
+        },
+        "negative": {
+          "file": "weighted-negative.bin",
+          "shape": [
+            1,
+            77,
+            64
+          ],
+          "sha256": "a140d06e3b53a41516d95d2df4582a530c0288d0dccaa17ec90a29e6503606e5"
+        },
+        "pooled": {
+          "file": "weighted-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "a2418f9d7b1f7c11038cee69e300cdf9d53fdbbceeed58d988b751a4bfdd6cbb"
+        },
+        "negative-pooled": {
+          "file": "weighted-negative-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "4f3a1290d88c9c52c33470b55bf15142460d110fe0c6719064d19f42340a3a44"
+        }
+      },
+      "encoder_chunks": [
+        1,
+        1
+      ]
+    },
+    {
+      "name": "long",
+      "prompt": "apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, ",
+      "negative": "blur",
+      "clip_skip": 1,
+      "tensors": {
+        "positive": {
+          "file": "long-positive.bin",
+          "shape": [
+            1,
+            231,
+            64
+          ],
+          "sha256": "6174a494b9062301a9e8c6d928d6aecdf4e18bc313b39dc7e626392271f22648"
+        },
+        "negative": {
+          "file": "long-negative.bin",
+          "shape": [
+            1,
+            231,
+            64
+          ],
+          "sha256": "e64cb64116f92e422c6485a9e0a01e7cbcf5425d0014c5430a9f880e89143281"
+        },
+        "pooled": {
+          "file": "long-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "5164558c7fffdad4ffd0b088c0d961d32afe3c35d1872abe83abe021a75e7581"
+        },
+        "negative-pooled": {
+          "file": "long-negative-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "4f3a1290d88c9c52c33470b55bf15142460d110fe0c6719064d19f42340a3a44"
+        }
+      },
+      "encoder_chunks": [
+        3,
+        3
+      ]
+    },
+    {
+      "name": "negative-long",
+      "prompt": "apple",
+      "negative": "blur BREAK noise BREAK fog",
+      "clip_skip": 1,
+      "tensors": {
+        "positive": {
+          "file": "negative-long-positive.bin",
+          "shape": [
+            1,
+            231,
+            64
+          ],
+          "sha256": "9e5eee6252da68f02d8b56134320d59e9e20324b54b4a990aa6257a8b1911fcb"
+        },
+        "negative": {
+          "file": "negative-long-negative.bin",
+          "shape": [
+            1,
+            231,
+            64
+          ],
+          "sha256": "665f586c6065e0a1d9e73e87c0181a1aedcafa69ec01425eb9d6098454d16398"
+        },
+        "pooled": {
+          "file": "negative-long-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "2d8b4c6a7bd873cc8a97ee12b32f950f2cbf6652e207627ab250603fc527946f"
+        },
+        "negative-pooled": {
+          "file": "negative-long-negative-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "4f3a1290d88c9c52c33470b55bf15142460d110fe0c6719064d19f42340a3a44"
+        }
+      },
+      "encoder_chunks": [
+        1,
+        1
+      ]
+    },
+    {
+      "name": "repeat",
+      "prompt": "(red:x2.5) BREAK apple",
+      "negative": "blur",
+      "clip_skip": 3,
+      "tensors": {
+        "positive": {
+          "file": "repeat-positive.bin",
+          "shape": [
+            1,
+            154,
+            64
+          ],
+          "sha256": "473113e9c50cc5183d398df5c17d8058016d2cb95c07bb529926076daf33d57d"
+        },
+        "negative": {
+          "file": "repeat-negative.bin",
+          "shape": [
+            1,
+            154,
+            64
+          ],
+          "sha256": "f06f0d7e004fe97b3cb65ed2a10416fb321e22fde21004a54eacfced0d2a0d53"
+        },
+        "pooled": {
+          "file": "repeat-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "741807bc51d850a88c2928d5e0056207cb3808e1dcee71e8cd5a807582df6d5b"
+        },
+        "negative-pooled": {
+          "file": "repeat-negative-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "4f3a1290d88c9c52c33470b55bf15142460d110fe0c6719064d19f42340a3a44"
+        }
+      },
+      "encoder_chunks": [
+        2,
+        2
+      ]
+    },
+    {
+      "name": "split",
+      "prompt": "apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, apple, ",
+      "negative": "blur",
+      "clip_skip": 1,
+      "tensors": {
+        "positive": {
+          "file": "split-positive.bin",
+          "shape": [
+            1,
+            231,
+            64
+          ],
+          "sha256": "983b634e78a1e6d1115a543588cf225ae916e439f24d23b9a90da7270259180d"
+        },
+        "negative": {
+          "file": "split-negative.bin",
+          "shape": [
+            1,
+            231,
+            64
+          ],
+          "sha256": "e64cb64116f92e422c6485a9e0a01e7cbcf5425d0014c5430a9f880e89143281"
+        },
+        "pooled": {
+          "file": "split-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "c9f35f5c17e5b3092f6b6d49be028f9f7690de0fff66b14147a3aba99295785f"
+        },
+        "negative-pooled": {
+          "file": "split-negative-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "4f3a1290d88c9c52c33470b55bf15142460d110fe0c6719064d19f42340a3a44"
+        }
+      },
+      "encoder_chunks": [
+        2,
+        3
+      ]
+    },
+    {
+      "name": "pad",
+      "prompt": "a red apple",
+      "negative": "blur",
+      "clip_skip": 1,
+      "tensors": {
+        "positive": {
+          "file": "pad-positive.bin",
+          "shape": [
+            1,
+            77,
+            64
+          ],
+          "sha256": "bd3045064529af377591b85506356fb97614728984d068dd3c780a5111762340"
+        },
+        "negative": {
+          "file": "pad-negative.bin",
+          "shape": [
+            1,
+            77,
+            64
+          ],
+          "sha256": "e20d9fe9542756025b15e6907d54133e62dd6cea4dd102ac28a92426b6bdf03d"
+        },
+        "pooled": {
+          "file": "pad-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "618f4b76f2b737a113aed2dc99b08d672033b193c792d6632868cd91b2abe712"
+        },
+        "negative-pooled": {
+          "file": "pad-negative-pooled.bin",
+          "shape": [
+            1,
+            32
+          ],
+          "sha256": "4f3a1290d88c9c52c33470b55bf15142460d110fe0c6719064d19f42340a3a44"
+        }
+      },
+      "encoder_chunks": [
+        1,
+        1
+      ]
+    }
+  ],
+  "model_revision": "fa06b5c3d6d45fabd978486616c6dae068519e85",
+  "inputs": {
+    "text_encoder\\config.json": "d216b3b454a44b722b854811cae06de8243fea7c783cf9a28c8aca26128b719a",
+    "text_encoder\\model.safetensors": "2499cbd560ac168aa38924db411dbba176a39f67e6c37428f7632d50a812c48e",
+    "text_encoder_2\\config.json": "7fdd4157e09f2447802ee7fee43bfd58fb312a4a2bcfa5fffb03adff8d10bdc0",
+    "text_encoder_2\\model.safetensors": "6a1d8f0e65bcfc75544e261b45ec58215eadbd76414568c5c23a9f7f299bf702",
+    "tokenizer\\merges.txt": "38e3006b0c2382dc853454c0643ce3d6f62544c7d6ded433d8d15dab639f0b5b",
+    "tokenizer\\special_tokens_map.json": "c4864a9376a8401918425bed71fc14fc0e81f9b59ec45c1cf96cccb2df508eac",
+    "tokenizer\\tokenizer_config.json": "19d7b034cb0cc3ce9766c2231373ab8aa8991fc72e2c8f76558bfaae3de0d563",
+    "tokenizer\\vocab.json": "f27915ca8a787e651ea25684f581739403b46354a9a5be29a5afad0112d60d46",
+    "tokenizer_2\\merges.txt": "38e3006b0c2382dc853454c0643ce3d6f62544c7d6ded433d8d15dab639f0b5b",
+    "tokenizer_2\\special_tokens_map.json": "c4864a9376a8401918425bed71fc14fc0e81f9b59ec45c1cf96cccb2df508eac",
+    "tokenizer_2\\tokenizer_config.json": "19d7b034cb0cc3ce9766c2231373ab8aa8991fc72e2c8f76558bfaae3de0d563",
+    "tokenizer_2\\vocab.json": "f27915ca8a787e651ea25684f581739403b46354a9a5be29a5afad0112d60d46"
+  }
+}

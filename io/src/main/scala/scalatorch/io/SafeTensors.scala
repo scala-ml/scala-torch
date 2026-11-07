@@ -12,6 +12,7 @@ enum SafeDType(val bytes: Int):
   case F32 extends SafeDType(4)
   case F64 extends SafeDType(8)
   case I64 extends SafeDType(8)
+  case I32 extends SafeDType(4)
   case BOOL extends SafeDType(1)
 
 final case class TensorInfo(dtype: SafeDType, shape: Shape, begin: Long, end: Long)
@@ -47,6 +48,17 @@ final class SafeTensors private (
   // Fresh arrays never escape before ownership passes to Tensor; no second full-size copy needed.
   private def owned[A](values: Array[A], shape: Shape, dtype: DType[A]): Tensor[A] =
     new Tensor(new Storage(values, dtype), Layout.contiguous(shape, values.length))
+
+  /** Exact on-disk bytes, including integer dtypes unsupported by typed tensors. */
+  def readRaw(name: String): Array[Byte] = synchronized {
+    if !channel.isOpen then throw IllegalStateException("safetensors archive is closed")
+    val info=tensors.getOrElse(name,throw IllegalArgumentException(s"tensor not found: $name"))
+    val size=info.end-info.begin
+    require(size<=limits.maxTensorBytes && size<=Int.MaxValue,"raw tensor exceeds configured allocation limit")
+    val data=new Array[Byte](size.toInt)
+    SafeTensors.readFully(channel,ByteBuffer.wrap(data),dataStart+info.begin)
+    data
+  }
 
   def readFloat(name: String): Tensor[Float] = synchronized {
     val info = entry(name, Set(SafeDType.F32, SafeDType.F16, SafeDType.BF16), 4)

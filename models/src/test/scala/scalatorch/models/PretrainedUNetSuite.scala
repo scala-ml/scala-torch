@@ -8,6 +8,19 @@ import java.nio.{ByteBuffer,ByteOrder}
 import java.nio.charset.StandardCharsets.UTF_8
 
 class PretrainedUNetSuite extends munit.FunSuite:
+  test("explicit attention work limit reaches every loaded U-Net attention block") {
+    val dir=sys.props.get("scalatorch.unet.dir").map(Path.of(_))
+    assume(dir.nonEmpty,"public tiny U-Net required")
+    val model=PretrainedUNet.load(dir.get,maxScoreElements=134217728L)
+    val spatial=model.downBlocks.flatMap(_.layers.flatMap(_.attention)) ++
+      Vector(model.midBlock.attention) ++ model.upBlocks.flatMap(_.layers.flatMap(_.attention))
+    assert(spatial.nonEmpty)
+    spatial.flatMap(_.blocks).foreach { block =>
+      assertEquals(block.attn1.maxScoreElements,134217728L)
+      assertEquals(block.attn2.maxScoreElements,134217728L)
+    }
+    intercept[IllegalArgumentException](PretrainedUNet.load(dir.get,maxScoreElements = -1))
+  }
   test("complete pinned public config parses") {
     val stream=getClass.getResourceAsStream("/tiny-sd/config.json")
     val json=try new String(stream.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8) finally stream.close()

@@ -8,13 +8,33 @@ import scala.util.Using
 private[ffm] final class CudaDriver private (
     val arena: Arena, register: (() => Unit) => Unit
 ):
-  private val lookup = SymbolLookup.libraryLookup("libcuda.so.1", arena)
+  private val lookup = SymbolLookup.libraryLookup(CudaDriver.libraryName, arena)
   private val linker = Linker.nativeLinker()
-  def call(name: String, layouts: Seq[MemoryLayout], args: AnyRef*): Unit =
+  private def result(name: String, layouts: Seq[MemoryLayout], args: AnyRef*): Int =
     val symbol = lookup.find(name).orElseThrow(() => UnsatisfiedLinkError(s"CUDA symbol missing: $name"))
     val handle = linker.downcallHandle(symbol, FunctionDescriptor.of(JAVA_INT, layouts*))
-    val code = handle.invokeWithArguments(args*).asInstanceOf[Integer].intValue()
+    handle.invokeWithArguments(args*).asInstanceOf[Integer].intValue()
+  def call(name: String, layouts: Seq[MemoryLayout], args: AnyRef*): Unit =
+    val code=result(name,layouts,args*)
     if code != 0 then throw IllegalStateException(s"$name failed with CUDA status $code")
+  def loadModule(ptx: String): MemorySegment =
+    val output=arena.allocate(ADDRESS)
+    val options=arena.allocate(2L*JAVA_INT.byteSize(),JAVA_INT.byteAlignment())
+    options.setAtIndex(JAVA_INT,0,5) // CU_JIT_ERROR_LOG_BUFFER
+    options.setAtIndex(JAVA_INT,1,6) // CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES
+    val errorLog=arena.allocate(8192,1)
+    val errorLogSize=arena.allocate(JAVA_INT)
+    errorLogSize.set(JAVA_INT,0,8192)
+    val values=arena.allocate(2L*ADDRESS.byteSize(),ADDRESS.byteAlignment())
+    values.setAtIndex(ADDRESS,0,errorLog)
+    values.setAtIndex(ADDRESS,1,errorLogSize)
+    val image=arena.allocateFrom(ptx)
+    val code=result("cuModuleLoadDataEx",Seq(ADDRESS,ADDRESS,JAVA_INT,ADDRESS,ADDRESS),
+      output,image,Int.box(2),options,values)
+    if code != 0 then
+      val detail=errorLog.getString(0)
+      throw IllegalStateException(s"cuModuleLoadDataEx failed with CUDA status $code${if detail.nonEmpty then s": $detail" else ""}")
+    output.get(ADDRESS,0)
   def cleanup(action: => Unit): Unit = register(() => action)
   def pointerResult(name: String, layouts: Seq[MemoryLayout], args: AnyRef*): MemorySegment =
     val pointer = arena.allocate(ADDRESS)
@@ -26,6 +46,14 @@ private[ffm] final class CudaDriver private (
     val address = pointer.get(JAVA_LONG, 0L)
     cleanup { call("cuMemFree_v2", Seq(JAVA_LONG), Long.box(address)) }
     address
+  def memoryInfo(): (Long,Long) =
+    val free=arena.allocate(JAVA_LONG)
+    val total=arena.allocate(JAVA_LONG)
+    call("cuMemGetInfo_v2",Seq(ADDRESS,ADDRESS),free,total)
+    val available=free.get(JAVA_LONG,0L)
+    val capacity=total.get(JAVA_LONG,0L)
+    require(available>=0 && capacity>0 && available<=capacity,"CUDA returned invalid device memory information")
+    (available,capacity)
   def upload(values: Array[Float]): Long =
     val address = allocateDevice(values.length.toLong * 4)
     if values.nonEmpty then
@@ -38,16 +66,29 @@ private[ffm] final class CudaDriver private (
   def copyHostToDevice(address: Long,host: MemorySegment,bytes: Long): Unit =
     call("cuMemcpyHtoD_v2",Seq(JAVA_LONG,ADDRESS,JAVA_LONG),Long.box(address),host,Long.box(bytes))
     call("cuStreamSynchronize",Seq(ADDRESS),MemorySegment.NULL)
+  private[ffm] def copyHostToDeviceProfiled(address: Long,host: MemorySegment,bytes: Long)
+      (record: (String,Long) => Unit): Unit =
+    var started=System.nanoTime()
+    call("cuMemcpyHtoD_v2",Seq(JAVA_LONG,ADDRESS,JAVA_LONG),Long.box(address),host,Long.box(bytes))
+    record("HtoD call",System.nanoTime()-started)
+    started=System.nanoTime()
+    call("cuStreamSynchronize",Seq(ADDRESS),MemorySegment.NULL)
+    record("HtoD stream sync",System.nanoTime()-started)
   def download(address: Long, count: Int): Array[Float] =
     val out = arena.allocate(count.toLong * 4, 4)
     if count > 0 then call("cuMemcpyDtoH_v2", Seq(ADDRESS, JAVA_LONG, JAVA_LONG), out, Long.box(address), Long.box(count.toLong * 4))
     out.toArray(JAVA_FLOAT)
 
 private[ffm] object CudaDriver:
+  private def libraryName: String =
+    val os = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT)
+    require(ADDRESS.byteSize() == 8, "CUDA requires a 64-bit JVM")
+    if os.startsWith("windows") then "nvcuda.dll"
+    else if os == "linux" then "libcuda.so.1"
+    else throw IllegalArgumentException(s"CUDA requires Windows or Linux, got $os")
+
   def withDevice[A](index: Int)(body: (CudaDriver, Int, String) => A): A =
     require(index >= 0, "negative device index")
-    require(System.getProperty("os.name").toLowerCase.contains("linux") && ADDRESS.byteSize() == 8,
-      "probe currently supports Linux 64-bit only")
     Using.Manager { use =>
       val arena = use(Arena.ofConfined())
       val driver = new CudaDriver(arena, action => {

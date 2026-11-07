@@ -8,10 +8,14 @@ object Resize2d:
   private def outputShape(input: Tensor[Float],height: Int,width: Int): Shape =
     require(input.device==Device.Cpu && input.dtype==DType.Float32 && input.shape.rank==4,
       "nearest resize requires CPU Float32 NCHW")
+    outputShape(input.shape,height,width)
+
+  private[scalatorch] def outputShape(input: Shape,height: Int,width: Int): Shape =
+    require(input.rank==4,"nearest resize requires NCHW")
     require(height>0 && width>0,"resize output dimensions must be positive")
-    val dims=input.shape.dims
+    val dims=input.dims
     require(dims.tail.forall(_>0),"resize channels/spatial dimensions must be positive")
-    require(dims.forall(_<=Int.MaxValue) && input.shape.numel<=Int.MaxValue,"resize input exceeds Int indexing")
+    require(dims.forall(_<=Int.MaxValue) && input.numel<=Int.MaxValue,"resize input exceeds Int indexing")
     val shape=Shape.from(Seq(dims(0),dims(1),height.toLong,width.toLong))
     require(shape.numel<=Int.MaxValue,"resize output exceeds Int indexing")
     shape

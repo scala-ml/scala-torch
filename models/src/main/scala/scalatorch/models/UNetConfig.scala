@@ -12,13 +12,22 @@ import scala.util.Using
 final case class UNetConfig(inChannels: Int,outChannels: Int,channels: Vector[Int],
     downAttention: Vector[Boolean],upAttention: Vector[Boolean],layersPerBlock: Int,heads: Int,
     contextWidth: Int,groups: Int,epsilon: Double,transformerLayers: Int,downsamplePadding: Int,
-    timeWidth: Int,flipSinToCos: Boolean,frequencyShift: Double,midScale: Double):
+    timeWidth: Int,flipSinToCos: Boolean,frequencyShift: Double,midScale: Double,
+    stageHeads: Vector[Int]=Vector.empty,stageTransformerLayers: Vector[Int]=Vector.empty,
+    linearProjection: Boolean=false,additionTimeWidth: Option[Int]=None,additionInputWidth: Option[Int]=None):
+  require(additionTimeWidth.isDefined==additionInputWidth.isDefined,"incomplete U-Net text-time dimensions")
+  require(additionTimeWidth.forall(n => n>=2 && n<=16384) && additionInputWidth.forall(n => n>0 && n<=16384),"invalid U-Net text-time dimensions")
   require(channels.nonEmpty && channels.size<=8 && downAttention.size==channels.size && upAttention.size==channels.size,
     "invalid U-Net resolution stages")
   require((channels++Vector(inChannels,outChannels,contextWidth,timeWidth)).forall(n => n>0 && n<=16384),
     "U-Net dimensions must be in 1..16384")
   require(layersPerBlock>0 && layersPerBlock<=16 && transformerLayers>0 && transformerLayers<=16,"invalid U-Net depth")
-  require(groups>0 && heads>0 && channels.forall(c => c%groups==0 && c%heads==0),"invalid U-Net groups/heads")
+  require(stageHeads.isEmpty || stageHeads.size==channels.size,"U-Net head stages must match channels")
+  require(stageTransformerLayers.isEmpty || stageTransformerLayers.size==channels.size,"U-Net transformer stages must match channels")
+  def headsAt(stage: Int): Int=if stageHeads.isEmpty then heads else stageHeads(stage)
+  def transformerLayersAt(stage: Int): Int=if stageTransformerLayers.isEmpty then transformerLayers else stageTransformerLayers(stage)
+  require(groups>0 && heads>0 && channels.indices.forall(i => headsAt(i)>0 && channels(i)%groups==0 && channels(i)%headsAt(i)==0),"invalid U-Net groups/heads")
+  require(channels.indices.forall(i => transformerLayersAt(i)>0 && transformerLayersAt(i)<=16),"invalid U-Net stage transformer depth")
   require(epsilon.isFinite && epsilon>0 && frequencyShift.isFinite && channels.head/2-frequencyShift>0,
     "invalid U-Net norm/timestep settings")
   require(channels.head>=2 && (downsamplePadding==0 || downsamplePadding==1),"invalid U-Net sampling settings")
@@ -39,7 +48,7 @@ object UNetConfig:
     require(bytes.length<=1048576,"U-Net config exceeds 1MiB")
     fromJson(UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString)
   }
-  def fromJson(json: String): UNetConfig =
+  def fromJson(json: String,expectedClass: String="UNet2DConditionModel",ignoredFields: Set[String]=Set.empty): UNetConfig =
     require(json.length<=1048576,"U-Net config exceeds size limit")
     try Using.resource(factory.createParser(json)) { p =>
       def value(arrayAllowed: Boolean=true): Value = p.currentToken() match
@@ -77,16 +86,23 @@ object UNetConfig:
       def array(key: String): Vector[Value]=take(key,Null) match
         case Array(v) => v
         case _ => throw IllegalArgumentException(s"missing U-Net array: $key")
-      exact("_class_name",Text("UNet2DConditionModel"))
+      exact("_class_name",Text(expectedClass))
       take("_diffusers_version",Null) match
         case Null | Text(_) => ()
         case _ => throw IllegalArgumentException("invalid diffusers version metadata")
-      for key <- Seq("addition_embed_type","addition_time_embed_dim","class_embed_type","cross_attention_norm",
+      val addition=take("addition_embed_type",Null) match
+        case Null =>
+          exact("addition_time_embed_dim",Null);exact("projection_class_embeddings_input_dim",Null)
+          None
+        case Text("text_time") => Some((integer("addition_time_embed_dim",0),integer("projection_class_embeddings_input_dim",0)))
+        case _ => throw IllegalArgumentException("unsupported U-Net addition embedding")
+      for key <- Seq("class_embed_type","cross_attention_norm",
         "encoder_hid_dim","encoder_hid_dim_type","num_attention_heads","num_class_embeds",
-        "projection_class_embeddings_input_dim","reverse_transformer_layers_per_block","time_cond_proj_dim",
+        "reverse_transformer_layers_per_block","time_cond_proj_dim",
         "time_embedding_act_fn","timestep_post_act") do exact(key,Null)
       for key <- Seq("center_input_sample","class_embeddings_concat","dual_cross_attention","only_cross_attention",
-        "resnet_skip_time_act","upcast_attention","use_linear_projection") do exact(key,Bool(false))
+        "resnet_skip_time_act") do exact(key,Bool(false))
+      require(Set[Value](Null,Bool(false))(take("upcast_attention",Bool(false))),"unsupported attention upcast")
       require(Set[Value](Null,Bool(false))(take("mid_block_only_cross_attention",Null)),"unsupported middle cross attention")
       for (key,v) <- Seq("act_fn"->"silu","attention_type"->"default","mid_block_type"->"UNetMidBlock2DCrossAttn",
         "resnet_time_scale_shift"->"default","time_embedding_type"->"positional") do exact(key,Text(v))
@@ -99,20 +115,32 @@ object UNetConfig:
         case v => require(integerValue(v,"sample_size")>0,"invalid sample size")
       val channels=array("block_out_channels").map(integerValue(_,"block_out_channels"))
       require(channels.nonEmpty,"empty U-Net channels")
-      def blocks(key: String,basic: String,cross: String): Vector[Boolean]=array(key).map {
+      def stageValues(key: String,default: Int): Vector[Int]=take(key,Number(BigDecimal(default))) match
+        case Array(values) =>
+          require(values.size==channels.size,s"$key stages must match channels")
+          values.map(integerValue(_,key))
+        case value => Vector.fill(channels.size)(integerValue(value,key))
+      val heads=stageValues("attention_head_dim",8)
+      val depths=stageValues("transformer_layers_per_block",1)
+      def parseBlocks(values: Vector[Value],key: String,basic: String,cross: String): Vector[Boolean]=values.map {
         case Text(s) if s==basic => false
         case Text(s) if s==cross => true
         case _ => throw IllegalArgumentException(s"unsupported U-Net block: $key")
       }
-      val down=blocks("down_block_types","DownBlock2D","CrossAttnDownBlock2D")
-      val up=blocks("up_block_types","UpBlock2D","CrossAttnUpBlock2D")
+      val down=parseBlocks(array("down_block_types"),"down_block_types","DownBlock2D","CrossAttnDownBlock2D")
+      val up=fields.remove("up_block_types") match
+        case None if expectedClass=="ControlNetModel" => down.reverse
+        case Some(Array(values)) => parseBlocks(values,"up_block_types","UpBlock2D","CrossAttnUpBlock2D")
+        case _ => throw IllegalArgumentException("missing U-Net array: up_block_types")
       val time=take("time_embedding_dim",Null) match
         case Null => channels.head*4
         case v => integerValue(v,"time_embedding_dim")
       val config=UNetConfig(integer("in_channels",4),integer("out_channels",4),channels,down,up,
-        integer("layers_per_block",2),integer("attention_head_dim",8),integer("cross_attention_dim",1280),
-        integer("norm_num_groups",32),number("norm_eps",1e-5),integer("transformer_layers_per_block",1),
-        integer("downsample_padding",1),time,boolean("flip_sin_to_cos",true),number("freq_shift",0),number("mid_block_scale_factor",1))
+        integer("layers_per_block",2),heads.head,integer("cross_attention_dim",1280),
+        integer("norm_num_groups",32),number("norm_eps",1e-5),depths.head,
+        integer("downsample_padding",1),time,boolean("flip_sin_to_cos",true),number("freq_shift",0),number("mid_block_scale_factor",1),
+        heads,depths,boolean("use_linear_projection",false),addition.map(_._1),addition.map(_._2))
+      ignoredFields.foreach(fields.remove)
       require(fields.isEmpty,s"unknown U-Net config fields: ${fields.keys.toVector.sorted.mkString(", ")}")
       config
     }

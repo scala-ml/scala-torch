@@ -10,15 +10,18 @@ final case class Conv2dConfig(stride: (Int,Int) = (1,1),padding: (Int,Int) = (0,
 
 /** Direct deterministic CPU reference; Double accumulation with Float32 outputs. */
 object Conv2dOps:
-  private final case class Geometry(n: Int,ci: Int,h: Int,w: Int,co: Int,cg: Int,kh: Int,kw: Int,
+  private[scalatorch] final case class Geometry(n: Int,ci: Int,h: Int,w: Int,co: Int,cg: Int,kh: Int,kw: Int,
       oh: Int,ow: Int,shape: Shape)
   private def geometry(x: Tensor[Float],weight: Tensor[Float],c: Conv2dConfig): Geometry =
     for value <- Seq(x,weight) do
       require(value.device==Device.Cpu && value.dtype==DType.Float32,"convolution requires CPU Float32")
-      require(value.shape.rank==4,"convolution requires rank four")
-      require(value.shape.dims.forall(_<=Int.MaxValue) && value.shape.numel<=Int.MaxValue,"convolution exceeds Int indexing")
-    val Vector(n,ci,h,w)=x.shape.dims.map(_.toInt): @unchecked
-    val Vector(co,cg,kh,kw)=weight.shape.dims.map(_.toInt): @unchecked
+    geometry(x.shape,weight.shape,c)
+  private[scalatorch] def geometry(input: Shape,weight: Shape,c: Conv2dConfig): Geometry =
+    for shape <- Seq(input,weight) do
+      require(shape.rank==4,"convolution requires rank four")
+      require(shape.dims.forall(_<=Int.MaxValue) && shape.numel<=Int.MaxValue,"convolution exceeds Int indexing")
+    val Vector(n,ci,h,w)=input.dims.map(_.toInt): @unchecked
+    val Vector(co,cg,kh,kw)=weight.dims.map(_.toInt): @unchecked
     require(ci>0 && h>0 && w>0 && co>0 && cg>0 && kh>0 && kw>0,"convolution dimensions must be positive except batch")
     require(ci%c.groups==0 && co%c.groups==0 && ci/c.groups==cg,"convolution group/channel mismatch")
     def extent(size: Int,kernel: Int,pad: Int,dilation: Int,stride: Int): Int =
