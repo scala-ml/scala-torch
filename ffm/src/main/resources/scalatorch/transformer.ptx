@@ -1832,3 +1832,91 @@ GA_STORE:
  mul.wide.u32 offset,index,4; add.u64 addr,po,offset; st.global.f32 [addr],result;
 GA_DONE: ret;
 }
+
+// Block-parallel GroupNorm statistics: one block of 256 threads per group, strided FP64 partial sums,
+// shared-memory tree reduction. Same mean/inverse-stddev layout as groupnorm_stats.
+.shared .align 8 .b8 gp_red[2048];
+.visible .entry groupnorm_stats_par(.param .u64 gp_x,.param .u64 gp_stats,
+ .param .u32 gp_rows,.param .u32 gp_width,.param .f64 gp_eps) {
+ .reg .pred p;
+ .reg .u32 rows,row,width,tid,i,index,start,half;
+ .reg .u64 px,ps,offset,addr,sh,mine;
+ .reg .f32 x;
+ .reg .f64 acc,value,other,mean,variance,denom,eps,centered,product,inverse;
+ ld.param.u64 px,[gp_x]; ld.param.u64 ps,[gp_stats];
+ ld.param.u32 rows,[gp_rows]; ld.param.u32 width,[gp_width]; ld.param.f64 eps,[gp_eps];
+ mov.u32 row,%ctaid.x; setp.ge.u32 p,row,rows; @p bra GP_DONE;
+ mov.u32 tid,%tid.x; mul.lo.u32 start,row,width; cvt.rn.f64.u32 denom,width;
+ mov.u64 sh,gp_red; mul.wide.u32 offset,tid,8; add.u64 mine,sh,offset;
+ mov.f64 acc,0d0000000000000000; mov.u32 i,tid;
+GP_MEAN:
+ setp.ge.u32 p,i,width; @p bra GP_MEAN_END;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; cvt.f64.f32 value,x; add.rn.f64 acc,acc,value;
+ add.u32 i,i,256; bra GP_MEAN;
+GP_MEAN_END:
+ st.shared.f64 [mine],acc; bar.sync 0; mov.u32 half,128;
+GP_RED1:
+ setp.eq.u32 p,half,0; @p bra GP_RED1_END;
+ setp.ge.u32 p,tid,half; @p bra GP_RED1_SKIP;
+ add.u32 index,tid,half; mul.wide.u32 offset,index,8; add.u64 addr,sh,offset;
+ ld.shared.f64 other,[addr]; ld.shared.f64 acc,[mine]; add.rn.f64 acc,acc,other; st.shared.f64 [mine],acc;
+GP_RED1_SKIP:
+ bar.sync 0; shr.u32 half,half,1; bra GP_RED1;
+GP_RED1_END:
+ ld.shared.f64 mean,[sh]; div.rn.f64 mean,mean,denom; bar.sync 0;
+ mov.f64 acc,0d0000000000000000; mov.u32 i,tid;
+GP_VAR:
+ setp.ge.u32 p,i,width; @p bra GP_VAR_END;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; cvt.f64.f32 value,x; sub.rn.f64 centered,value,mean;
+ mul.rn.f64 product,centered,centered; add.rn.f64 acc,acc,product;
+ add.u32 i,i,256; bra GP_VAR;
+GP_VAR_END:
+ st.shared.f64 [mine],acc; bar.sync 0; mov.u32 half,128;
+GP_RED2:
+ setp.eq.u32 p,half,0; @p bra GP_RED2_END;
+ setp.ge.u32 p,tid,half; @p bra GP_RED2_SKIP;
+ add.u32 index,tid,half; mul.wide.u32 offset,index,8; add.u64 addr,sh,offset;
+ ld.shared.f64 other,[addr]; ld.shared.f64 acc,[mine]; add.rn.f64 acc,acc,other; st.shared.f64 [mine],acc;
+GP_RED2_SKIP:
+ bar.sync 0; shr.u32 half,half,1; bra GP_RED2;
+GP_RED2_END:
+ setp.ne.u32 p,tid,0; @p bra GP_DONE;
+ ld.shared.f64 variance,[sh]; div.rn.f64 variance,variance,denom; add.rn.f64 variance,variance,eps;
+ sqrt.rn.f64 inverse,variance; div.rn.f64 inverse,0d3FF0000000000000,inverse;
+ mul.wide.u32 offset,row,16; add.u64 addr,ps,offset; st.global.f64 [addr],mean;
+ add.u64 addr,addr,8; st.global.f64 [addr],inverse;
+GP_DONE: ret;
+}
+
+// FP32 GEGLU for inference: Phi(x) from the Abramowitz-Stegun 7.1.26 erf fit (abs error ~1.5e-7).
+// The negative tail is formed directly so it keeps relative precision. Exact FP64 geglu stays available.
+.visible .entry geglu_fast(.param .u64 gf_input, .param .u64 gf_output, .param .u32 gf_count, .param .u32 gf_width) {
+ .reg .pred p;
+ .reg .b32 r<8>;
+ .reg .b64 d<4>;
+ .reg .f32 f<12>;
+ ld.param.u64 d0,[gf_input]; ld.param.u64 d1,[gf_output];
+ ld.param.u32 r0,[gf_count]; ld.param.u32 r1,[gf_width];
+ mov.u32 r2,%ctaid.x; mov.u32 r3,%ntid.x; mov.u32 r4,%tid.x;
+ mad.lo.u32 r2,r2,r3,r4; setp.ge.u32 p,r2,r0; @p bra GF_DONE;
+ div.u32 r3,r2,r1; rem.u32 r4,r2,r1; shl.b32 r5,r1,1;
+ mad.lo.u32 r6,r3,r5,r4; add.u32 r7,r6,r1;
+ mul.wide.u32 d2,r6,4; add.u64 d2,d0,d2; ld.global.f32 f0,[d2];
+ mul.wide.u32 d2,r7,4; add.u64 d2,d0,d2; ld.global.f32 f1,[d2];
+ abs.f32 f2,f1; mul.rn.f32 f2,f2,0f3F3504F3;
+ mul.rn.f32 f3,f2,f2; mul.rn.f32 f3,f3,0fBFB8AA3B; ex2.approx.f32 f3,f3;
+ fma.rn.f32 f4,f2,0f3EA7BA05,0f3F800000; rcp.rn.f32 f4,f4;
+ mov.f32 f5,0f3F87DC22;
+ fma.rn.f32 f5,f5,f4,0fBFBA00E3;
+ fma.rn.f32 f5,f5,f4,0f3FB5F0E3;
+ fma.rn.f32 f5,f5,f4,0fBE91A98E;
+ fma.rn.f32 f5,f5,f4,0f3E827906;
+ mul.rn.f32 f5,f5,f4; mul.rn.f32 f5,f5,f3; mul.rn.f32 f5,f5,0f3F000000;
+ sub.rn.f32 f6,0f3F800000,f5;
+ setp.ge.f32 p,f1,0f00000000; selp.f32 f7,f6,f5,p;
+ mul.rn.f32 f8,f1,f7; mul.rn.f32 f8,f0,f8;
+ mul.wide.u32 d3,r2,4; add.u64 d3,d1,d3; st.global.f32 [d3],f8;
+GF_DONE: ret;
+}

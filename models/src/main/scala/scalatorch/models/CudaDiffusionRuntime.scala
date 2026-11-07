@@ -263,7 +263,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     scope { use =>
       val flat=use(session.reshape(input,Shape.from(Seq(shape.numel/model.inputWidth,model.inputWidth))))
       val projected=use(linear(flat,model.projection));flat.close()
-      val gated=use(session.geglu(projected));projected.close()
+      val gated=use(session.geglu(projected,fast=true));projected.close()
       val output=use(linear(gated,model.output));gated.close()
       val result=use(session.reshape(output,Shape.from(shape.dims.updated(shape.rank-1,model.outputWidth))))
       output.close()

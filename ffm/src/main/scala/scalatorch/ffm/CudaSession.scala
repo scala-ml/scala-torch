@@ -53,11 +53,21 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.loadModule(opsPtx)
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("geglu","broadcast_add","concat_copy","resize_nearest","groupnorm","groupnorm_stats","groupnorm_apply","conv2d","conv2d_fast","im2col","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","leaky_relu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_scores","attention_prepare","attention_output","attention_fused_fp32","attention_fused_multiquery_fp32","attention_scores_fp32","attention_prepare_fp32","attention_output_fp32","attention_backward","attention_gradient_cast","cache_append").map { name =>
+  private val kernels=Seq("geglu","geglu_fast","broadcast_add","concat_copy","resize_nearest","groupnorm","groupnorm_stats","groupnorm_stats_par","groupnorm_apply","conv2d","conv2d_fast","im2col","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","leaky_relu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_scores","attention_prepare","attention_output","attention_fused_fp32","attention_fused_multiquery_fp32","attention_scores_fp32","attention_prepare_fp32","attention_output_fp32","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
   driver.cleanup { driver.call("cuStreamDestroy_v2",Seq(ADDRESS),stream) }
+  private val cublas: Option[Cublas]=Cublas.open(driver.arena,stream,action => driver.cleanup(action()))
+  private def cublasGemm(m: Int,n: Int,k: Int,a: Long,lda: Int,b: Long,ldb: Int,c: Long,ldc: Int): Boolean =
+    cublas match
+      case Some(lib) if m>0 && n>0 && k>0 =>
+        val started=if profileEnabled then System.nanoTime() else 0L
+        lib.sgemmRowMajor(m,n,k,a,lda,b,ldb,c,ldc)
+        driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+        if profileEnabled then record(s"cublas_sgemm[$m,$n,$k]",started)
+        true
+      case _ => false
   driver.cleanup { shutdown() }
 
   private def threadCheck(): Unit =
@@ -564,6 +574,14 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val m=a.shape.dims(0);val k=a.shape.dims(1);val n=b.shape.dims(1)
     require(Seq(m,n,k).forall(_ <= Int.MaxValue),"CUDA GEMM dimension exceeds Int indexing")
     val output=Shape.from(Seq(m,n))
+    if cublas.isDefined && m>0 && n>0 && k>0 then
+      val result=allocate(output)
+      try
+        cublasGemm(m.toInt,n.toInt,k.toInt,a.address,k.toInt,b.address,n.toInt,result.address,n.toInt)
+        return result
+      catch case error: Throwable =>
+        try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+        throw error
     val tiles=((m+15)/16)*((n+15)/16)
     execute(output,tiles,tiledFunction,threadsPerBlock=256,threadsPerOutput=256,label=s"gemm_tiled[$m,$n,$k]") { (arena,result) =>
       Seq(a.address,b.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
@@ -571,6 +589,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     }
 
   private def matmulInto(a: Long,b: Long,c: Long,m: Int,n: Int,k: Int,ldc: Int): Unit =
+    if cublasGemm(m,n,k,a,k,b,n,c,ldc) then return
     val tiles=((m.toLong+15)/16)*((n.toLong+15)/16)
     launch(tiles,tiledFunction,threadsPerBlock=256,threadsPerOutput=256,label=s"gemm_tiled[$m,$n,$k]") { arena =>
       Seq(a,b,c).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
@@ -578,6 +597,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     }
 
   private def matmulConvN32Into(a: Long,b: Long,c: Long,m: Int,n: Int,k: Int,ldc: Int,ldb: Int): Unit =
+    if cublasGemm(m,n,k,a,k,b,ldb,c,ldc) then return
     val tiles=((m.toLong+15)/16)*((n.toLong+31)/32)
     launch(tiles,convN32Function,threadsPerBlock=256,threadsPerOutput=256,label=s"gemm_conv_n32[$m,$n,$k]") { arena =>
       Seq(a,b,c).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
@@ -613,13 +633,13 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       }
     }
   /** Final-axis split: value half times Gaussian-error GELU of the gate half. */
-  def geglu(input: CudaTensor): CudaTensor =
+  def geglu(input: CudaTensor,fast: Boolean=false): CudaTensor =
     validate(input)
     require(input.shape.rank>0 && input.shape.dims.last>0 && input.shape.dims.last%2==0 &&
       input.shape.dims.last<=Int.MaxValue,"GEGLU requires a positive even final width")
     val width=input.shape.dims.last/2
     val output=Shape.from(input.shape.dims.updated(input.shape.rank-1,width))
-    execute(output,output.numel,kernels("geglu")) { (arena,result) =>
+    execute(output,output.numel,kernels(if fast then "geglu_fast" else "geglu")) { (arena,result) =>
       Seq(input.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
         Seq(output.numel.toInt,width.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
     }
@@ -724,7 +744,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val rows=input.shape.numel/width
     if width>=4096 && rows*16<=maxBytes-used-input.shape.numel*4 then
       Using.resource(allocate(Shape.from(Seq(rows*4)))) { stats =>
-        launch(rows,kernels("groupnorm_stats")) { arena =>
+        launch(rows,kernels("groupnorm_stats_par"),threadsPerBlock=256,threadsPerOutput=256,label="groupnorm_stats_par") { arena =>
           Seq(input.address,stats.address).map(v=>arena.allocateFrom(JAVA_LONG,v)) ++
             Seq(rows.toInt,width).map(v=>arena.allocateFrom(JAVA_INT,v)) :+ arena.allocateFrom(JAVA_DOUBLE,epsilon)
         }
