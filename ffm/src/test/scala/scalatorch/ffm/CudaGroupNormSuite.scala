@@ -3,6 +3,42 @@ package scalatorch.ffm
 import scalatorch.*
 
 class CudaGroupNormSuite extends munit.FunSuite:
+  test("large groups parallelize output while preserving reference reduction and affine") {
+    gpu()
+    val dims=Shape.from(Seq(2L,4L,64L,64L))
+    val values=Array.tabulate(dims.numel.toInt)(i=>(math.sin(i*.017)*3+math.cos(i*.003)).toFloat)
+    val input=Tensor.fromFloats(values,dims)
+    val weights=Array(1.1f,-.4f,2f,.25f);val biases=Array(.2f,-.1f,1f,-2f)
+    val reference=GroupNormOps.forward(input,2).toFloatArray
+    CudaSession.withDevice() { session =>
+      val x=session.upload(input);val w=session.upload(Tensor.fromFloats(weights,Shape.from(Seq(4L))))
+      val b=session.upload(Tensor.fromFloats(biases,Shape.from(Seq(4L))))
+      val output=session.groupNorm(x,2,weight=Some(w),bias=Some(b))
+      output.toCpu.toFloatArray.zipWithIndex.foreach { (actual,i) =>
+        val channel=(i/4096)%4
+        val expected=reference(i)*weights(channel)+biases(channel)
+        assertEquals(java.lang.Float.floatToRawIntBits(actual),java.lang.Float.floatToRawIntBits(expected))
+      }
+      output.close();b.close();w.close();x.close()
+      assertEquals(session.allocatedBytes,0L)
+    }
+  }
+  test("large GroupNorm falls back when its statistics scratch does not fit") {
+    gpu()
+    val shape=Shape.from(Seq(1L,2L,64L,64L))
+    val input=Tensor.fromFloats(Array.tabulate(shape.numel.toInt)(i=>math.sin(i*.01).toFloat),shape)
+    val expected=GroupNormOps.forward(input,1).toFloatArray
+    val bytes=shape.numel*4
+    CudaSession.withDevice(maxBytes=2*bytes) { session =>
+      val x=session.upload(input)
+      val output=session.groupNorm(x,1)
+      assertEquals(session.allocatedBytes,2*bytes)
+      assertEquals(output.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits),
+        expected.toVector.map(java.lang.Float.floatToRawIntBits))
+      output.close();x.close()
+      assertEquals(session.allocatedBytes,0L)
+    }
+  }
   private def gpu(): Unit=assume(sys.env.get("SCALATORCH_CUDA_TESTS").contains("1"),"real GPU test disabled")
   test("resident GroupNorm matches CPU normalization and separate affine rounding") {
     gpu()

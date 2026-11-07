@@ -7,6 +7,9 @@ param(
   [ValidateRange(1,1000)][int]$Steps=20,
   [string]$InputImage='',
   [ValidateRange(0.0,1.0)][double]$Strength=0.5,
+  [switch]$VaeTiling,
+  [switch]$LatentHires,
+  [ValidateRange(1.01,4.0)][double]$HiresScale=1.5,
   [string]$Prompt='a photograph of a red apple on a wooden table'
 )
 # Direct Java acceptance harness. Explicit scheduler required; no Python invocation.
@@ -14,26 +17,30 @@ param(
 $ErrorActionPreference='Stop'
 $model=(Resolve-Path -LiteralPath $ModelRoot).Path
 $config=(Resolve-Path -LiteralPath $SchedulerConfig).Path
-$classpath=[IO.File]::ReadAllText((Resolve-Path -LiteralPath $ClasspathFile).Path).Trim()
+$classpathPath=(Resolve-Path -LiteralPath $ClasspathFile).Path
+$classpath=[IO.File]::ReadAllText($classpathPath).Trim()
 if($classpath.Contains("`n") -or $classpath.Contains("`r")) {throw 'Classpath must be a single line'}
 $output=[IO.Path]::GetFullPath($OutputDirectory)
 if(Test-Path -LiteralPath $output) {throw 'Output directory must be new to preserve earlier evidence'}
 $source=if($InputImage) {(Resolve-Path -LiteralPath $InputImage).Path} else {''}
-New-Item -ItemType Directory -Path $output | Out-Null
 # A JVM lazily loads classes/resources. Never point a long-running acceptance job
 # at jars that sbt may replace while independent development/tests continue.
-$runtime=Join-Path $output '.runtime'
-New-Item -ItemType Directory -Path $runtime | Out-Null
 $entries=$classpath.Split([IO.Path]::PathSeparator)
+$resolvedEntries=@(foreach($entry in $entries) {
+  $sourcePath=if([IO.Path]::IsPathRooted($entry)) {$entry} else {Join-Path (Split-Path -Parent $classpathPath) $entry}
+  if(-not(Test-Path -LiteralPath $sourcePath -PathType Leaf)) {throw "Acceptance classpath entry is missing: $sourcePath"}
+  (Resolve-Path -LiteralPath $sourcePath).Path
+})
+$runtime=Join-Path $output '.runtime'
+New-Item -ItemType Directory -Path $runtime -Force | Out-Null
 $snapshots=@()
 $manifest=@()
-for($index=0;$index -lt $entries.Length;$index++) {
-  $entry=$entries[$index]
-  if(-not(Test-Path -LiteralPath $entry -PathType Leaf)) {throw "Acceptance classpath requires jar files: $entry"}
-  $target=Join-Path $runtime ("{0:D3}-{1}" -f $index,[IO.Path]::GetFileName($entry))
-  Copy-Item -LiteralPath $entry -Destination $target
+for($index=0;$index -lt $resolvedEntries.Length;$index++) {
+  $sourcePath=$resolvedEntries[$index]
+  $target=Join-Path $runtime ("{0:D3}-{1}" -f $index,[IO.Path]::GetFileName($sourcePath))
+  Copy-Item -LiteralPath $sourcePath -Destination $target
   $snapshots+=$target
-  $manifest+=@{source=$entry;snapshot=$target;sha256=(Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()}
+  $manifest+=@{source=$sourcePath;snapshot=$target;sha256=(Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()}
 }
 $classpath=$snapshots -join [IO.Path]::PathSeparator
 [IO.File]::WriteAllText("$output/runtime-manifest.json",($manifest | ConvertTo-Json -Depth 4))
@@ -42,6 +49,9 @@ $kind='txt2img'
 if($source) {
   $kind='img2img'
   $parameters.img2img=@{init_image=$source;denoising_strength=$Strength;resize_mode=0}
+}
+if($LatentHires) {
+  $parameters.hires=@{enabled=$true;scale=$HiresScale;upscaler='Latent';denoising_strength=0.55;second_pass_steps=$Steps}
 }
 $request=@{id='generate';type=$kind;params=@{output_dir=$output;params=$parameters}} | ConvertTo-Json -Compress -Depth 8
 [IO.File]::WriteAllText("$output/request.json",$request)
@@ -76,7 +86,8 @@ try {
   Write-Host "Worker PID=$($process.Id)"
   $hello=Read-Event
   if($hello.type -ne 'hello') {throw 'Missing worker handshake'}
-  $process.StandardInput.WriteLine((@{id='load';type='load_model';params=@{path=$model;dtype='fp32';vram_mode='cpu'}} | ConvertTo-Json -Compress))
+  $loadParams=@{path=$model;dtype='fp32';vram_mode='cpu';vae_tiling=[bool]$VaeTiling}
+  $process.StandardInput.WriteLine((@{id='load';type='load_model';params=$loadParams} | ConvertTo-Json -Compress))
   $loaded=Read-Event
   if($loaded.type -ne 'result') {throw 'Model load did not return a result'}
   $process.StandardInput.WriteLine($request)

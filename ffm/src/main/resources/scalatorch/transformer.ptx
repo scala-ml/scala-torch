@@ -299,6 +299,27 @@ DONE:
  ret;
 }
 
+.visible .entry leaky_relu(.param .u64 a, .param .u64 out, .param .u32 count, .param .f32 slope) {
+ .reg .pred p;
+ .reg .b32 r<5>;
+ .reg .b64 d<5>;
+ .reg .f32 f<3>;
+ ld.param.u64 d0,[a]; ld.param.u64 d1,[out]; ld.param.u32 r0,[count]; ld.param.f32 f2,[slope];
+ mov.u32 r1,%tid.x; mov.u32 r2,%ctaid.x; mov.u32 r3,%ntid.x;
+ mad.lo.u32 r4,r2,r3,r1;
+ setp.ge.u32 p,r4,r0; @p bra DONE;
+ mul.wide.u32 d2,r4,4; add.u64 d3,d0,d2; add.u64 d4,d1,d2;
+ ld.global.f32 f0,[d3];
+ setp.lt.f32 p,f0,0f00000000; @!p bra POSITIVE;
+ mul.rn.f32 f1,f0,f2; bra STORE;
+POSITIVE:
+ mov.f32 f1,f0;
+STORE:
+ st.global.f32 [d4],f1;
+DONE:
+ ret;
+}
+
 .visible .entry binary(
  .param .u64 a, .param .u64 b, .param .u64 out, .param .u32 count, .param .u32 op
 ) {
@@ -819,6 +840,351 @@ STORE:
 DONE:
  ret;
 }
+.visible .entry attention_fused_fp32(
+ .param .u64 query, .param .u64 key, .param .u64 value, .param .u64 output,
+ .param .u32 rows, .param .u32 heads, .param .u32 kvheads,
+ .param .u32 qtokens, .param .u32 ktokens, .param .u32 width,
+ .param .u32 vwidth, .param .u32 storageTokens, .param .f32 scale
+) {
+ .reg .pred p<4>;
+ .reg .b32 r<40>;
+ .reg .b64 d<12>;
+ .reg .f32 f<12>;
+ .shared .align 4 .b8 attention_shared[18432];
+ ld.param.u64 d0,[query]; ld.param.u64 d1,[key]; ld.param.u64 d2,[value]; ld.param.u64 d3,[output];
+ ld.param.u32 r0,[rows]; ld.param.u32 r1,[heads]; ld.param.u32 r2,[kvheads];
+ ld.param.u32 r3,[qtokens]; ld.param.u32 r4,[ktokens]; ld.param.u32 r5,[width];
+ ld.param.u32 r6,[vwidth]; ld.param.u32 r7,[storageTokens]; ld.param.f32 f0,[scale];
+ mov.u32 r8,%tid.x; mov.u32 r9,%ctaid.x;
+ setp.ge.u32 p0,r9,r0; @p0 bra DONE;
+
+ // Decode the flattened (batch, head, query) row and its grouped KV head.
+ div.u32 r10,r9,r3; rem.u32 r11,r10,r1; div.u32 r12,r10,r1;
+ div.u32 r13,r1,r2; div.u32 r14,r11,r13; mad.lo.u32 r15,r12,r2,r14;
+ mul.lo.u32 r16,r9,r5;
+ mul.lo.u32 r17,r15,r7; mul.lo.u32 r17,r17,r5;
+ mul.lo.u32 r18,r15,r7; mul.lo.u32 r18,r18,r6;
+
+ // Each lane computes scores for keys separated by the CTA width.
+ mov.f32 f1,0fFF800000; mov.u32 r19,0; mov.u32 r20,r8;
+SCORE_KEYS:
+ setp.ge.u32 p0,r20,r4; @p0 bra SCORES_DONE;
+ mov.u32 r21,0; mov.f32 f2,0f00000000;
+DOT_WIDTH:
+ setp.ge.u32 p0,r21,r5; @p0 bra DOT_DONE;
+ add.u32 r22,r16,r21; mul.wide.u32 d4,r22,4; add.u64 d5,d0,d4; ld.global.f32 f3,[d5];
+ mad.lo.u32 r22,r20,r5,r17; add.u32 r22,r22,r21; mul.wide.u32 d6,r22,4; add.u64 d7,d1,d6; ld.global.f32 f4,[d7];
+ fma.rn.f32 f2,f3,f4,f2; add.u32 r21,r21,1; bra DOT_WIDTH;
+DOT_DONE:
+ mul.rn.f32 f2,f2,f0;
+ setp.nan.f32 p1,f2,f2; @p1 mov.u32 r19,1;
+ max.f32 f1,f1,f2;
+ mul.wide.u32 d4,r20,4; mov.u64 d5,attention_shared; add.u64 d5,d5,d4; st.shared.f32 [d5],f2;
+ add.u32 r20,r20,256; bra SCORE_KEYS;
+SCORES_DONE:
+ // Reduce per-lane maxima and NaN flags in shared memory.
+ mov.u64 d4,attention_shared; mul.wide.u32 d5,r8,4; add.u64 d6,d4,16384; add.u64 d6,d6,d5; st.shared.f32 [d6],f1;
+ add.u64 d7,d4,17408; add.u64 d7,d7,d5; st.shared.u32 [d7],r19;
+ bar.sync 0; mov.u32 r21,128;
+MAX_REDUCE:
+ setp.eq.u32 p0,r21,0; @p0 bra MAX_DONE;
+ setp.ge.u32 p1,r8,r21; @p1 bra MAX_BARRIER;
+ mov.u64 d4,attention_shared; mul.wide.u32 d5,r8,4; add.u64 d6,d4,16384; add.u64 d6,d6,d5;
+ add.u32 r22,r8,r21; mul.wide.u32 d8,r22,4; add.u64 d9,d4,16384; add.u64 d9,d9,d8;
+ ld.shared.f32 f2,[d6]; ld.shared.f32 f3,[d9]; max.f32 f2,f2,f3; st.shared.f32 [d6],f2;
+ add.u64 d6,d4,17408; add.u64 d6,d6,d5; add.u64 d9,d4,17408; add.u64 d9,d9,d8;
+ ld.shared.u32 r22,[d6]; ld.shared.u32 r23,[d9]; or.b32 r22,r22,r23; st.shared.u32 [d6],r22;
+MAX_BARRIER:
+ bar.sync 0; shr.u32 r21,r21,1; bra MAX_REDUCE;
+MAX_DONE:
+ mov.u64 d4,attention_shared; add.u64 d5,d4,16384; ld.shared.f32 f5,[d5];
+ add.u64 d5,d4,17408; ld.shared.u32 r19,[d5];
+
+ // Max-subtracted FP32 softmax. Reuse the score array for exponentials.
+ mov.u32 r20,r8; mov.f32 f6,0f00000000;
+SOFTMAX_KEYS:
+ setp.ge.u32 p0,r20,r4; @p0 bra SOFTMAX_DONE;
+ mul.wide.u32 d5,r20,4; mov.u64 d6,attention_shared; add.u64 d6,d6,d5; ld.shared.f32 f2,[d6];
+ setp.ne.u32 p1,r19,0; @p1 bra SOFTMAX_NAN;
+ sub.rn.f32 f2,f2,f5; mul.rn.f32 f2,f2,0f3FB8AA3B; ex2.approx.f32 f2,f2;
+ add.rn.f32 f6,f6,f2; bra SOFTMAX_STORE;
+SOFTMAX_NAN:
+ mov.f32 f2,0f00000000;
+SOFTMAX_STORE:
+ st.shared.f32 [d6],f2; add.u32 r20,r20,256; bra SOFTMAX_KEYS;
+SOFTMAX_DONE:
+ mov.u64 d4,attention_shared; mul.wide.u32 d5,r8,4; add.u64 d6,d4,16384; add.u64 d6,d6,d5; st.shared.f32 [d6],f6;
+ bar.sync 0; mov.u32 r21,128;
+SUM_REDUCE:
+ setp.eq.u32 p0,r21,0; @p0 bra SUM_DONE;
+ setp.ge.u32 p1,r8,r21; @p1 bra SUM_BARRIER;
+ mov.u64 d4,attention_shared; mul.wide.u32 d5,r8,4; add.u64 d6,d4,16384; add.u64 d6,d6,d5;
+ add.u32 r22,r8,r21; mul.wide.u32 d8,r22,4; add.u64 d9,d4,16384; add.u64 d9,d9,d8;
+ ld.shared.f32 f2,[d6]; ld.shared.f32 f3,[d9]; add.rn.f32 f2,f2,f3; st.shared.f32 [d6],f2;
+SUM_BARRIER:
+ bar.sync 0; shr.u32 r21,r21,1; bra SUM_REDUCE;
+SUM_DONE:
+ mov.u64 d4,attention_shared; add.u64 d5,d4,16384; ld.shared.f32 f7,[d5];
+
+ // Each active lane owns one value channel and reduces over all keys.
+ setp.ge.u32 p0,r8,r6; @p0 bra DONE;
+ mov.u32 r20,0; mov.f32 f8,0f00000000;
+VALUE_KEYS:
+ setp.ge.u32 p0,r20,r4; @p0 bra VALUE_DONE;
+ mul.wide.u32 d5,r20,4; mov.u64 d6,attention_shared; add.u64 d6,d6,d5; ld.shared.f32 f2,[d6];
+ mad.lo.u32 r22,r20,r6,r18; add.u32 r22,r22,r8; mul.wide.u32 d7,r22,4; add.u64 d8,d2,d7; ld.global.f32 f3,[d8];
+ fma.rn.f32 f8,f2,f3,f8; add.u32 r20,r20,1; bra VALUE_KEYS;
+VALUE_DONE:
+ setp.ne.u32 p1,r19,0; @p1 bra VALUE_NAN;
+ div.rn.f32 f8,f8,f7; bra VALUE_STORE;
+VALUE_NAN:
+ mov.f32 f8,0f7FC00000;
+VALUE_STORE:
+ mad.lo.u32 r22,r9,r6,r8; mul.wide.u32 d5,r22,4; add.u64 d6,d3,d5; st.global.f32 [d6],f8;
+DONE:
+ ret;
+}
+.visible .entry attention_fused_multiquery_fp32(
+ .param .u64 query, .param .u64 key, .param .u64 value, .param .u64 output,
+ .param .u32 rows, .param .u32 heads, .param .u32 kvheads,
+ .param .u32 qtokens, .param .u32 ktokens, .param .u32 width,
+ .param .u32 vwidth, .param .u32 storageTokens, .param .f32 scale
+) {
+ .reg .pred p<8>;
+ .reg .b32 r<48>;
+ .reg .b64 d<16>;
+ .reg .f32 f<20>;
+ // Two 4096-float probability rows plus four 256-entry reduction rows = 36 KiB.
+ .shared .align 4 .b8 attention_multiquery_shared[36864];
+ ld.param.u64 d0,[query]; ld.param.u64 d1,[key]; ld.param.u64 d2,[value]; ld.param.u64 d3,[output];
+ ld.param.u32 r0,[rows]; ld.param.u32 r1,[heads]; ld.param.u32 r2,[kvheads];
+ ld.param.u32 r3,[qtokens]; ld.param.u32 r4,[ktokens]; ld.param.u32 r5,[width];
+ ld.param.u32 r6,[vwidth]; ld.param.u32 r7,[storageTokens]; ld.param.f32 f0,[scale];
+ mov.u32 r8,%tid.x; mov.u32 r9,%ctaid.x; mul.lo.u32 r9,r9,2;
+ setp.ge.u32 p0,r9,r0; @p0 bra MQ_DONE;
+
+ // The host only dispatches even qtokens, so paired rows share batch/head/KV head.
+ div.u32 r10,r9,r3; rem.u32 r11,r10,r1; div.u32 r12,r10,r1;
+ div.u32 r13,r1,r2; div.u32 r14,r11,r13; mad.lo.u32 r15,r12,r2,r14;
+ mul.lo.u32 r16,r9,r5; add.u32 r17,r16,r5;
+ mul.lo.u32 r18,r15,r7; mul.lo.u32 r18,r18,r6;
+ mul.lo.u32 r19,r15,r7; mul.lo.u32 r19,r19,r5;
+
+ // Each lane handles keys strided by 256. Load each K element once and dot it
+ // against both query rows, then retain both score rows in shared memory.
+ mov.f32 f1,0fFF800000; mov.f32 f2,0fFF800000;
+ mov.u32 r20,0; mov.u32 r21,0; mov.u32 r22,0; mov.u32 r20,r8;
+MQ_SCORE_KEYS:
+ setp.ge.u32 p0,r20,r4; @p0 bra MQ_SCORE_DONE;
+ mov.u32 r23,0; mov.f32 f3,0f00000000; mov.f32 f4,0f00000000;
+MQ_DOT_WIDTH:
+ setp.ge.u32 p0,r23,r5; @p0 bra MQ_DOT_DONE;
+ add.u32 r24,r16,r23; mul.wide.u32 d4,r24,4; add.u64 d5,d0,d4; ld.global.f32 f5,[d5];
+ add.u32 r24,r17,r23; mul.wide.u32 d4,r24,4; add.u64 d5,d0,d4; ld.global.f32 f6,[d5];
+ mul.lo.u32 r24,r20,r5; add.u32 r24,r24,r19; add.u32 r24,r24,r23;
+ mul.wide.u32 d6,r24,4; add.u64 d7,d1,d6; ld.global.f32 f7,[d7];
+ fma.rn.f32 f3,f5,f7,f3; fma.rn.f32 f4,f6,f7,f4;
+ add.u32 r23,r23,1; bra MQ_DOT_WIDTH;
+MQ_DOT_DONE:
+ mul.rn.f32 f3,f3,f0; mul.rn.f32 f4,f4,f0;
+ setp.nan.f32 p1,f3,f3; @p1 mov.u32 r21,1;
+ setp.nan.f32 p1,f4,f4; @p1 mov.u32 r22,1;
+ max.f32 f1,f1,f3; max.f32 f2,f2,f4;
+ mul.wide.u32 d4,r20,4; mov.u64 d5,attention_multiquery_shared; add.u64 d5,d5,d4; st.shared.f32 [d5],f3;
+ add.u64 d5,d5,16384; st.shared.f32 [d5],f4;
+ add.u32 r20,r20,256; bra MQ_SCORE_KEYS;
+MQ_SCORE_DONE:
+ // max0/nan0/max1/nan1 scratch starts at byte offsets 32768/33792/34816/35840.
+ mov.u64 d4,attention_multiquery_shared; mul.wide.u32 d5,r8,4;
+ add.u64 d6,d4,32768; add.u64 d6,d6,d5; st.shared.f32 [d6],f1;
+ add.u64 d6,d4,33792; add.u64 d6,d6,d5; st.shared.u32 [d6],r21;
+ add.u64 d6,d4,34816; add.u64 d6,d6,d5; st.shared.f32 [d6],f2;
+ add.u64 d6,d4,35840; add.u64 d6,d6,d5; st.shared.u32 [d6],r22;
+ bar.sync 0; mov.u32 r23,128;
+MQ_MAX_REDUCE:
+ setp.eq.u32 p0,r23,0; @p0 bra MQ_MAX_DONE;
+ setp.ge.u32 p1,r8,r23; @p1 bra MQ_MAX_BARRIER;
+ mov.u64 d4,attention_multiquery_shared; mul.wide.u32 d5,r8,4; add.u32 r24,r8,r23; mul.wide.u32 d6,r24,4;
+ add.u64 d7,d4,32768; add.u64 d7,d7,d5; add.u64 d8,d4,32768; add.u64 d8,d8,d6;
+ ld.shared.f32 f3,[d7]; ld.shared.f32 f4,[d8]; max.f32 f3,f3,f4; st.shared.f32 [d7],f3;
+ add.u64 d7,d4,33792; add.u64 d7,d7,d5; add.u64 d8,d4,33792; add.u64 d8,d8,d6;
+ ld.shared.u32 r25,[d7]; ld.shared.u32 r26,[d8]; or.b32 r25,r25,r26; st.shared.u32 [d7],r25;
+ add.u64 d7,d4,34816; add.u64 d7,d7,d5; add.u64 d8,d4,34816; add.u64 d8,d8,d6;
+ ld.shared.f32 f3,[d7]; ld.shared.f32 f4,[d8]; max.f32 f3,f3,f4; st.shared.f32 [d7],f3;
+ add.u64 d7,d4,35840; add.u64 d7,d7,d5; add.u64 d8,d4,35840; add.u64 d8,d8,d6;
+ ld.shared.u32 r25,[d7]; ld.shared.u32 r26,[d8]; or.b32 r25,r25,r26; st.shared.u32 [d7],r25;
+MQ_MAX_BARRIER:
+ bar.sync 0; shr.u32 r23,r23,1; bra MQ_MAX_REDUCE;
+MQ_MAX_DONE:
+ mov.u64 d4,attention_multiquery_shared; add.u64 d5,d4,32768; ld.shared.f32 f5,[d5];
+ add.u64 d5,d4,33792; ld.shared.u32 r21,[d5];
+ add.u64 d5,d4,34816; ld.shared.f32 f6,[d5];
+ add.u64 d5,d4,35840; ld.shared.u32 r22,[d5];
+
+ // Stable softmax for both rows; score storage is reused for probabilities.
+ mov.u32 r20,r8; mov.f32 f7,0f00000000; mov.f32 f8,0f00000000;
+MQ_SOFTMAX_KEYS:
+ setp.ge.u32 p0,r20,r4; @p0 bra MQ_SOFTMAX_DONE;
+ mul.wide.u32 d5,r20,4; mov.u64 d6,attention_multiquery_shared; add.u64 d7,d6,d5; ld.shared.f32 f3,[d7];
+ setp.ne.u32 p1,r21,0; @p1 bra MQ_SOFTMAX0_NAN;
+ sub.rn.f32 f3,f3,f5; mul.rn.f32 f3,f3,0f3FB8AA3B; ex2.approx.f32 f3,f3; add.rn.f32 f7,f7,f3; bra MQ_SOFTMAX0_STORE;
+MQ_SOFTMAX0_NAN:
+ mov.f32 f3,0f00000000;
+MQ_SOFTMAX0_STORE:
+ st.shared.f32 [d7],f3;
+ add.u64 d7,d7,16384; ld.shared.f32 f4,[d7];
+ setp.ne.u32 p1,r22,0; @p1 bra MQ_SOFTMAX1_NAN;
+ sub.rn.f32 f4,f4,f6; mul.rn.f32 f4,f4,0f3FB8AA3B; ex2.approx.f32 f4,f4; add.rn.f32 f8,f8,f4; bra MQ_SOFTMAX1_STORE;
+MQ_SOFTMAX1_NAN:
+ mov.f32 f4,0f00000000;
+MQ_SOFTMAX1_STORE:
+ st.shared.f32 [d7],f4; add.u32 r20,r20,256; bra MQ_SOFTMAX_KEYS;
+MQ_SOFTMAX_DONE:
+ mov.u64 d4,attention_multiquery_shared; mul.wide.u32 d5,r8,4;
+ add.u64 d6,d4,32768; add.u64 d6,d6,d5; st.shared.f32 [d6],f7;
+ add.u64 d6,d4,34816; add.u64 d6,d6,d5; st.shared.f32 [d6],f8;
+ bar.sync 0; mov.u32 r23,128;
+MQ_SUM_REDUCE:
+ setp.eq.u32 p0,r23,0; @p0 bra MQ_SUM_DONE;
+ setp.ge.u32 p1,r8,r23; @p1 bra MQ_SUM_BARRIER;
+ mov.u64 d4,attention_multiquery_shared; mul.wide.u32 d5,r8,4; add.u32 r24,r8,r23; mul.wide.u32 d6,r24,4;
+ add.u64 d7,d4,32768; add.u64 d7,d7,d5; add.u64 d8,d4,32768; add.u64 d8,d8,d6;
+ ld.shared.f32 f3,[d7]; ld.shared.f32 f4,[d8]; add.rn.f32 f3,f3,f4; st.shared.f32 [d7],f3;
+ add.u64 d7,d4,34816; add.u64 d7,d7,d5; add.u64 d8,d4,34816; add.u64 d8,d8,d6;
+ ld.shared.f32 f3,[d7]; ld.shared.f32 f4,[d8]; add.rn.f32 f3,f3,f4; st.shared.f32 [d7],f3;
+MQ_SUM_BARRIER:
+ bar.sync 0; shr.u32 r23,r23,1; bra MQ_SUM_REDUCE;
+MQ_SUM_DONE:
+ mov.u64 d4,attention_multiquery_shared; add.u64 d5,d4,32768; ld.shared.f32 f9,[d5];
+ add.u64 d5,d4,34816; ld.shared.f32 f10,[d5];
+
+ // One lane owns each value channel. Load each V once and accumulate both rows.
+ setp.ge.u32 p0,r8,r6; @p0 bra MQ_DONE;
+ mov.u32 r20,0; mov.f32 f11,0f00000000; mov.f32 f12,0f00000000;
+MQ_VALUE_KEYS:
+ setp.ge.u32 p0,r20,r4; @p0 bra MQ_VALUE_DONE;
+ mul.wide.u32 d5,r20,4; mov.u64 d6,attention_multiquery_shared; add.u64 d7,d6,d5; ld.shared.f32 f3,[d7];
+ add.u64 d7,d7,16384; ld.shared.f32 f4,[d7];
+ mad.lo.u32 r24,r20,r6,r18; add.u32 r24,r24,r8; mul.wide.u32 d8,r24,4; add.u64 d9,d2,d8; ld.global.f32 f5,[d9];
+ fma.rn.f32 f11,f3,f5,f11; fma.rn.f32 f12,f4,f5,f12;
+ add.u32 r20,r20,1; bra MQ_VALUE_KEYS;
+MQ_VALUE_DONE:
+ setp.ne.u32 p1,r21,0; @p1 bra MQ_VALUE0_NAN;
+ div.rn.f32 f11,f11,f9; bra MQ_VALUE0_STORE;
+MQ_VALUE0_NAN:
+ mov.f32 f11,0f7FC00000;
+MQ_VALUE0_STORE:
+ setp.ne.u32 p1,r22,0; @p1 bra MQ_VALUE1_NAN;
+ div.rn.f32 f12,f12,f10; bra MQ_VALUE1_STORE;
+MQ_VALUE1_NAN:
+ mov.f32 f12,0f7FC00000;
+MQ_VALUE1_STORE:
+ mad.lo.u32 r24,r9,r6,r8; mul.wide.u32 d8,r24,4; add.u64 d9,d3,d8; st.global.f32 [d9],f11;
+ add.u32 r24,r24,r6; mul.wide.u32 d8,r24,4; add.u64 d9,d3,d8; st.global.f32 [d9],f12;
+MQ_DONE:
+ ret;
+}
+.visible .entry attention_scores_fp32(
+ .param .u64 query, .param .u64 key, .param .u64 scores,
+ .param .u32 count, .param .u32 heads, .param .u32 kvheads,
+ .param .u32 qtokens, .param .u32 ktokens, .param .u32 width,
+ .param .u32 storageTokens, .param .u32 row_offset, .param .f32 scale
+) {
+ .reg .pred p;
+ .reg .b32 r<24>;
+ .reg .b64 d<9>;
+ .reg .f32 f<4>;
+ ld.param.u64 d0,[query]; ld.param.u64 d1,[key]; ld.param.u64 d2,[scores];
+ ld.param.u32 r0,[count]; ld.param.u32 r1,[heads]; ld.param.u32 r2,[kvheads];
+ ld.param.u32 r3,[qtokens]; ld.param.u32 r4,[ktokens]; ld.param.u32 r5,[width];
+ ld.param.u32 r6,[storageTokens]; ld.param.u32 r7,[row_offset]; ld.param.f32 f3,[scale];
+ mov.u32 r8,%tid.x; mov.u32 r9,%ctaid.x; mov.u32 r10,%ntid.x;
+ mad.lo.u32 r11,r9,r10,r8; setp.ge.u32 p,r11,r0; @p bra DONE;
+ div.u32 r12,r11,r4; rem.u32 r13,r11,r4; add.u32 r12,r12,r7;
+ div.u32 r14,r12,r3; rem.u32 r15,r14,r1; div.u32 r14,r14,r1;
+ div.u32 r16,r1,r2; div.u32 r15,r15,r16;
+ mad.lo.u32 r17,r14,r2,r15; mad.lo.u32 r17,r17,r6,r13;
+ mul.lo.u32 r17,r17,r5; mul.lo.u32 r18,r12,r5;
+ mov.u32 r19,0; mov.f32 f2,0f00000000;
+DOT:
+ setp.ge.u32 p,r19,r5; @p bra STORE;
+ add.u32 r20,r18,r19; mul.wide.u32 d3,r20,4; add.u64 d4,d0,d3;
+ add.u32 r21,r17,r19; mul.wide.u32 d5,r21,4; add.u64 d6,d1,d5;
+ ld.global.f32 f0,[d4]; ld.global.f32 f1,[d6]; fma.rn.f32 f2,f0,f1,f2;
+ add.u32 r19,r19,1; bra DOT;
+STORE:
+ mul.rn.f32 f2,f2,f3; mul.wide.u32 d7,r11,4; add.u64 d8,d2,d7;
+ st.global.f32 [d8],f2;
+DONE:
+ ret;
+}
+.visible .entry attention_prepare_fp32(.param .u64 scores, .param .u32 rows, .param .u32 keys) {
+ .reg .pred p,pnan,pnew;
+ .reg .b32 r<9>;
+ .reg .b64 d<3>;
+ .reg .f32 f<4>;
+ ld.param.u64 d0,[scores]; ld.param.u32 r0,[rows]; ld.param.u32 r1,[keys];
+ mov.u32 r2,%tid.x; mov.u32 r3,%ctaid.x; mov.u32 r4,%ntid.x;
+ mad.lo.u32 r5,r3,r4,r2; setp.ge.u32 p,r5,r0; @p bra DONE;
+ mul.lo.u32 r5,r5,r1; mov.u32 r6,0; mov.f32 f0,0fFF800000; setp.ne.u32 pnan,r0,r0;
+MAXIMUM:
+ setp.ge.u32 p,r6,r1; @p bra EXP_INIT;
+ add.u32 r7,r5,r6; mul.wide.u32 d1,r7,4; add.u64 d2,d0,d1;
+ ld.global.f32 f1,[d2]; setp.nan.f32 pnew,f1,f1; or.pred pnan,pnan,pnew; max.f32 f0,f0,f1;
+ add.u32 r6,r6,1; bra MAXIMUM;
+EXP_INIT:
+ @pnan mov.f32 f0,0f7fc00000;
+ mov.f32 f2,0f00000000; mov.u32 r6,0;
+EXP:
+ setp.ge.u32 p,r6,r1; @p bra NORMALIZE_INIT;
+ add.u32 r7,r5,r6; mul.wide.u32 d1,r7,4; add.u64 d2,d0,d1;
+ ld.global.f32 f1,[d2]; sub.rn.f32 f1,f1,f0; mul.rn.f32 f1,f1,0f3FB8AA3B;
+ ex2.approx.f32 f3,f1; st.global.f32 [d2],f3; add.rn.f32 f2,f2,f3;
+ add.u32 r6,r6,1; bra EXP;
+NORMALIZE_INIT:
+ mov.u32 r6,0;
+NORMALIZE:
+ setp.ge.u32 p,r6,r1; @p bra DONE;
+ add.u32 r7,r5,r6; mul.wide.u32 d1,r7,4; add.u64 d2,d0,d1;
+ ld.global.f32 f1,[d2]; div.rn.f32 f1,f1,f2; st.global.f32 [d2],f1;
+ add.u32 r6,r6,1; bra NORMALIZE;
+DONE:
+ ret;
+}
+.visible .entry attention_output_fp32(
+ .param .u64 value, .param .u64 probabilities, .param .u64 output,
+ .param .u32 count, .param .u32 heads, .param .u32 kvheads,
+ .param .u32 qtokens, .param .u32 ktokens, .param .u32 vwidth,
+ .param .u32 storageTokens, .param .u32 row_offset
+) {
+ .reg .pred p;
+ .reg .b32 r<23>;
+ .reg .b64 d<9>;
+ .reg .f32 f<3>;
+ ld.param.u64 d0,[value]; ld.param.u64 d1,[probabilities]; ld.param.u64 d2,[output];
+ ld.param.u32 r0,[count]; ld.param.u32 r1,[heads]; ld.param.u32 r2,[kvheads];
+ ld.param.u32 r3,[qtokens]; ld.param.u32 r4,[ktokens]; ld.param.u32 r5,[vwidth];
+ ld.param.u32 r6,[storageTokens]; ld.param.u32 r7,[row_offset];
+ mov.u32 r8,%tid.x; mov.u32 r9,%ctaid.x; mov.u32 r10,%ntid.x;
+ mad.lo.u32 r11,r9,r10,r8; setp.ge.u32 p,r11,r0; @p bra DONE;
+ div.u32 r12,r11,r5; rem.u32 r13,r11,r5;
+ mul.lo.u32 r14,r12,r4; add.u32 r12,r12,r7;
+ div.u32 r15,r12,r3; rem.u32 r16,r15,r1; div.u32 r15,r15,r1;
+ div.u32 r17,r1,r2; div.u32 r16,r16,r17;
+ mad.lo.u32 r18,r15,r2,r16; mul.lo.u32 r18,r18,r6;
+ mov.u32 r19,0; mov.f32 f0,0f00000000;
+WEIGHTED:
+ setp.ge.u32 p,r19,r4; @p bra STORE;
+ add.u32 r20,r14,r19; mul.wide.u32 d3,r20,4; add.u64 d4,d1,d3; ld.global.f32 f1,[d4];
+ add.u32 r20,r18,r19; mad.lo.u32 r20,r20,r5,r13;
+ mul.wide.u32 d5,r20,4; add.u64 d6,d0,d5; ld.global.f32 f2,[d6];
+ fma.rn.f32 f0,f1,f2,f0; add.u32 r19,r19,1; bra WEIGHTED;
+STORE:
+ mad.lo.u32 r21,r12,r5,r13; mul.wide.u32 d7,r21,4; add.u64 d8,d2,d7;
+ st.global.f32 [d8],f0;
+DONE:
+ ret;
+}
 .visible .entry cache_append(
  .param .u64 source, .param .u64 target, .param .u32 count,
  .param .u32 width, .param .u32 chunk, .param .u32 capacity, .param .u32 position
@@ -908,8 +1274,13 @@ RETURN:
  mov.f64 g7,0d3FE0000000000000; mov.u32 r,0;
 SERIES:
  add.rn.f64 g7,g7,0d3FF0000000000000;
- div.rn.f64 g11,g2,g7; mul.rn.f64 g5,g5,g11; add.rn.f64 g6,g6,g5;
+ div.rn.f64 g11,g2,g7; mul.rn.f64 g5,g5,g11;
+ mov.f64 g8,g6; add.rn.f64 g6,g6,g5;
+ // Here g2 < 1.5 and every subsequent positive term decreases. Once
+ // rounding stops changing the sum, no later term can change it either.
+ setp.eq.f64 p,g6,g8; @p bra SERIES_DONE;
  add.u32 r,r,1; setp.lt.u32 p,r,40; @p bra SERIES;
+SERIES_DONE:
  mul.rn.f64 g4,g3,g6; sub.rn.f64 g4,0d3FF0000000000000,g4; bra CDF;
 FRACTION:
  add.rn.f64 g7,g2,0d3FE0000000000000;
@@ -1164,18 +1535,133 @@ INVALID:
 DONE: ret;
 }
 
+// One warp per output for FP32 inference. Lanes split the input-channel/kernel
+// reduction, then use a butterfly sum; lane zero owns the output store.
+.visible .entry conv2d_fast(.param .u64 c_x, .param .u64 c_w, .param .u64 c_out,
+ .param .u64 c_geometry, .param .u32 c_count) {
+ .reg .pred p;
+ .reg .u32 ci,h,w,co,cg,kh,kw,oh,ow,sh,sw,ph,pw,dh,dw,groups;
+ .reg .u32 count,idx,ox,oy,oc,batch,first,ch,ky,kx,tmp,xi,wi;
+ .reg .u32 lane,warp,warps_per_block,total,k,positions,kernel_index,block;
+ .reg .u64 px,pwgt,pout,pg,addr,offset;
+ .reg .s64 iy,ix,tmp64;
+ .reg .f32 xf,wf,acc,other;
+ ld.param.u64 px,[c_x]; ld.param.u64 pwgt,[c_w]; ld.param.u64 pout,[c_out];
+ ld.param.u64 pg,[c_geometry]; ld.param.u32 count,[c_count];
+ mov.u32 tmp,%tid.x; and.b32 lane,tmp,31; shr.u32 warp,tmp,5;
+ mov.u32 tmp,%ntid.x; shr.u32 warps_per_block,tmp,5;
+ mov.u32 block,%ctaid.x; mad.lo.u32 idx,block,warps_per_block,warp;
+ setp.ge.u32 p,idx,count; @p bra CFW_DONE;
+ ld.global.u32 ci,[pg]; ld.global.u32 h,[pg+4]; ld.global.u32 w,[pg+8];
+ ld.global.u32 co,[pg+12]; ld.global.u32 cg,[pg+16]; ld.global.u32 kh,[pg+20];
+ ld.global.u32 kw,[pg+24]; ld.global.u32 oh,[pg+28]; ld.global.u32 ow,[pg+32];
+ ld.global.u32 sh,[pg+36]; ld.global.u32 sw,[pg+40]; ld.global.u32 ph,[pg+44];
+ ld.global.u32 pw,[pg+48]; ld.global.u32 dh,[pg+52]; ld.global.u32 dw,[pg+56];
+ ld.global.u32 groups,[pg+60];
+ rem.u32 ox,idx,ow; div.u32 tmp,idx,ow; rem.u32 oy,tmp,oh;
+ div.u32 tmp,tmp,oh; rem.u32 oc,tmp,co; div.u32 batch,tmp,co;
+ div.u32 tmp,co,groups; div.u32 first,oc,tmp; mul.lo.u32 first,first,cg;
+ mul.lo.u32 positions,kh,kw; mul.lo.u32 total,cg,positions;
+ mov.f32 acc,0f00000000; mov.u32 k,lane;
+CFW_LOOP:
+ setp.ge.u32 p,k,total; @p bra CFW_REDUCE;
+ div.u32 ch,k,positions; rem.u32 kernel_index,k,positions;
+ div.u32 ky,kernel_index,kw; rem.u32 kx,kernel_index,kw;
+ mul.wide.u32 iy,oy,sh; cvt.u64.u32 tmp64,ph; sub.s64 iy,iy,tmp64;
+ mul.wide.u32 tmp64,ky,dh; add.s64 iy,iy,tmp64;
+ setp.lt.s64 p,iy,0; @p bra CFW_NEXT;
+ cvt.u64.u32 tmp64,h; setp.ge.s64 p,iy,tmp64; @p bra CFW_NEXT;
+ mul.wide.u32 ix,ox,sw; cvt.u64.u32 tmp64,pw; sub.s64 ix,ix,tmp64;
+ mul.wide.u32 tmp64,kx,dw; add.s64 ix,ix,tmp64;
+ setp.lt.s64 p,ix,0; @p bra CFW_NEXT;
+ cvt.u64.u32 tmp64,w; setp.ge.s64 p,ix,tmp64; @p bra CFW_NEXT;
+ add.u32 tmp,first,ch; mad.lo.u32 xi,batch,ci,tmp;
+ cvt.u32.s64 tmp,iy; mad.lo.u32 xi,xi,h,tmp;
+ cvt.u32.s64 tmp,ix; mad.lo.u32 xi,xi,w,tmp;
+ mad.lo.u32 wi,oc,cg,ch; mad.lo.u32 wi,wi,kh,ky; mad.lo.u32 wi,wi,kw,kx;
+ mul.wide.u32 offset,xi,4; add.u64 addr,px,offset; ld.global.f32 xf,[addr];
+ mul.wide.u32 offset,wi,4; add.u64 addr,pwgt,offset; ld.global.f32 wf,[addr];
+ fma.rn.f32 acc,xf,wf,acc;
+CFW_NEXT:
+ add.u32 k,k,32; bra CFW_LOOP;
+CFW_REDUCE:
+ shfl.sync.bfly.b32 other,acc,16,31,0xffffffff;
+ add.rn.f32 acc,acc,other;
+ shfl.sync.bfly.b32 other,acc,8,31,0xffffffff;
+ add.rn.f32 acc,acc,other;
+ shfl.sync.bfly.b32 other,acc,4,31,0xffffffff;
+ add.rn.f32 acc,acc,other;
+ shfl.sync.bfly.b32 other,acc,2,31,0xffffffff;
+ add.rn.f32 acc,acc,other;
+ shfl.sync.bfly.b32 other,acc,1,31,0xffffffff;
+ add.rn.f32 acc,acc,other;
+ setp.ne.u32 p,lane,0; @p bra CFW_DONE;
+ mul.wide.u32 offset,idx,4; add.u64 addr,pout,offset; st.global.f32 [addr],acc;
+CFW_DONE: ret;
+}
+
+// Materialize one batch/group's input patches as a row-major [K, output_positions] matrix.
+.visible .entry im2col(.param .u64 c_x, .param .u64 c_col, .param .u64 c_geometry,
+ .param .u32 c_batch, .param .u32 c_group, .param .u32 c_position_start,
+ .param .u32 c_positions, .param .u32 c_count) {
+ .reg .pred p;
+ .reg .u32 ci,h,w,co,cg,kh,kw,oh,ow,sh,sw,ph,pw,dh,dw,groups,batch,group;
+ .reg .u32 count,idx,spatial,k,channel,ky,kx,kernel_index,position,local_position,position_start,positions,oy,ox,tmp,thread,threads;
+ .reg .u32 input_channel,xi,yi,wi;
+ .reg .u64 px,pcol,pg,addr,offset;
+ .reg .s64 iy,ix,tmp64;
+ .reg .f32 value;
+ ld.param.u64 px,[c_x]; ld.param.u64 pcol,[c_col]; ld.param.u64 pg,[c_geometry];
+ ld.param.u32 batch,[c_batch]; ld.param.u32 group,[c_group]; ld.param.u32 position_start,[c_position_start];
+ ld.param.u32 positions,[c_positions]; ld.param.u32 count,[c_count];
+ mov.u32 thread,%tid.x; mov.u32 idx,%ctaid.x; mov.u32 threads,%ntid.x;
+ mad.lo.u32 idx,idx,threads,thread; setp.ge.u32 p,idx,count; @p bra IC_DONE;
+ ld.global.u32 ci,[pg]; ld.global.u32 h,[pg+4]; ld.global.u32 w,[pg+8];
+ ld.global.u32 co,[pg+12]; ld.global.u32 cg,[pg+16]; ld.global.u32 kh,[pg+20];
+ ld.global.u32 kw,[pg+24]; ld.global.u32 oh,[pg+28]; ld.global.u32 ow,[pg+32];
+ ld.global.u32 sh,[pg+36]; ld.global.u32 sw,[pg+40]; ld.global.u32 ph,[pg+44];
+ ld.global.u32 pw,[pg+48]; ld.global.u32 dh,[pg+52]; ld.global.u32 dw,[pg+56];
+ ld.global.u32 groups,[pg+60];
+ mul.lo.u32 spatial,oh,ow; mul.lo.u32 kernel_index,kh,kw;
+ div.u32 k,idx,positions; rem.u32 local_position,idx,positions;
+ add.u32 position,position_start,local_position;
+ div.u32 channel,k,kernel_index; rem.u32 wi,k,kernel_index;
+ div.u32 ky,wi,kw; rem.u32 kx,wi,kw;
+ rem.u32 ox,position,ow; div.u32 oy,position,ow;
+ mul.wide.u32 iy,oy,sh; cvt.u64.u32 tmp64,ph; sub.s64 iy,iy,tmp64;
+ mul.wide.u32 tmp64,ky,dh; add.s64 iy,iy,tmp64;
+ setp.lt.s64 p,iy,0; @p bra IC_ZERO;
+ cvt.u64.u32 tmp64,h; setp.ge.s64 p,iy,tmp64; @p bra IC_ZERO;
+ mul.wide.u32 ix,ox,sw; cvt.u64.u32 tmp64,pw; sub.s64 ix,ix,tmp64;
+ mul.wide.u32 tmp64,kx,dw; add.s64 ix,ix,tmp64;
+ setp.lt.s64 p,ix,0; @p bra IC_ZERO;
+ cvt.u64.u32 tmp64,w; setp.ge.s64 p,ix,tmp64; @p bra IC_ZERO;
+ mad.lo.u32 input_channel,group,cg,channel;
+ mad.lo.u32 xi,batch,ci,input_channel; cvt.u32.s64 tmp,iy; mad.lo.u32 xi,xi,h,tmp;
+ cvt.u32.s64 tmp,ix; mad.lo.u32 xi,xi,w,tmp;
+ mul.wide.u32 offset,xi,4; add.u64 addr,px,offset; ld.global.f32 value,[addr];
+ bra IC_STORE;
+IC_ZERO:
+ mov.f32 value,0f00000000;
+IC_STORE:
+ mul.wide.u32 offset,idx,4; add.u64 addr,pcol,offset; st.global.f32 [addr],value;
+IC_DONE: ret;
+}
+
 // One thread per output, Double accumulation in the CPU reference's product order.
 .visible .entry conv2d(.param .u64 c_x, .param .u64 c_w, .param .u64 c_out,
- .param .u64 c_geometry, .param .u32 c_count) {
+ .param .u64 c_geometry, .param .u32 c_count, .param .u32 c_fast) {
  .reg .pred p;
  .reg .u32 ci,h,w,co,cg,kh,kw,oh,ow,sh,sw,ph,pw,dh,dw,groups;
  .reg .u32 count,idx,ox,oy,oc,batch,first,ch,ky,kx,tmp,xi,wi;
  .reg .u64 px,pwgt,pout,pg,addr,offset;
  .reg .s64 iy,ix,coord,tmp64;
  .reg .f32 xf,wf,result;
+ .reg .f32 fast_sum;
  .reg .f64 sum,xd,wd,product;
+ .reg .u32 fast_mode;
  ld.param.u64 px,[c_x]; ld.param.u64 pwgt,[c_w]; ld.param.u64 pout,[c_out];
- ld.param.u64 pg,[c_geometry]; ld.param.u32 count,[c_count];
+ ld.param.u64 pg,[c_geometry]; ld.param.u32 count,[c_count]; ld.param.u32 fast_mode,[c_fast];
  mov.u32 idx,%ctaid.x; mov.u32 tmp,%ntid.x; mul.lo.u32 idx,idx,tmp;
  mov.u32 tmp,%tid.x; add.u32 idx,idx,tmp; setp.ge.u32 p,idx,count; @p bra C_DONE;
  ld.global.u32 ci,[pg]; ld.global.u32 h,[pg+4]; ld.global.u32 w,[pg+8];
@@ -1187,7 +1673,7 @@ DONE: ret;
  rem.u32 ox,idx,ow; div.u32 tmp,idx,ow; rem.u32 oy,tmp,oh;
  div.u32 tmp,tmp,oh; rem.u32 oc,tmp,co; div.u32 batch,tmp,co;
  div.u32 tmp,co,groups; div.u32 first,oc,tmp; mul.lo.u32 first,first,cg;
- mov.f64 sum,0d0000000000000000; mov.u32 ch,0;
+ mov.f64 sum,0d0000000000000000; mov.f32 fast_sum,0f00000000; mov.u32 ch,0;
 C_CHANNEL:
  setp.ge.u32 p,ch,cg; @p bra C_STORE;
  mov.u32 ky,0;
@@ -1210,7 +1696,11 @@ C_COL:
  mad.lo.u32 wi,oc,cg,ch; mad.lo.u32 wi,wi,kh,ky; mad.lo.u32 wi,wi,kw,kx;
  mul.wide.u32 offset,xi,4; add.u64 addr,px,offset; ld.global.f32 xf,[addr];
  mul.wide.u32 offset,wi,4; add.u64 addr,pwgt,offset; ld.global.f32 wf,[addr];
- cvt.f64.f32 xd,xf; cvt.f64.f32 wd,wf; mul.rn.f64 product,xd,wd; add.rn.f64 sum,sum,product;
+ setp.ne.u32 p,fast_mode,0; @p bra C_FAST_ACCUM;
+ cvt.f64.f32 xd,xf; cvt.f64.f32 wd,wf; mul.rn.f64 product,xd,wd; add.rn.f64 sum,sum,product; bra C_ACCUM_DONE;
+C_FAST_ACCUM:
+ fma.rn.f32 fast_sum,xf,wf,fast_sum;
+C_ACCUM_DONE:
 C_NEXT_COL:
  add.u32 kx,kx,1; bra C_COL;
 C_NEXT_ROW:
@@ -1218,7 +1708,12 @@ C_NEXT_ROW:
 C_NEXT_CHANNEL:
  add.u32 ch,ch,1; bra C_CHANNEL;
 C_STORE:
- cvt.rn.f32.f64 result,sum; mul.wide.u32 offset,idx,4; add.u64 addr,pout,offset; st.global.f32 [addr],result;
+ setp.ne.u32 p,fast_mode,0; @p bra C_FAST_STORE;
+ cvt.rn.f32.f64 result,sum; bra C_STORE_OUTPUT;
+C_FAST_STORE:
+ mov.f32 result,fast_sum;
+C_STORE_OUTPUT:
+ mul.wide.u32 offset,idx,4; add.u64 addr,pout,offset; st.global.f32 [addr],result;
 C_DONE: ret;
 }
 
@@ -1271,4 +1766,69 @@ GN_STORE:
  mul.wide.u32 offset,index,4; add.u64 addr,po,offset; st.global.f32 [addr],result;
  add.u32 i,i,1; bra GN_OUTPUT;
 GN_DONE: ret;
+}
+
+// Preserve the original serial double-precision reduction order, then apply
+// the resulting statistics in parallel across the full tensor.
+.visible .entry groupnorm_stats(.param .u64 gs_x,.param .u64 gs_stats,
+ .param .u32 gs_rows,.param .u32 gs_width,.param .f64 gs_eps) {
+ .reg .pred p;
+ .reg .u32 rows,width,gidx,tmp,start,i,index;
+ .reg .u64 px,ps,offset,addr;
+ .reg .f32 x;
+ .reg .f64 mean,variance,value,centered,product,denom,inverse,eps;
+ ld.param.u64 px,[gs_x]; ld.param.u64 ps,[gs_stats];
+ ld.param.u32 rows,[gs_rows]; ld.param.u32 width,[gs_width]; ld.param.f64 eps,[gs_eps];
+ mov.u32 gidx,%ctaid.x; mov.u32 tmp,%ntid.x; mul.lo.u32 gidx,gidx,tmp;
+ mov.u32 tmp,%tid.x; add.u32 gidx,gidx,tmp; setp.ge.u32 p,gidx,rows; @p bra GS_DONE;
+ mul.lo.u32 start,gidx,width; cvt.rn.f64.u32 denom,width;
+ mov.f64 mean,0d0000000000000000; mov.u32 i,0;
+GS_MEAN:
+ setp.ge.u32 p,i,width; @p bra GS_VAR_START;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; cvt.f64.f32 value,x; add.rn.f64 mean,mean,value;
+ add.u32 i,i,1; bra GS_MEAN;
+GS_VAR_START:
+ div.rn.f64 mean,mean,denom; mov.f64 variance,0d0000000000000000; mov.u32 i,0;
+GS_VAR:
+ setp.ge.u32 p,i,width; @p bra GS_STORE;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; cvt.f64.f32 value,x; sub.rn.f64 centered,value,mean;
+ mul.rn.f64 product,centered,centered; add.rn.f64 variance,variance,product;
+ add.u32 i,i,1; bra GS_VAR;
+GS_STORE:
+ div.rn.f64 variance,variance,denom; add.rn.f64 variance,variance,eps;
+ sqrt.rn.f64 inverse,variance; div.rn.f64 inverse,0d3FF0000000000000,inverse;
+ mul.wide.u32 offset,gidx,16; add.u64 addr,ps,offset; st.global.f64 [addr],mean;
+ add.u64 addr,addr,8; st.global.f64 [addr],inverse;
+GS_DONE: ret;
+}
+
+.visible .entry groupnorm_apply(.param .u64 ga_x,.param .u64 ga_weight,.param .u64 ga_bias,
+ .param .u64 ga_out,.param .u64 ga_stats,.param .u32 ga_count,.param .u32 ga_width,
+ .param .u32 ga_channels,.param .u32 ga_spatial) {
+ .reg .pred p;
+ .reg .u32 index,tmp,count,width,channels,spatial,group,channel;
+ .reg .u64 px,pw,pb,po,ps,offset,addr;
+ .reg .f32 x,result,affine;
+ .reg .f64 mean,inverse,value,centered;
+ ld.param.u64 px,[ga_x]; ld.param.u64 pw,[ga_weight]; ld.param.u64 pb,[ga_bias];
+ ld.param.u64 po,[ga_out]; ld.param.u64 ps,[ga_stats];
+ ld.param.u32 count,[ga_count]; ld.param.u32 width,[ga_width];
+ ld.param.u32 channels,[ga_channels]; ld.param.u32 spatial,[ga_spatial];
+ mov.u32 index,%ctaid.x; mov.u32 tmp,%ntid.x; mul.lo.u32 index,index,tmp;
+ mov.u32 tmp,%tid.x; add.u32 index,index,tmp; setp.ge.u32 p,index,count; @p bra GA_DONE;
+ div.u32 group,index,width; mul.wide.u32 offset,group,16; add.u64 addr,ps,offset;
+ ld.global.f64 mean,[addr]; add.u64 addr,addr,8; ld.global.f64 inverse,[addr];
+ mul.wide.u32 offset,index,4; add.u64 addr,px,offset; ld.global.f32 x,[addr];
+ cvt.f64.f32 value,x; sub.rn.f64 centered,value,mean; mul.rn.f64 value,centered,inverse;
+ cvt.rn.f32.f64 result,value; div.u32 channel,index,spatial; rem.u32 channel,channel,channels;
+ setp.eq.u64 p,pw,0; @p bra GA_BIAS;
+ mul.wide.u32 offset,channel,4; add.u64 addr,pw,offset; ld.global.f32 affine,[addr]; mul.rn.f32 result,result,affine;
+GA_BIAS:
+ setp.eq.u64 p,pb,0; @p bra GA_STORE;
+ mul.wide.u32 offset,channel,4; add.u64 addr,pb,offset; ld.global.f32 affine,[addr]; add.rn.f32 result,result,affine;
+GA_STORE:
+ mul.wide.u32 offset,index,4; add.u64 addr,po,offset; st.global.f32 [addr],result;
+GA_DONE: ret;
 }

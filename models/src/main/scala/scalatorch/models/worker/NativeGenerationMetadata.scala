@@ -5,22 +5,29 @@ import scalatorch.models.{DiffusionPrediction,SdxlImageSize}
 /** NUI retains string infotext locally; execution overrides must still be interpreted. */
 private[worker] object NativeGenerationMetadata:
   import NativeJson.*
-  def prediction(value: Option[NativeJson],configured: DiffusionPrediction): DiffusionPrediction =
+  def prediction(value: Option[NativeJson],configured: DiffusionPrediction,cudaAvailable: Boolean=true): DiffusionPrediction =
     val fields=value match
       case None => Map.empty[String,NativeJson]
       case Some(Obj(items)) => items
       case _ => throw IllegalArgumentException("extra must be an object of strings")
     require(fields.values.forall(_.isInstanceOf[Str]),"extra values must be strings")
-    // Java Gaussian noise is not PyTorch CPU/CUDA or NV Philox noise. Do not claim
-    // seed compatibility when the caller explicitly selects one of those algorithms.
-    if fields.contains("rng") then
-      throw new NativeBackendError("unsupported","explicit rng selection is not implemented")
+    torchCpuNoise(value,cudaAvailable)
     fields.get("prediction_type").map(_.asInstanceOf[Str].value.trim).getOrElse("") match
       case "" => configured
       case "epsilon" => DiffusionPrediction.Epsilon
       case "v_prediction" => DiffusionPrediction.VPrediction
       case "sample" => DiffusionPrediction.Sample
       case name => throw IllegalArgumentException(s"unsupported prediction_type: $name")
+
+  def torchCpuNoise(value: Option[NativeJson],cudaAvailable: Boolean=true): Boolean = value match
+    case None => false
+    case Some(Obj(fields)) => fields.get("rng") match
+      case None => false
+      case Some(Str(name)) if name.toLowerCase(java.util.Locale.ROOT)=="cpu" => true
+      case Some(Str(name)) if name.toLowerCase(java.util.Locale.ROOT)=="gpu" && !cudaAvailable => true
+      case Some(Str(_)) => throw new NativeBackendError("unsupported","only explicit CPU rng selection is implemented")
+      case Some(_) => throw IllegalArgumentException("rng must be a string")
+    case _ => throw IllegalArgumentException("extra must be an object of strings")
 
   private val sizeKeys=Set("sdfx_sdxl_original_height","sdfx_sdxl_original_width","sdfx_sdxl_crop_top","sdfx_sdxl_crop_left")
   def sdxlSize(value: Option[NativeJson],isSdxl: Boolean): Option[SdxlImageSize] =

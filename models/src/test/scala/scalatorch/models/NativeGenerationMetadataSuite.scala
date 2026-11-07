@@ -16,6 +16,13 @@ class NativeGenerationMetadataSuite extends munit.FunSuite:
     intercept[IllegalArgumentException](NativeGenerationMetadata.prediction(Some(Arr(Vector.empty)),DiffusionPrediction.Epsilon))
     intercept[IllegalArgumentException](NativeGenerationMetadata.prediction(Some(Obj(Map("key"->Number(1)))),DiffusionPrediction.Epsilon))
     intercept[IllegalArgumentException](NativeGenerationMetadata.prediction(Some(Obj(Map("prediction_type"->Str("typo")))),DiffusionPrediction.Epsilon))
-    for name <- Vector("cpu","gpu","nv") do
+    assertEquals(NativeGenerationMetadata.prediction(Some(Obj(Map("rng"->Str("cpu")))),DiffusionPrediction.Epsilon),DiffusionPrediction.Epsilon)
+    for name <- Vector("gpu","nv") do
       intercept[NativeBackendError](NativeGenerationMetadata.prediction(Some(Obj(Map("rng"->Str(name)))),DiffusionPrediction.Epsilon))
+  }
+  test("GPU RNG request falls back to CPU only when CUDA is unavailable") {
+    val gpu=Some(Obj(Map("rng"->Str("gpu"))))
+    assert(NativeGenerationMetadata.torchCpuNoise(gpu,cudaAvailable=false))
+    assertEquals(NativeGenerationMetadata.prediction(gpu,DiffusionPrediction.Epsilon,cudaAvailable=false),DiffusionPrediction.Epsilon)
+    intercept[NativeBackendError](NativeGenerationMetadata.torchCpuNoise(gpu,cudaAvailable=true))
   }

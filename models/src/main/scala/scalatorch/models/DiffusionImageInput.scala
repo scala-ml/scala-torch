@@ -10,6 +10,36 @@ import scala.util.Using
 
 /** Bounded ImageIO decoding, EXIF orientation and NUI RGB/white-alpha conversion. */
 object DiffusionImageInput:
+  /** NUI masks use a non-opaque RGBA/LA alpha channel, otherwise luminance. */
+  def readMask(path: Path,maxPixels: Long=16777216L,maxBytes: Long=268435456L): BufferedImage =
+    require(maxPixels>=0 && maxBytes>=0 && Files.isRegularFile(path),"invalid input image path or limits")
+    require(Files.size(path)<=maxBytes,"encoded image exceeds byte limit")
+    val stream=ImageIO.createImageInputStream(path.toFile)
+    require(stream!=null,"image stream unavailable")
+    Using.resource(stream) { input =>
+      val readers=ImageIO.getImageReaders(input)
+      require(readers.hasNext,"unsupported or invalid image format")
+      val reader=readers.next()
+      try
+        reader.setInput(input,false,false)
+        val width=reader.getWidth(0);val height=reader.getHeight(0)
+        require(width>0 && height>0 && width.toLong*height<=math.min(maxPixels,Int.MaxValue.toLong),"decoded image exceeds pixel limit")
+        val source=reader.read(0)
+        val color=source.getColorModel
+        val alphaEligible=color.hasAlpha && !color.isInstanceOf[java.awt.image.IndexColorModel]
+        val alpha=alphaEligible && (0 until height).exists(y => (0 until width).exists(x => ((source.getRGB(x,y)>>>24)&255)!=255))
+        val gray=color.getColorSpace.getType==ColorSpace.TYPE_GRAY
+        val result=new BufferedImage(width,height,BufferedImage.TYPE_INT_RGB)
+        for y <- 0 until height; x <- 0 until width do
+          val pixel=source.getRGB(x,y)
+          val level=if alpha then (pixel>>>24)&255
+            else if gray then math.min(255,source.getRaster.getSample(x,y,0))
+            else (19595*((pixel>>>16)&255)+38470*((pixel>>>8)&255)+7471*(pixel&255)+32768)>>>16
+          result.setRGB(x,y,(level<<16)|(level<<8)|level)
+        result
+      finally reader.dispose()
+    }
+
   private def tiffOrientation(bytes: Array[Byte]): Int =
     require(bytes.length>=8,"truncated EXIF header")
     val little=bytes(0)==73 && bytes(1)==73
@@ -71,10 +101,11 @@ object DiffusionImageInput:
       else 1
   }
 
-  def readRgb(path: Path,maxPixels: Long=16777216L,maxBytes: Long=268435456L): BufferedImage =
+  def readRgb(path: Path,maxPixels: Long=16777216L,maxBytes: Long=268435456L,
+      compositeAlpha: Boolean=true,applyOrientation: Boolean=true): BufferedImage =
     require(maxPixels>=0 && maxBytes>=0 && Files.isRegularFile(path),"invalid input image path or limits")
     require(Files.size(path)<=maxBytes,"encoded image exceeds byte limit")
-    val turn=orientation(path)
+    val turn=if applyOrientation then orientation(path) else 1
     val stream=ImageIO.createImageInputStream(path.toFile)
     require(stream!=null,"image stream unavailable")
     Using.resource(stream) { input =>
@@ -96,7 +127,8 @@ object DiffusionImageInput:
           val alpha=(pixel >>> 24)&255
           var rgb=0
           for shift <- Seq(16,8,0) do
-            val channel=(((pixel >>> shift)&255)*alpha+255*(255-alpha)+127)/255
+            val channel=if compositeAlpha then (((pixel >>> shift)&255)*alpha+255*(255-alpha)+127)/255
+              else (pixel >>> shift)&255
             rgb|=channel << shift
           val (dx,dy)=turn match
             case 2 => (width-1-x,y)

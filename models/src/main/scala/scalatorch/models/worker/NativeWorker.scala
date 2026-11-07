@@ -63,6 +63,8 @@ final class NativeWorker(out: OutputStream,backend: NativeWorkerBackend) extends
             emitter.result(job.id,result)
           catch
             case _: CancellationException => emitter.error(Some(job.id),"interrupted","request interrupted")
+            case _: OutOfMemoryError => emitter.error(Some(job.id),"resource_exhausted",
+              "JVM memory exhausted; use a smaller model or increase the worker heap")
             case e: NativeBackendError => emitter.error(Some(job.id),e.code,e.getMessage)
             case e: IllegalArgumentException => emitter.error(Some(job.id),"invalid_params",Option(e.getMessage).getOrElse("invalid parameters"))
             case NonFatal(e) => emitter.error(Some(job.id),"internal",Option(e.getMessage).getOrElse(e.getClass.getSimpleName))

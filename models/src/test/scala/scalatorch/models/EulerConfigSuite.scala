@@ -31,6 +31,23 @@ class EulerConfigSuite extends munit.FunSuite:
     val expected=c.noise.karrasEuler(4)
     assertEquals(c.scheduler(4).schedule,expected.copy(initialNoiseSigma=math.hypot(expected.initialNoiseSigma,1)))
   }
+  test("PNDM model scheduler metadata supplies shared beta configuration to the selected native sampler") {
+    val c=EulerConfig.fromJson("""{"_class_name":"PNDMScheduler","_diffusers_version":"0.6.0",
+      "beta_end":0.012,"beta_schedule":"scaled_linear","beta_start":0.00085,
+      "num_train_timesteps":1000,"set_alpha_to_one":false,"skip_prk_steps":true,
+      "steps_offset":1,"trained_betas":null,"clip_sample":false}""")
+    assertEquals(c.scheduler(4).schedule,
+      DiffusionNoiseSchedule.linear(1000,0.00085,0.012,true).euler(4,DiffusionTimestepSpacing.Linspace,1))
+  }
+  test("official SDXL Euler config accepts inherited PNDM metadata") {
+    val c=EulerConfig.fromJson("""{"_class_name":"EulerDiscreteScheduler",
+      "beta_end":0.012,"beta_schedule":"scaled_linear","beta_start":0.00085,
+      "clip_sample":false,"sample_max_value":1.0,"set_alpha_to_one":false,
+      "skip_prk_steps":true,"timestep_spacing":"leading","steps_offset":1}""")
+    assertEquals(c.scheduler(4).schedule,
+      DiffusionNoiseSchedule.linear(1000,0.00085,0.012,true).euler(4,DiffusionTimestepSpacing.Leading,1))
+    intercept[IllegalArgumentException](EulerConfig.fromJson("""{"clip_sample":"false"}"""))
+  }
   test("unsupported semantics and malformed JSON fail instead of silently using defaults") {
     for json <- Vector("""{"use_exponential_sigmas":true}""", """{"prediction_type":"unknown"}""",
       """{"_class_name":"DDIMScheduler"}""", """{"num_train_timesteps":2.5}""",

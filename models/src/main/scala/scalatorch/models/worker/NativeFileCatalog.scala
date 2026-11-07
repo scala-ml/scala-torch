@@ -40,14 +40,15 @@ object NativeFileCatalog:
           if seen.add(canonical) then
             require(entries.size<100000,"file catalog result exceeds limit")
             val relative=base.relativize(path).toString.replace('\\','/')
-            val name=if directory then relative else relative.substring(0,relative.lastIndexOf('.'))
+            val name=if directory && relative.isEmpty then canonical.getFileName.toString
+              else if directory then relative else relative.substring(0,relative.lastIndexOf('.'))
             val bytes=if directory then size(path) else BigInt(Files.size(path))
             entries+=name->Obj(Map("name"->Str(name),"path"->Str(path.toString),
               "size_mb"->Number((BigDecimal(bytes)/1048576).setScale(2,BigDecimal.RoundingMode.HALF_EVEN))))
         Files.walkFileTree(base,new SimpleFileVisitor[Path]:
           override def preVisitDirectory(path: Path,a: BasicFileAttributes): FileVisitResult=
             check()
-            if path!=base && markers.get(kind).exists(marker => Files.isRegularFile(path.resolve(marker))) then
+            if markers.get(kind).exists(marker => Files.isRegularFile(path.resolve(marker))) then
               add(path,true);FileVisitResult.SKIP_SUBTREE
             else if path!=base && path.getFileName.toString.startsWith(".") then FileVisitResult.SKIP_SUBTREE
             else FileVisitResult.CONTINUE

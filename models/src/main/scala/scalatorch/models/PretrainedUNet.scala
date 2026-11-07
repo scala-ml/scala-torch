@@ -18,6 +18,23 @@ object PretrainedUNet:
     require(maxParameters>=0 && maxScoreElements>=0,"negative U-Net parameter or attention budget")
     val c=UNetConfig.read(directory.resolve("config.json"))
     Using.resource(SafeTensorSet.open(directory,filename="diffusion_pytorch_model.safetensors")) { archive =>
+      loadFromView(SingleFileTensorView(archive,archive.tensors.keysIterator.map(name => name -> name).toVector),
+        c,trainable,maxParameters,maxScoreElements)
+    }
+
+  private[models] def loadSingleFile(archive: SafeTensorSet,trainable: Boolean=false,
+      maxParameters: Long=1000000000L,maxScoreElements: Long=16777216L): LoadedLinearModel[ConditionalUNet2d] =
+    val config = SingleFileSd1Config.unetConfigFor(archive)
+    loadFromView(SingleFileTensorView.unet(archive),config,trainable,maxParameters,maxScoreElements)
+
+  private[models] def loadSd1View(archive: SingleFileTensorView,config: UNetConfig,
+      maxScoreElements: Long,maxParameters: Long=1000000000L): LoadedLinearModel[ConditionalUNet2d] =
+    loadFromView(archive,config,false,maxParameters,maxScoreElements)
+
+  private def loadFromView(archive: SingleFileTensorView,c: UNetConfig,trainable: Boolean,
+      maxParameters: Long,maxScoreElements: Long): LoadedLinearModel[ConditionalUNet2d] =
+    require(maxParameters>=0 && maxScoreElements>=0,"negative U-Net parameter or attention budget")
+    locally {
       val total=archive.tensors.values.foldLeft(BigInt(0))((sum,t) => sum+t.shape.numel)
       require(total<=maxParameters,"U-Net weights exceed parameter budget")
       val used=mutable.Set.empty[String]
@@ -33,7 +50,9 @@ object PretrainedUNet:
         targets(s"unet.$name")=weight
         Linear(weight,if bias then Some(parameter(s"$name.bias",out)) else None)
       def conv(name: String,in: Int,out: Int,k: Int=3,stride: Int=1,padding: Int=1): Conv2d =
-        Conv2d(parameter(s"$name.weight",out,in,k,k),Some(parameter(s"$name.bias",out)),
+        val weight=parameter(s"$name.weight",out,in,k,k)
+        targets(s"unet.$name")=weight
+        Conv2d(weight,Some(parameter(s"$name.bias",out)),
           Conv2dConfig(stride=(stride,stride),padding=(padding,padding)))
       def group(name: String,width: Int,epsilon: Double): GroupNorm =
         GroupNorm(c.groups,width,Some(parameter(s"$name.weight",width)),Some(parameter(s"$name.bias",width)),epsilon)
@@ -57,7 +76,9 @@ object PretrainedUNet:
           if !c.linearProjection then conv(prefix,width,width,1,padding=0)
           else
             val flat=parameter(s"$prefix.weight",width,width)
-            Conv2d(Parameter(flat.data.reshape(Shape.from(Seq(width.toLong,width.toLong,1L,1L))),trainable),
+            val weight=Parameter(flat.data.reshape(Shape.from(Seq(width.toLong,width.toLong,1L,1L))),trainable)
+            targets(s"unet.$prefix")=weight
+            Conv2d(weight,
               Some(parameter(s"$prefix.bias",width)),Conv2dConfig())
         DiffusionSpatialTransformer(group(s"$name.norm",width,1e-6),projection(s"$name.proj_in"),
           blocks,projection(s"$name.proj_out"))

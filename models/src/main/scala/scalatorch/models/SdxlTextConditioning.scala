@@ -7,8 +7,8 @@ final case class SdxlPromptPair(positive: Tensor[Float],negative: Tensor[Float],
     pooled: Tensor[Float],negativePooled: Tensor[Float])
 
 /** Base SDXL dual CLIP conditioning with NUI attention and chunk semantics. */
-final class SdxlTextConditioning(tokenizer: ClipFastTokenizer,encoder: ClipTextModel,
-    tokenizer2: ClipFastTokenizer,encoder2: ClipTextModel,maxElements: Long=67108864L):
+final class SdxlTextConditioning(val tokenizer: ClipFastTokenizer,val encoder: ClipTextModel,
+    val tokenizer2: ClipFastTokenizer,val encoder2: ClipTextModel,val maxElements: Long=67108864L):
   require(maxElements>=0,"negative SDXL conditioning budget")
   require(encoder2.textProjection.nonEmpty,"SDXL encoder2 requires a text projection")
   private val width1=encoder.finalNorm.width

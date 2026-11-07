@@ -1,0 +1,594 @@
+{
+  "diffusers": "0.33.1",
+  "source": "ad634338c07deb7296ac2900684d967715f1e2fb366cc384da702d6892e68009",
+  "cases": [
+    {
+      "profile": 0,
+      "sampler": "DPM++ 2M",
+      "count": 1,
+      "timesteps": [
+        998
+      ],
+      "sigmas": [
+        14.614646911621094,
+        0.0
+      ],
+      "warnings": []
+    },
+    {
+      "profile": 0,
+      "sampler": "DPM++ 2M",
+      "count": 3,
+      "timesteps": [
+        998,
+        233,
+        0
+      ],
+      "sigmas": [
+        14.614646911621094,
+        0.6528960466384888,
+        0.02916753478348255,
+        0.0
+      ],
+      "warnings": []
+    },
+    {
+      "profile": 0,
+      "sampler": "DPM++ 2M",
+      "count": 4,
+      "timesteps": [
+        998,
+        538,
+        52,
+        0
+      ],
+      "sigmas": [
+        14.614646911621094,
+        1.8400323390960693,
+        0.23166616261005402,
+        0.02916753478348255,
+        0.0
+      ],
+      "warnings": []
+    },
+    {
+      "profile": 0,
+      "sampler": "DPM++ 2M",
+      "count": 7,
+      "timesteps": [
+        998,
+        803,
+        538,
+        233,
+        52,
+        6,
+        0
+      ],
+      "sigmas": [
+        14.614646911621094,
+        5.185694217681885,
+        1.8400323390960693,
+        0.6528960466384888,
+        0.23166616261005402,
+        0.0822017714381218,
+        0.02916753478348255,
+        0.0
+      ],
+      "warnings": []
+    },
+    {
+      "profile": 0,
+      "sampler": "DPM++ 2M",
+      "count": 9,
+      "timesteps": [
+        998,
+        857,
+        680,
+        460,
+        233,
+        80,
+        20,
+        3,
+        0
+      ],
+      "sigmas": [
+        14.614646911621094,
+        6.718963146209717,
+        3.0889875888824463,
+        1.420136570930481,
+        0.6528960466384888,
+        0.30016353726387024,
+        0.13799770176410675,
+        0.06344330310821533,
+        0.02916753478348255,
+        0.0
+      ],
+      "warnings": []
+    },
+    {
+      "profile": 0,
+      "sampler": "Euler a",
+      "count": 1,
+      "timesteps": [
+        1.0
+      ],
+      "sigmas": [
+        0.04131447896361351,
+        0.0
+      ],
+      "warnings": [
+        "schedule 'Exponential' is not supported by sampler 'Euler a'; using the sampler's default spacing"
+      ]
+    },
+    {
+      "profile": 0,
+      "sampler": "Euler a",
+      "count": 3,
+      "timesteps": [
+        667.0,
+        334.0,
+        1.0
+      ],
+      "sigmas": [
+        2.9295501708984375,
+        0.9355102181434631,
+        0.04131447896361351,
+        0.0
+      ],
+      "warnings": [
+        "schedule 'Exponential' is not supported by sampler 'Euler a'; using the sampler's default spacing"
+      ]
+    },
+    {
+      "profile": 0,
+      "sampler": "Euler a",
+      "count": 4,
+      "timesteps": [
+        751.0,
+        501.0,
+        251.0,
+        1.0
+      ],
+      "sigmas": [
+        4.116698265075684,
+        1.6236929893493652,
+        0.6983985900878906,
+        0.04131447896361351,
+        0.0
+      ],
+      "warnings": [
+        "schedule 'Exponential' is not supported by sampler 'Euler a'; using the sampler's default spacing"
+      ]
+    },
+    {
+      "profile": 0,
+      "sampler": "Euler a",
+      "count": 7,
+      "timesteps": [
+        853.0,
+        711.0,
+        569.0,
+        427.0,
+        285.0,
+        143.0,
+        1.0
+      ],
+      "sigmas": [
+        6.570651531219482,
+        3.4854564666748047,
+        2.0473127365112305,
+        1.2720634937286377,
+        0.7900615334510803,
+        0.4403095841407776,
+        0.04131447896361351,
+        0.0
+      ],
+      "warnings": [
+        "schedule 'Exponential' is not supported by sampler 'Euler a'; using the sampler's default spacing"
+      ]
+    },
+    {
+      "profile": 0,
+      "sampler": "Euler a",
+      "count": 9,
+      "timesteps": [
+        889.0,
+        778.0,
+        667.0,
+        556.0,
+        445.0,
+        334.0,
+        223.0,
+        112.0,
+        1.0
+      ],
+      "sigmas": [
+        7.880584716796875,
+        4.6296210289001465,
+        2.9295501708984375,
+        1.9569122791290283,
+        1.3493468761444092,
+        0.9355102181434631,
+        0.6274458765983582,
+        0.3708992302417755,
+        0.04131447896361351,
+        0.0
+      ],
+      "warnings": [
+        "schedule 'Exponential' is not supported by sampler 'Euler a'; using the sampler's default spacing"
+      ]
+    },
+    {
+      "profile": 1,
+      "sampler": "DPM++ 2M",
+      "count": 1,
+      "timesteps": [
+        999
+      ],
+      "sigmas": [
+        157.4072723388672,
+        0.0
+      ],
+      "warnings": []
+    },
+    {
+      "profile": 1,
+      "sampler": "DPM++ 2M",
+      "count": 3,
+      "timesteps": [
+        999,
+        302,
+        0
+      ],
+      "sigmas": [
+        157.4072723388672,
+        1.2547039985656738,
+        0.010001329705119133,
+        0.0
+      ],
+      "warnings": []
+    },
+    {
+      "profile": 1,
+      "sampler": "DPM++ 2M",
+      "count": 4,
+      "timesteps": [
+        999,
+        602,
+        72,
+        0
+      ],
+      "sigmas": [
+        157.4072723388672,
+        6.281101226806641,
+        0.2506379187107086,
+        0.010001329705119133,
+        0.0
+      ],
+      "warnings": []
+    },
+    {
+      "profile": 1,
+      "sampler": "DPM++ 2M",
+      "count": 7,
+      "timesteps": [
+        999,
+        824,
+        602,
+        302,
+        72,
+        10,
+        0
+      ],
+      "sigmas": [
+        157.4072723388672,
+        31.443456649780273,
+        6.281101226806641,
+        1.2547039985656738,
+        0.2506379187107086,
+        0.050067078322172165,
+        0.010001329705119133,
+        0.0
+      ],
+      "warnings": []
+    },
+    {
+      "profile": 1,
+      "sampler": "DPM++ 2M",
+      "count": 9,
+      "timesteps": [
+        999,
+        871,
+        721,
+        535,
+        302,
+        109,
+        30,
+        6,
+        0
+      ],
+      "sigmas": [
+        157.4072723388672,
+        47.03313446044922,
+        14.053452491760254,
+        4.199157238006592,
+        1.2547039985656738,
+        0.3749042749404907,
+        0.11202101409435272,
+        0.033471766859292984,
+        0.010001329705119133,
+        0.0
+      ],
+      "warnings": []
+    },
+    {
+      "profile": 1,
+      "sampler": "Euler a",
+      "count": 1,
+      "timesteps": [
+        1.0
+      ],
+      "sigmas": [
+        0.014832044020295143,
+        0.0
+      ],
+      "warnings": [
+        "schedule 'Exponential' is not supported by sampler 'Euler a'; using the sampler's default spacing"
+      ]
+    },
+    {
+      "profile": 1,
+      "sampler": "Euler a",
+      "count": 3,
+      "timesteps": [
+        667.0,
+        334.0,
+        1.0
+      ],
+      "sigmas": [
+        9.553787231445312,
+        1.469635009765625,
+        0.014832044020295143,
+        0.0
+      ],
+      "warnings": [
+        "schedule 'Exponential' is not supported by sampler 'Euler a'; using the sampler's default spacing"
+      ]
+    },
+    {
+      "profile": 1,
+      "sampler": "Euler a",
+      "count": 4,
+      "timesteps": [
+        751.0,
+        501.0,
+        251.0,
+        1.0
+      ],
+      "sigmas": [
+        17.51139259338379,
+        3.4619226455688477,
+        0.9631507992744446,
+        0.014832044020295143,
+        0.0
+      ],
+      "warnings": [
+        "schedule 'Exponential' is not supported by sampler 'Euler a'; using the sampler's default spacing"
+      ]
+    },
+    {
+      "profile": 1,
+      "sampler": "Euler a",
+      "count": 7,
+      "timesteps": [
+        853.0,
+        711.0,
+        569.0,
+        427.0,
+        285.0,
+        143.0,
+        1.0
+      ],
+      "sigmas": [
+        40.09373474121094,
+        13.012789726257324,
+        5.109860420227051,
+        2.340519666671753,
+        1.149412989616394,
+        0.4957002103328705,
+        0.014832044020295143,
+        0.0
+      ],
+      "warnings": [
+        "schedule 'Exponential' is not supported by sampler 'Euler a'; using the sampler's default spacing"
+      ]
+    },
+    {
+      "profile": 1,
+      "sampler": "Euler a",
+      "count": 9,
+      "timesteps": [
+        889.0,
+        778.0,
+        667.0,
+        556.0,
+        445.0,
+        334.0,
+        223.0,
+        112.0,
+        1.0
+      ],
+      "sigmas": [
+        55.060157775878906,
+        21.58687400817871,
+        9.553787231445312,
+        4.731031894683838,
+        2.567981243133545,
+        1.469635009765625,
+        0.826573371887207,
+        0.383870929479599,
+        0.014832044020295143,
+        0.0
+      ],
+      "warnings": [
+        "schedule 'Exponential' is not supported by sampler 'Euler a'; using the sampler's default spacing"
+      ]
+    },
+    {
+      "profile": 2,
+      "sampler": "DPM++ 2M",
+      "count": 1,
+      "timesteps": [
+        7
+      ],
+      "sigmas": [
+        0.19173426926136017,
+        0.0
+      ],
+      "warnings": []
+    },
+    {
+      "profile": 2,
+      "sampler": "DPM++ 2M",
+      "count": 3,
+      "timesteps": [
+        7,
+        2,
+        0
+      ],
+      "sigmas": [
+        0.19173426926136017,
+        0.07788558304309845,
+        0.03163839504122734,
+        0.0
+      ],
+      "warnings": []
+    },
+    {
+      "profile": 2,
+      "sampler": "DPM++ 2M",
+      "count": 4,
+      "timesteps": [
+        7,
+        3,
+        1,
+        0
+      ],
+      "sigmas": [
+        0.19173426926136017,
+        0.1051650196313858,
+        0.0576823391020298,
+        0.03163839504122734,
+        0.0
+      ],
+      "warnings": []
+    },
+    {
+      "profile": 2,
+      "sampler": "DPM++ 2M",
+      "count": 7,
+      "timesteps": [
+        7,
+        4,
+        3,
+        2,
+        1,
+        0,
+        0
+      ],
+      "sigmas": [
+        0.19173426926136017,
+        0.14199908077716827,
+        0.1051650196313858,
+        0.07788558304309845,
+        0.0576823391020298,
+        0.04271974414587021,
+        0.03163839504122734,
+        0.0
+      ],
+      "warnings": []
+    },
+    {
+      "profile": 2,
+      "sampler": "Euler a",
+      "count": 1,
+      "timesteps": [
+        1.0
+      ],
+      "sigmas": [
+        0.05483565852046013,
+        0.0
+      ],
+      "warnings": [
+        "schedule 'Exponential' is not supported by sampler 'Euler a'; using the sampler's default spacing"
+      ]
+    },
+    {
+      "profile": 2,
+      "sampler": "Euler a",
+      "count": 3,
+      "timesteps": [
+        5.0,
+        3.0,
+        1.0
+      ],
+      "sigmas": [
+        0.14583763480186462,
+        0.1003262847661972,
+        0.05483565852046013,
+        0.0
+      ],
+      "warnings": [
+        "schedule 'Exponential' is not supported by sampler 'Euler a'; using the sampler's default spacing"
+      ]
+    },
+    {
+      "profile": 2,
+      "sampler": "Euler a",
+      "count": 4,
+      "timesteps": [
+        7.0,
+        5.0,
+        3.0,
+        1.0
+      ],
+      "sigmas": [
+        0.19173426926136017,
+        0.14583763480186462,
+        0.1003262847661972,
+        0.05483565852046013,
+        0.0
+      ],
+      "warnings": [
+        "schedule 'Exponential' is not supported by sampler 'Euler a'; using the sampler's default spacing"
+      ]
+    },
+    {
+      "profile": 2,
+      "sampler": "Euler a",
+      "count": 7,
+      "timesteps": [
+        7.0,
+        6.0,
+        5.0,
+        4.0,
+        3.0,
+        2.0,
+        1.0
+      ],
+      "sigmas": [
+        0.19173426926136017,
+        0.16872453689575195,
+        0.14583763480186462,
+        0.12304902076721191,
+        0.1003262847661972,
+        0.07762151956558228,
+        0.05483565852046013,
+        0.0
+      ],
+      "warnings": [
+        "schedule 'Exponential' is not supported by sampler 'Euler a'; using the sampler's default spacing"
+      ]
+    }
+  ]
+}

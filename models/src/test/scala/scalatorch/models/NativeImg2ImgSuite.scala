@@ -53,6 +53,13 @@ class NativeImg2ImgSuite extends munit.FunSuite:
         val first=pixels(p)
         assertEquals(pixels(p),first)
         assert(pixels(request(sampler,imageParams.updated("resize_mode",Number(0))))!=first)
+      val baseImg2Img=request("Euler",imageParams)
+      val variationParams=baseImg2Img("params").asInstanceOf[Obj].fields.updated("subseed",Number(1337))
+        .updated("subseed_strength",Number(0.7))
+      val varied=baseImg2Img.updated("params",Obj(variationParams))
+      assertEquals(pixels(varied),pixels(baseImg2Img),"img2img must ignore variation noise")
+      val variationResponse=run("img2img",varied)
+      assert(variationResponse("warnings").asInstanceOf[Arr].values.contains(Str("variation seed is only applied in txt2img")))
       def names()=
         val files=Files.list(output)
         try files.toArray.toVector finally files.close()
@@ -65,6 +72,16 @@ class NativeImg2ImgSuite extends munit.FunSuite:
       assertEquals(inpainted.getRGB(0,0)&0xffffff,original.getRGB(0,0)&0xffffff)
       assertEquals(inpainted.getRGB(4,5)&0xffffff,original.getRGB(4,5)&0xffffff)
       assert((5 until 10).exists(x => (0 until 6).exists(y => inpainted.getRGB(x,y)!=original.getRGB(x,y))))
+      val alphaMask=output.resolve("alpha-mask.png")
+      val alphaImage=new BufferedImage(10,6,BufferedImage.TYPE_INT_ARGB)
+      for y <- 0 until 6; x <- 0 until 10 do
+        alphaImage.setRGB(x,y,if x<5 then 0x00ffffff else 0xff000000)
+      ImageIO.write(alphaImage,"png",alphaMask.toFile)
+      val alphaResult=run("img2img",request("Euler",inpaintParams.updated("mask",Str(alphaMask.toString))))
+      val alphaPath=Path.of(alphaResult("images").asInstanceOf[Arr].values.head.asInstanceOf[Obj].fields("path").asInstanceOf[Str].value)
+      val alphaPainted=ImageIO.read(alphaPath.toFile)
+      assertEquals(alphaPainted.getRGB(0,0,10,6,null,0,10).toVector,inpainted.getRGB(0,0,10,6,null,0,10).toVector,
+        "a partly transparent RGBA mask uses alpha, independent of its RGB colors")
       val beforeSupportedJobs=names().toSet
       val fullRes=run("img2img",request("Euler",inpaintParams.updated("inpaint_full_res",Bool(true))))
       assertEquals(fullRes("images").asInstanceOf[Arr].values.size,1)

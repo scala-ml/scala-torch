@@ -31,7 +31,8 @@ class CudaOffloadSuite extends munit.FunSuite:
       val result=decoder(x)
       assertEquals(result.toCpu.toFloatArray.toVector,expected.toVector)
       result.close()
-      assertEquals(s.allocatedBytes,input.shape.numel*4)
+      assert(s.allocatedBytes>=input.shape.numel*4)
+      assert(s.allocatedBytes<=budget)
       decoder.close();x.close()
       assertEquals(s.allocatedBytes,0L)
     }
@@ -70,11 +71,15 @@ class CudaOffloadSuite extends munit.FunSuite:
         p.load(Tensor.fromFloats(Array.fill(p.data.shape.numel.toInt)(0f),p.data.shape))
         val input=small.fill(Shape.from(Seq(1L,4L,3L,5L)),.2f)
         val ctx=small.fill(Shape.from(Seq(1L,3L,32L)),.3f)
+        var cachedAllocation=0L
         for iteration <- 0 until 2 do
           val out=offloaded(input,times,ctx)
           assertEquals(out.toCpu.toFloatArray.toVector,expected)
           out.close()
-          assertEquals(small.allocatedBytes,(input.shape.numel+ctx.shape.numel)*4)
+          assert(small.allocatedBytes>=(input.shape.numel+ctx.shape.numel)*4)
+          assert(small.allocatedBytes<=budget)
+          if iteration==0 then cachedAllocation=small.allocatedBytes
+          else assertEquals(small.allocatedBytes,cachedAllocation)
         offloaded.close();ctx.close();input.close()
         assertEquals(small.allocatedBytes,0L)
       }

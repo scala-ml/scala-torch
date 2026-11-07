@@ -19,6 +19,39 @@ object PretrainedClip:
     require(maxParameters>=0 && maxScoreElements>=0 && maxHiddenElements>=0,"negative CLIP allocation limit")
     val c=ClipTextConfig.read(directory.resolve("config.json"))
     Using.resource(SafeTensorSet.open(directory)) { archive =>
+      loadFromView(SingleFileTensorView(archive,archive.tensors.keysIterator.map(name => name -> name).toVector),
+        c,trainable,maxParameters,maxScoreElements,maxHiddenElements,aliasPrefix)
+    }
+
+  /** Loads SD1 CLIP from a checkpoint whose archive remains owned by the caller. */
+  private[models] def loadSingleFile(archive: SafeTensorSet,trainable: Boolean=false,
+      maxParameters: Long=1000000000L,maxScoreElements: Long=16777216L,
+      maxHiddenElements: Long=16777216L): LoadedLinearModel[ClipTextModel] =
+    SingleFileSd1Config.inspect(archive)
+    loadFromView(SingleFileTensorView.clip(archive),ClipTextConfig(49408,768,3072,12,12,77),
+      trainable,maxParameters,maxScoreElements,maxHiddenElements,"text_encoder")
+
+  private[models] def loadSd1View(archive: SingleFileTensorView,maxScoreElements: Long): LoadedLinearModel[ClipTextModel] =
+    loadFromView(archive,ClipTextConfig(49408,768,3072,12,12,77),false,1000000000L,
+      maxScoreElements,16777216L,"text_encoder")
+
+  private[models] def loadSd2View(archive: SingleFileTensorView,maxScoreElements: Long): LoadedLinearModel[ClipTextModel] =
+    loadFromView(archive,SingleFileSd2Config.clipConfig,false,1000000000L,
+      maxScoreElements,16777216L,"text_encoder")
+
+  private[models] def loadSdxlView(archive: SingleFileTensorView,maxScoreElements: Long): LoadedLinearModel[ClipTextModel] =
+    loadFromView(archive,SingleFileSdxlConfig.clipConfig,false,1000000000L,
+      maxScoreElements,16777216L,"text_encoder")
+
+  private[models] def loadSdxlClip2View(archive: SingleFileTensorView,maxScoreElements: Long): LoadedLinearModel[ClipTextModel] =
+    loadFromView(archive,SingleFileSdxlConfig.clip2Config,false,1000000000L,
+      maxScoreElements,16777216L,"text_encoder_2")
+
+  private def loadFromView(archive: SingleFileTensorView,c: ClipTextConfig,trainable: Boolean,
+      maxParameters: Long,maxScoreElements: Long,maxHiddenElements: Long,
+      aliasPrefix: String): LoadedLinearModel[ClipTextModel] =
+    require(maxParameters>=0 && maxScoreElements>=0 && maxHiddenElements>=0,"negative CLIP allocation limit")
+    locally {
       val total=archive.tensors.values.foldLeft(BigInt(0))((n,t) => n+t.shape.numel)
       require(total<=maxParameters,"CLIP weights exceed parameter budget")
       val used=mutable.Set.empty[String]

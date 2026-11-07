@@ -5,6 +5,17 @@ import java.nio.file.{Files,Path}
 import java.nio.charset.StandardCharsets.UTF_8
 
 class ClipFastTokenizerSuite extends munit.FunSuite:
+  test("removing an embedding remaps later token IDs without changing the original tokenizer") {
+    val base=ClipFastTokenizer.fromText("""{"<|startoftext|>":0,"<|endoftext|>":1,"a</w>":2}""","#version: 0.2\n")
+    val original=base.withAddedTokens(Vector("first"->2,"second"->1))
+    val (removed,keep)=original.withoutAddedTokenGroup("first")
+    assertEquals(keep,Vector(0L,1L,2L,5L))
+    assertEquals(removed.encode("second",false).toVector,Vector(3L))
+    assertEquals(original.encode("second",false).toVector,Vector(5L))
+    val replaced=removed.withAddedTokens(Vector("first"->1))
+    assertEquals(replaced.encode("first second",false).toVector,Vector(4L,3L))
+    intercept[IllegalArgumentException](original.withoutAddedTokenGroup("missing"))
+  }
   private val hashes=Map("vocab.json"->"f27915ca8a787e651ea25684f581739403b46354a9a5be29a5afad0112d60d46","merges.txt"->"38e3006b0c2382dc853454c0643ce3d6f62544c7d6ded433d8d15dab639f0b5b","reference.json"->"69a0ae2f8b0dfd2d3399e548ab671fabdd713d8cb46db5a60c6e9fb1d58a8533")
   private def resource(name: String): Array[Byte] =
     val stream=getClass.getResourceAsStream(s"/tiny-clip-tokenizer/$name")
@@ -35,6 +46,27 @@ class ClipFastTokenizerSuite extends munit.FunSuite:
     assertEquals(model.batch(Vector.empty).ids.shape,Shape.from(Seq(0,5)))
     intercept[IllegalArgumentException](model.batch(Vector("a","b"),maxElements=9))
     assertEquals(model.encode("a",addSpecialTokens=false).length,1)
+  }
+  test("added textual-inversion tokens preserve vocabulary and expand vector rows in order") {
+    val base=tokenizer()
+    val extended=base.withAddedTokens(Vector("sks"->2))
+    val first=base.vocabSize.toLong
+    assertEquals(extended.vocabSize,base.vocabSize+2)
+    assertEquals(extended.encode("sks").toVector,Vector(extended.bosId,first,first+1,extended.eosId))
+    assertEquals(extended.encode("sks_1").toVector,Vector(extended.bosId,first+1,extended.eosId))
+    assertEquals(base.encode("sks").toVector,tokenizer().encode("sks").toVector)
+    intercept[IllegalArgumentException](extended.withAddedTokens(Vector("sks"->1)))
+  }
+  test("NUI fallback normalization is shared by prompt chunks and added-token copies") {
+    val fast=tokenizer()
+    val native=fast.withNuiFallbackNormalization
+    val text="日本語 A\u0000B"
+    val ids=native.encode(text,addSpecialTokens=false).toVector
+    assertNotEquals(ids,fast.encode(text,addSpecialTokens=false).toVector)
+    assertEquals(ClipPromptEncoding.chunks(native,text).head.tokens.slice(1,1+ids.size),ids)
+    val extended=native.withAddedTokens(Vector("sks"->2))
+    assertEquals(extended.encode(text,addSpecialTokens=false).toVector,ids)
+    assertEquals(extended.encode("sks",addSpecialTokens=false).toVector,Vector(fast.vocabSize.toLong,fast.vocabSize.toLong+1))
   }
   test("CLIP tokenizer validates vocabulary merges Unicode and context bounds") {
     val vocab=new String(resource("vocab.json"),UTF_8)

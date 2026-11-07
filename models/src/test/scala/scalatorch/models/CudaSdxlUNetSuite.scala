@@ -54,10 +54,20 @@ class CudaSdxlUNetSuite extends munit.FunSuite:
     val negative=DiffusionAddedConditioning(tensor("pooled-b2",2,32).slice(0,1,2),tensor("time-ids-b2",2,6).slice(0,1,2))
     val expected=UNetExecution.Cpu.withPredictor(loaded,context,Some(context),() => false,
       Some(positive),Some(negative))(_.apply(sample,time,7.5f))
+    val rescaled=UNetExecution.Cpu.withPredictor(loaded,context,Some(context),() => false,
+      Some(positive),Some(negative))(_.apply(sample,time,7.5f,0,.7f))
+    val scheduled=UNetExecution.Cpu.withPredictor(loaded,context,Some(context),() => false,
+      Some(positive),Some(negative))(_.apply(sample,time,7.5f,0,.7f,Some(4f)))
+    val detail=DetailDaemon.Adjustment("cond",1.1f,450f)
+    val detailed=UNetExecution.Cpu.withPredictor(loaded,context,Some(context),() => false,
+      Some(positive),Some(negative))(_.apply(sample,time,7.5f,0,.7f,Some(4f),Some(detail)))
     UNetExecution.Cuda(offloadWeights=true).withPredictor(loaded,context,Some(context),() => false,
       Some(positive),Some(negative)) { predictor =>
       closeTo(predictor(sample,time,7.5f),expected)
       closeTo(predictor(sample,time,7.5f),expected)
+      closeTo(predictor(sample,time,7.5f,0,.7f),rescaled)
+      closeTo(predictor(sample,time,7.5f,0,.7f,Some(4f)),scheduled)
+      closeTo(predictor(sample,time,7.5f,0,.7f,Some(4f),Some(detail)),detailed)
     }
   }
 

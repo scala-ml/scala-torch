@@ -17,13 +17,13 @@ private[worker] object NativeKeywordHook:
     case _ => throw IllegalArgumentException("invalid hook configuration")
 
   def plan(hooks: Option[NativeJson],prompt: String,hash: String,name: String,count: Int,seed: Long,
-      state: ModelKeyword.State,check: () => Unit): Option[ModelKeyword.Plan]=
+      state: ModelKeyword.State,check: () => Unit,allowActive: Set[String]=Set.empty): Option[ModelKeyword.Plan]=
     val fields=hooks match
       case None => Map.empty[String,NativeJson]
       case Some(Obj(values)) => values
       case _ => throw IllegalArgumentException("hooks must be an object")
     val active=fields.filter((_,value) => enabled(value))
-    val unknown=active.keySet-"model_keyword"
+    val unknown=(active.keySet-"model_keyword")--allowActive
     if unknown.nonEmpty then throw new NativeBackendError("unsupported",s"unsupported hooks: ${unknown.toVector.sorted.mkString(", ")}")
     active.get("model_keyword").map { value =>
       val config=value match
@@ -36,10 +36,9 @@ private[worker] object NativeKeywordHook:
         case None | Some(Null) => default
         case Some(Str(s)) => s
         case _ => throw IllegalArgumentException(s"model_keyword $key must be a string")
-      for key <- Vector("embedding","lora","_lora_path","lora_name") do
-        val selected=text(key)
-        if selected.nonEmpty && selected!="None" then
-          throw new NativeBackendError("unsupported",s"model_keyword $key requires native network inference")
+      def selected(key: String): Option[String]=Option(text(key)).filter(value => value.nonEmpty && value!="None")
+      val loraPath=selected("_lora_path").map(path => Path.of(path).toAbsolutePath.normalize())
+      require(selected("lora").isEmpty || loraPath.nonEmpty,"selected model_keyword LoRA requires a resolved path")
       val weight=config.get("multiplier").orElse(config.get("lora_weight")) match
         case None => 0.7
         case Some(Number(n)) => n.toDouble
@@ -52,12 +51,21 @@ private[worker] object NativeKeywordHook:
       val root=Path.of(directory).toAbsolutePath.normalize()
       val mappings=new KeywordMappings(root.resolve("model-keyword.txt"),root.resolve("custom-mappings.txt"),allowMissingDefault=true)
       val entry=mappings.lookup(hash,name,check)
+      val loraName=loraPath.map(path => selected("lora_name").getOrElse(path.getFileName.toString))
+      val loraWords=loraPath.flatMap { path =>
+        val loraHash=KeywordMappings.legacyHash(path,check)
+        new KeywordMappings(root.resolve("lora-keyword.txt"),root.resolve("lora-keyword-user.txt"),allowMissingDefault=true)
+          .lookup(loraHash,loraName.get,check).map(_.keywords)
+      }
+      val words=loraWords.toVector.flatMap(_.split("\\|",-1).toVector.map(_.trim))
+      val choices=Vector("None")++(if words.size>1 then Vector(words.mkString(", ")) else Vector.empty)++words++
+        (if words.size>1 then Vector("< iterate >","< random >") else Vector.empty)
+      val requestedChoice=text("lora_choice","None")
+      val loraChoice=if loraPath.nonEmpty && choices.contains(requestedChoice) then requestedChoice else "None"
       val result=ModelKeyword.plan(text("_base_prompt",prompt),Vector.fill(count)(text("_base_prompt",prompt)),
-        entry.map(_.keywords),None,ModelKeyword.Options(modelChoice=text("model_choice","keyword1, keyword2"),
-          loraChoice=text("lora_choice","None"),placement=text("placement","keyword prompt"),
-          order=text("order","textual inversion first"),multiplier=weight),state,seed)
-      if (result.preview+:result.prompts).exists(s => "<\\w+:[^>]+>".r.findFirstIn(s).nonEmpty) then
-        throw new NativeBackendError("unsupported","model_keyword extra network tags require native network inference")
+        entry.map(_.keywords),loraWords,ModelKeyword.Options(modelChoice=text("model_choice","keyword1, keyword2"),
+          loraChoice=loraChoice,placement=text("placement","keyword prompt"),
+          order=text("order","textual inversion first"),embedding=selected("embedding"),loraModel=loraName,multiplier=weight),state,seed)
       check()
       result
     }

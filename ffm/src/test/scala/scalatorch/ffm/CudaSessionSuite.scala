@@ -6,6 +6,28 @@ class CudaSessionSuite extends munit.FunSuite:
   private def gpu(): Unit = assume(sys.env.get("SCALATORCH_CUDA_TESTS").contains("1"),"real GPU test disabled")
   private def matrix(values: Array[Float], m: Int, n: Int) = Tensor.fromFloats(values,Shape.from(Seq(m.toLong,n.toLong)))
 
+  test("large contiguous upload avoids an intermediate full-size JVM array") {
+    gpu()
+    val bean=java.lang.management.ManagementFactory.getThreadMXBean.asInstanceOf[com.sun.management.ThreadMXBean]
+    assume(bean.isThreadAllocatedMemorySupported,"thread allocation accounting unavailable")
+    if !bean.isThreadAllocatedMemoryEnabled then bean.setThreadAllocatedMemoryEnabled(true)
+    val size=4*1024*1024
+    val source=Tensor.fromFloats(Array.tabulate(size+2)(_.toFloat),Shape.from(Seq((size+2).toLong)))
+      .slice(0,1,size+1)
+    CudaSession.withDevice() { session =>
+      for _ <- 0 until 3 do session.upload(source).close()
+      val before=bean.getThreadAllocatedBytes(Thread.currentThread().threadId())
+      val output=session.upload(source)
+      val allocated=bean.getThreadAllocatedBytes(Thread.currentThread().threadId())-before
+      println(s"contiguous CUDA upload: $allocated JVM bytes for ${size*4L} bytes of tensor data")
+      assert(allocated<size.toLong*2,s"upload allocated $allocated JVM bytes for ${size*4L} bytes of tensor data")
+      val values=output.toCpu.toFloatArray
+      assertEquals(values.head,1f)
+      assertEquals(values.last,size.toFloat)
+      output.close()
+    }
+  }
+
   test("persistent device GEMMs chain without CPU intermediates and upload logical views") {
     gpu()
     CudaSession.withDevice() { session =>

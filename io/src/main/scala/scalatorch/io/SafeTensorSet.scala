@@ -37,7 +37,7 @@ object SafeTensorSet:
 
   def open(directory: Path, readLimits: ReadLimits = ReadLimits(), shardLimits: ShardLimits = ShardLimits(),
       filename: String = "model.safetensors"): SafeTensorSet =
-    require(filename.endsWith(".safetensors") && filename.length>12 &&
+    require(filename.toLowerCase(java.util.Locale.ROOT).endsWith(".safetensors") && filename.length>12 &&
       !filename.exists(c => c=='/' || c=='\\' || c==':' || c==0),"invalid safetensors archive filename")
     val single = directory.resolve(filename)
     val indexed = directory.resolve(filename+".index.json")
@@ -76,3 +76,13 @@ object SafeTensorSet:
       try closeAll(acquired)
       catch case NonFatal(closeFailure) => e.addSuppressed(closeFailure)
       throw e
+
+  /** Opens one explicitly selected archive without requiring a Diffusers directory layout. */
+  def openFile(path: Path, readLimits: ReadLimits = ReadLimits()): SafeTensorSet =
+    val file = path.toRealPath()
+    require(Files.isRegularFile(file,LinkOption.NOFOLLOW_LINKS),"safetensors path must be a regular file")
+    require(file.getFileName.toString.toLowerCase(java.util.Locale.ROOT).endsWith(".safetensors"),
+      "only .safetensors checkpoints are supported")
+    val archive = SafeTensors.open(file,readLimits)
+    new SafeTensorSet(Vector(archive),archive.tensors.iterator.map((name,_) => name -> archive).toMap,
+      archive.tensors,Vector(file))

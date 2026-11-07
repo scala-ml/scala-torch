@@ -18,7 +18,8 @@ final class CudaUNet private (session: CudaSession,runtime: CudaDiffusionRuntime
       applyPrepared(sample,timesteps,context,uploaded)
     }.get
   private[models] def applyPrepared(sample: CudaTensor,timesteps: Tensor[Float],context: CudaTensor,
-      features: Option[CudaTensor]): CudaTensor = runtime.unet(sample,model,timesteps,context,features)
+      features: Option[CudaTensor],control: Option[CudaControlNetResiduals]=None): CudaTensor =
+    runtime.unet(sample,model,timesteps,context,features,control)
   def close(): Unit=runtime.close()
 
 object CudaUNet:

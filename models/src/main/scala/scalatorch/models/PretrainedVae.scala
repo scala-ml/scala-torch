@@ -36,6 +36,43 @@ object PretrainedVae:
     require(maxParameters>=0 && maxFeatureElements>=0 && maxScoreElements>=0,"negative VAE allocation limit")
     val c=configOverride.getOrElse(VaeConfig.read(directory.resolve("config.json")))
     Using.resource(SafeTensorSet.open(directory,filename=filename)) { archive =>
+      loadFromView(SingleFileTensorView(archive,archive.tensors.keysIterator.map(name => name -> name).toVector),
+        c,trainable,maxParameters,maxFeatureElements,maxScoreElements)
+    }
+
+  private[models] def loadSingleFile(archive: SafeTensorSet,trainable: Boolean=false,
+      maxParameters: Long=1000000000L,maxFeatureElements: Long=134217728L,
+      maxScoreElements: Long=16777216L): VaeModel =
+    SingleFileSd1Config.inspect(archive)
+    loadFromView(SingleFileTensorView.vae(archive),SingleFileSd1Config.vaeConfig,
+      trainable,maxParameters,maxFeatureElements,maxScoreElements)
+
+  private[models] def loadSd1View(archive: SingleFileTensorView,maxScoreElements: Long): VaeModel =
+    loadFromView(archive,SingleFileSd1Config.vaeConfig,false,1000000000L,134217728L,maxScoreElements)
+
+  /** Loads the SD2 VAE from a checkpoint whose archive remains owned by the caller. */
+  private[models] def loadSd2SingleFile(archive: SafeTensorSet,trainable: Boolean=false,
+      maxParameters: Long=1000000000L,maxFeatureElements: Long=134217728L,
+      maxScoreElements: Long=16777216L): VaeModel =
+    SingleFileSd2Config.inspect(archive)
+    loadFromView(SingleFileTensorView.vae(archive),SingleFileSd1Config.vaeConfig,
+      trainable,maxParameters,maxFeatureElements,maxScoreElements)
+
+  private[models] def loadSdxlView(archive: SingleFileTensorView,maxScoreElements: Long): VaeModel =
+    loadFromView(archive,SingleFileSdxlConfig.vaeConfig,false,1000000000L,134217728L,maxScoreElements)
+
+  /** Loads the SDXL VAE from a checkpoint whose archive remains owned by the caller. */
+  private[models] def loadSdxlSingleFile(archive: SafeTensorSet,trainable: Boolean=false,
+      maxParameters: Long=1000000000L,maxFeatureElements: Long=134217728L,
+      maxScoreElements: Long=16777216L): VaeModel =
+    SingleFileSdxlConfig.inspect(archive)
+    loadFromView(SingleFileTensorView.vae(archive),SingleFileSdxlConfig.vaeConfig,
+      trainable,maxParameters,maxFeatureElements,maxScoreElements)
+
+  private def loadFromView(archive: SingleFileTensorView,c: VaeConfig,trainable: Boolean,
+      maxParameters: Long,maxFeatureElements: Long,maxScoreElements: Long): VaeModel =
+    require(maxParameters>=0 && maxFeatureElements>=0 && maxScoreElements>=0,"negative VAE allocation limit")
+    locally {
       val total=archive.tensors.values.foldLeft(BigInt(0))((n,t) => n+t.shape.numel)
       require(total<=maxParameters,"VAE weights exceed parameter budget")
       val used=mutable.Set.empty[String]

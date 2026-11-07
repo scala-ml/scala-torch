@@ -12,6 +12,14 @@ sealed trait VaeExecution:
   def device: String
   def encode(model: VaeEncoder,input: Tensor[Float],cancelled: () => Boolean): Tensor[Float]
   def decode(model: VaeDecoder,input: Tensor[Float],cancelled: () => Boolean): Tensor[Float]
+  def encodeTiled(model: VaeEncoder,input: Tensor[Float],sampleHeight: Int,sampleWidth: Int,
+      cancelled: () => Boolean): Tensor[Float] =
+    val factor=1 << (model.downBlocks.size-1)
+    VaeTiling.encode(input,sampleHeight,sampleWidth,factor,cancelled)(tile=>encode(model,tile,cancelled))
+  def decodeTiled(model: VaeDecoder,input: Tensor[Float],sampleHeight: Int,sampleWidth: Int,
+      cancelled: () => Boolean): Tensor[Float] =
+    val factor=1 << (model.upBlocks.size-1)
+    VaeTiling.decode(input,sampleHeight,sampleWidth,factor,cancelled)(tile=>decode(model,tile,cancelled))
 
 object VaeExecution:
   private[models] def offloadFromEnvironment(environment: Map[String,String],key: String): Boolean =
@@ -35,7 +43,6 @@ object VaeExecution:
       val result=Autograd.noGrad(model(Variable(input))).data
       checkCancelled(cancelled)
       result
-
   final case class Cuda(deviceIndex: Int=0,maxBytes: Long=1073741824L,override val offloadWeights: Boolean=false) extends VaeExecution:
     require(deviceIndex>=0 && maxBytes>0,"invalid CUDA VAE device or memory budget")
     val device=s"cuda:$deviceIndex"
@@ -67,6 +74,40 @@ object VaeExecution:
           val result=output.toCpu
           checkCancelled(cancelled)
           result
+        }.get
+      }
+    override def encodeTiled(model: VaeEncoder,input: Tensor[Float],sampleHeight: Int,sampleWidth: Int,
+        cancelled: () => Boolean): Tensor[Float] =
+      checkCancelled(cancelled)
+      val factor=1 << (model.downBlocks.size-1)
+      CudaSession.withDevice(deviceIndex,maxBytes) { session =>
+        Using.Manager { use =>
+          val encoder=use(CudaVaeEncoder.upload(session,model,cancelled,offloadWeights))
+          VaeTiling.encode(input,sampleHeight,sampleWidth,factor,cancelled) { tile =>
+            Using.Manager { tileUse =>
+              val image=tileUse(session.upload(tile))
+              val output=tileUse(encoder(image))
+              checkCancelled(cancelled)
+              output.toCpu
+            }.get
+          }
+        }.get
+      }
+    override def decodeTiled(model: VaeDecoder,input: Tensor[Float],sampleHeight: Int,sampleWidth: Int,
+        cancelled: () => Boolean): Tensor[Float] =
+      checkCancelled(cancelled)
+      val factor=1 << (model.upBlocks.size-1)
+      CudaSession.withDevice(deviceIndex,maxBytes) { session =>
+        Using.Manager { use =>
+          val decoder=use(CudaVaeDecoder.upload(session,model,cancelled,offloadWeights))
+          VaeTiling.decode(input,sampleHeight,sampleWidth,factor,cancelled) { tile =>
+            Using.Manager { tileUse =>
+              val latent=tileUse(session.upload(tile))
+              val output=tileUse(decoder(latent))
+              checkCancelled(cancelled)
+              output.toCpu
+            }.get
+          }
         }.get
       }
 

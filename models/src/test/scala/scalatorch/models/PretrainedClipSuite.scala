@@ -62,6 +62,27 @@ class PretrainedClipSuite extends munit.FunSuite:
     assert(output.data.toFloatArray.forall(_.isFinite))
     intercept[IllegalArgumentException](PretrainedClip.load(dir.get,maxParameters=1))
   }
+  test("textual-inversion rows extend a frozen CLIP model without mutating the original") {
+    val dir=sys.props.get("scalatorch.clip.dir").map(Path.of(_))
+    assume(dir.nonEmpty,"set scalatorch.clip.dir to pinned tiny-sd-pipe/text_encoder")
+    val model=PretrainedClip.load(dir.get)
+    val old=model.tokenEmbedding.weight.data
+    val width=old.shape.dims(1).toInt
+    val row=Array.tabulate(width)(i => (i*.125f)-1f)
+    val extended=model.withAddedTokenEmbeddings(Vector(row))
+    val further=extended.withAddedTokenEmbeddings(Vector(Array.fill(width)(2f)))
+    val retained=(0 until old.shape.dims.head.toInt).map(_.toLong).toVector :+ (old.shape.dims.head+1)
+    val compact=further.withSelectedTokenEmbeddings(retained)
+    assertEquals(compact.tokenEmbedding.weight.data.toFloatArray.takeRight(width).toVector,Vector.fill(width)(2f))
+    assertEquals(further.tokenEmbedding.weight.data.toFloatArray.takeRight(width*2).take(width).toVector,row.toVector)
+    assertEquals(extended.tokenEmbedding.weight.data.shape,
+      Shape.from(Seq(old.shape.dims.head+1,old.shape.dims(1))))
+    assertEquals(extended.tokenEmbedding.weight.data.toFloatArray.take(old.shape.numel.toInt).toVector,old.toFloatArray.toVector)
+    assertEquals(extended.tokenEmbedding.weight.data.toFloatArray.takeRight(width).toVector,row.toVector)
+    assertEquals(model.tokenEmbedding.weight.data,old)
+    intercept[IllegalArgumentException](model.withAddedTokenEmbeddings(Vector(Array.fill(width-1)(0f))))
+    intercept[IllegalArgumentException](model.withAddedTokenEmbeddings(Vector(Array.fill(width)(Float.NaN))))
+  }
 
   test("public conditioning matches Candle for batches, earlier layers and activation variants") {
     val dir=sys.props.get("scalatorch.clip.dir").map(Path.of(_))

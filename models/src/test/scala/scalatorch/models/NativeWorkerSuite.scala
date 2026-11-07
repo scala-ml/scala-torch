@@ -4,6 +4,34 @@ import scalatorch.models.worker.*
 import java.util.concurrent.{CountDownLatch,LinkedBlockingQueue,TimeUnit}
 
 class NativeWorkerSuite extends munit.FunSuite:
+  test("CUDA U-Net attention can use bounded CUDA scratch at higher image sizes") {
+    assertEquals(NativeWorkerMain.attentionScoreLimit(None,cudaUnet=false),134217728L)
+    assertEquals(NativeWorkerMain.attentionScoreLimit(None,cudaUnet=true),Int.MaxValue.toLong)
+    assertEquals(NativeWorkerMain.attentionScoreLimit(Some("2097152000"),cudaUnet=true),2097152000L)
+    assertEquals(NativeWorkerMain.attentionScoreLimit(Some("2097152000"),cudaUnet=false),2097152000L)
+    intercept[IllegalArgumentException](NativeWorkerMain.attentionScoreLimit(Some("2147483648"),cudaUnet=true))
+  }
+  test("out of memory reports the failed request and leaves the worker responsive") {
+    val lines=new LinkedBlockingQueue[String]()
+    val output=new java.io.OutputStream:
+      def write(b: Int): Unit=throw UnsupportedOperationException()
+      override def write(b: Array[Byte],off: Int,len: Int): Unit=
+        lines.add(new String(b,off,len,java.nio.charset.StandardCharsets.UTF_8).trim)
+    val backend=new NativeWorkerBackend:
+      def supported=Set("generate")
+      def execute(request: NativeRequest,context: NativeWorkContext): Map[String,NativeJson]=
+        if request.id=="oom" then throw new OutOfMemoryError("test")
+        Map("done"->NativeJson.Bool(true))
+    val worker=new NativeWorker(output,backend)
+    def next()=Option(lines.poll(5,TimeUnit.SECONDS)).getOrElse(fail("missing response"))
+    try
+      assert(next().contains("hello"))
+      worker.handle("""{"id":"oom","type":"generate"}""")
+      assert(next().contains("resource_exhausted"))
+      worker.handle("""{"id":"next","type":"generate"}""")
+      assert(next().contains("\"done\":true"))
+    finally worker.close()
+  }
   test("stream dispatch recovers malformed input and handles protection and shutdown") {
     val out=new java.io.ByteArrayOutputStream()
     val backend=new NativeWorkerBackend:

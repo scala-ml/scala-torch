@@ -5,6 +5,18 @@ import scalatorch.*
 import scalatorch.autograd.Variable
 
 class LowRankAdapterSuite extends FunSuite:
+  test("convolution adapter applies a spatial down kernel and restores scope") {
+    def tensor4(values: Array[Float],dims: Long*)=Tensor.fromFloats(values,Shape.from(dims))
+    val weight=Parameter(tensor4(Array.fill(9)(0f),1,1,3,3),false)
+    val down=Parameter(tensor4(Array.fill(9)(1f),1,1,3,3),false)
+    val up=Parameter(tensor4(Array(2f),1,1,1,1),false)
+    val layer=Conv2d(weight,None,Conv2dConfig(padding=(1,1)))
+    val input=Variable(tensor4(Array.fill(9)(1f),1,1,3,3),false)
+    val adapter=LowRankAdapter(down,up,1.0)
+    val actual=LinearAdapterScope.withAdapters(Map(weight->Vector(adapter->0.5f)))(layer(input).data.toFloatArray.toVector)
+    assertEquals(actual,Vector(4f,6f,4f,6f,9f,6f,4f,6f,4f))
+    assert(layer(input).data.toFloatArray.forall(_==0f))
+  }
   private def tensor(values: Float*)(rows: Int, cols: Int) =
     Tensor.fromFloats(values.toArray, Shape.from(Seq(rows.toLong, cols.toLong)))
 

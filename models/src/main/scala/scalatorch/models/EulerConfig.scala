@@ -10,7 +10,8 @@ import scala.util.Using
 
 /** Validated Euler checkpoint settings. Other scheduler families require explicit conversion. */
 final class EulerConfig private (val noise: DiffusionNoiseSchedule,val prediction: DiffusionPrediction,
-    val spacing: DiffusionTimestepSpacing,val stepsOffset: Int,val useKarrasSigmas: Boolean):
+    val spacing: DiffusionTimestepSpacing,val stepsOffset: Int,val useKarrasSigmas: Boolean,
+    val ddimClipSample: Boolean,val ddimClipRange: Float):
   def scheduler(steps: Int,maxElements: Long=134217728L): EulerScheduler =
     val schedule=if useKarrasSigmas then
       val karras=noise.karrasEuler(steps)
@@ -68,7 +69,11 @@ object EulerConfig:
       def integer(key: String,default: Int): Int=take(key,Number(BigDecimal(default))) match
         case Number(n) if n.isWhole && n>=Int.MinValue && n<=Int.MaxValue => n.toInt
         case _ => throw IllegalArgumentException(s"invalid Euler integer: $key")
-      exact("_class_name",Text("EulerDiscreteScheduler"))
+      val sourceScheduler=take("_class_name") match
+        case Null => ""
+        case Text(name) if Set("EulerDiscreteScheduler","PNDMScheduler").contains(name) => name
+        case Text(name) => throw IllegalArgumentException(s"unsupported Euler source scheduler: $name")
+        case _ => throw IllegalArgumentException("invalid Euler source scheduler")
       for key <- Vector("_diffusers_version","_name_or_path") do
         take(key) match
           case Null | Text(_) => ()
@@ -77,10 +82,36 @@ object EulerConfig:
         case Null => ()
         case Array(values) => require(values.forall { case Text(_) => true; case _ => false },"invalid default metadata")
         case _ => throw IllegalArgumentException("invalid default metadata")
+      if sourceScheduler=="PNDMScheduler" then
+        for key <- Vector("set_alpha_to_one","skip_prk_steps") do
+          take(key) match
+            case Bool(_) => ()
+            case _ => throw IllegalArgumentException(s"invalid PNDM metadata: $key")
+      else
+        // Diffusers retains fields from an earlier scheduler when saving a converted Euler config.
+        for key <- Vector("set_alpha_to_one","skip_prk_steps") do
+          take(key) match
+            case Null | Bool(_) => ()
+            case _ => throw IllegalArgumentException(s"invalid inherited scheduler metadata: $key")
+      val ddimClipSample=take("clip_sample") match
+        case Null => true
+        case Bool(value) => value
+        case _ => throw IllegalArgumentException("invalid clip_sample")
+      val ddimClipRange=take("clip_sample_range") match
+        case Null => 1f
+        case Number(n) if n.toFloat.isFinite && n.toFloat>0 => n.toFloat
+        case _ => throw IllegalArgumentException("invalid clip_sample_range")
+      take("sample_max_value") match
+        case Null => ()
+        case Number(n) if n.toDouble.isFinite => ()
+        case _ => throw IllegalArgumentException("invalid inherited scheduler metadata: sample_max_value")
       val karras=take("use_karras_sigmas",Bool(false)) match
         case Bool(b) => b
         case _ => throw IllegalArgumentException("invalid Karras flag")
-      for key <- Vector("use_exponential_sigmas","use_beta_sigmas","rescale_betas_zero_snr") do
+      val zeroSnr=take("rescale_betas_zero_snr",Bool(false)) match
+        case Bool(b) => b
+        case _ => throw IllegalArgumentException("invalid rescale_betas_zero_snr flag")
+      for key <- Vector("use_exponential_sigmas","use_beta_sigmas") do
         exact(key,Bool(false))
       exact("interpolation_type",Text("linear"));exact("timestep_type",Text("discrete"))
       exact("final_sigmas_type",Text("zero"));exact("sigma_min",Null);exact("sigma_max",Null)
@@ -100,7 +131,7 @@ object EulerConfig:
       val start=number(take("beta_start",Number(BigDecimal("0.0001"))))
       val end=number(take("beta_end",Number(BigDecimal("0.02"))))
       val betaSchedule=take("beta_schedule",Text("linear"))
-      val noise=take("trained_betas") match
+      val rawNoise=take("trained_betas") match
         case Array(values) =>
           require(values.size==count,"trained betas length differs from training steps")
           DiffusionNoiseSchedule.fromBetas(values.map(number))
@@ -109,6 +140,7 @@ object EulerConfig:
           DiffusionNoiseSchedule.linear(count,start,end,betaSchedule==Text("scaled_linear"))
         case _ => throw IllegalArgumentException("invalid trained betas")
       require(fields.isEmpty,s"unknown Euler config fields: ${fields.keys.toVector.sorted.mkString(", ")}")
-      new EulerConfig(noise,prediction,spacing,offset,karras)
+      val noise=if zeroSnr then rawNoise.withZeroTerminalSnr else rawNoise
+      new EulerConfig(noise,prediction,spacing,offset,karras,ddimClipSample,ddimClipRange)
     }
     catch case e: IOException => throw IllegalArgumentException("invalid Euler config JSON",e)

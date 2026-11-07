@@ -5,12 +5,18 @@ import scalatorch.autograd.Variable
 
 /** Additive update x Aᵀ Bᵀ * alpha/rank. No dropout or merged weight storage. */
 final case class LowRankAdapter(a: Parameter, b: Parameter, alpha: Double) derives Module:
-  require(a.data.shape.rank == 2 && b.data.shape.rank == 2, "adapter factors must be matrices")
+  require(Set(2,4)(a.data.shape.rank) && b.data.shape.rank == a.data.shape.rank, "adapter factors must both be matrices or convolution kernels")
   require(a.data.shape.dims.forall(_ > 0) && b.data.shape.dims.forall(_ > 0) &&
     a.data.shape.dims(0) == b.data.shape.dims(1), "invalid adapter factor dimensions")
   private val scale = LowRankAdapter.scale(alpha, a.data.shape.dims(0))
   def apply(input: Variable): Variable =
+    require(a.data.shape.rank==2,"linear adapter requires matrix factors")
     input.matmul(a.value.transpose(0, 1)).matmul(b.value.transpose(0, 1)) * scale
+
+  def convolution(input: Variable,config: Conv2dConfig): Variable =
+    require(a.data.shape.rank==4 && config.groups==1 && b.data.shape.dims.drop(2)==Vector(1L,1L),
+      "convolution adapter requires ungrouped down kernel and 1x1 up kernel")
+    input.conv2d(a.value,config).conv2d(b.value,Conv2dConfig()) * scale
 
 object LowRankAdapter:
   private def scale(alpha: Double, rank: Long): Float =

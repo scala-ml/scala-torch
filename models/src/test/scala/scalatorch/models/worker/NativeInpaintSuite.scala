@@ -2,8 +2,96 @@ package scalatorch.models.worker
 
 import scalatorch.*
 import java.awt.image.BufferedImage
+import scalatorch.models.worker.NativeJson.*
 
 class NativeInpaintSuite extends munit.FunSuite:
+  test("full resolution crops and restores match NUI reference") {
+    val stream=getClass.getResourceAsStream("/inpaint-full-reference.json")
+    val fixture=try NativeJson.parse(new String(stream.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8)).asInstanceOf[Obj].fields finally stream.close()
+    def integer(v: NativeJson)=v.asInstanceOf[Number].value.toInt
+    def rgb(v: NativeJson): Int =
+      val a=v.asInstanceOf[Arr].values.map(integer)
+      (a(0)<<16)|(a(1)<<8)|a(2)
+    def image(values: NativeJson,w: Int,h: Int): BufferedImage =
+      val out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB)
+      values.asInstanceOf[Arr].values.zipWithIndex.foreach((v,i)=>out.setRGB(i%w,i/w,rgb(v)))
+      out
+    val width=integer(fixture("width"));val height=integer(fixture("height"))
+    val source=image(fixture("source"),width,height)
+    val generated=image(fixture("generated"),16,12)
+    fixture("cases").asInstanceOf[Arr].values.foreach { value =>
+      val row=value.asInstanceOf[Obj].fields
+      val mask=new BufferedImage(width,height,BufferedImage.TYPE_INT_RGB)
+      row("mask").asInstanceOf[Arr].values.zipWithIndex.foreach { (v,i) =>
+        val n=integer(v);mask.setRGB(i%width,i/width,(n<<16)|(n<<8)|n)
+      }
+      val result=NativeInpaint.prepare(source,mask,16,12,0,integer(row("blur")),false,() => false,
+        fullRes=true,fullResPadding=integer(row("padding")))
+      val expectedBox=row("box") match
+        case Null => None
+        case a: Arr =>
+          val v=a.values.map(integer);Some((v(0),v(1),v(2),v(3)))
+        case _ => fail("invalid reference box")
+      val label=s"${row("name")} blur=${row("blur")} padding=${row("padding")}"
+      assertEquals(result.pasteBox,expectedBox,label)
+      val actualImage=scalatorch.models.DiffusionImageIO.toBufferedImage(result.image)
+      val expectedImage=row("model_image").asInstanceOf[Arr].values.map(rgb)
+      val actualPixels=actualImage.getRGB(0,0,16,12,null,0,16).toVector.map(_&0xffffff)
+      assertEquals(actualPixels,expectedImage,s"model image $label")
+      val actualMask=result.mask.toFloatArray.map(v=>math.round(v*255)).toVector
+      val expectedMask=row("model_mask").asInstanceOf[Arr].values.map(integer)
+      assertEquals(actualMask,expectedMask,s"model mask $label")
+      if expectedBox.nonEmpty then
+        val actual=result.pasteBack(generated).getRGB(0,0,width,height,null,0,width).toVector.map(_&0xffffff)
+        val expected=row("final").asInstanceOf[Arr].values.map(rgb)
+        assertEquals(actual,expected,s"final image $label")
+    }
+  }
+  test("all inpainting fill modes match NUI and Pillow reference pixels") {
+    val stream=getClass.getResourceAsStream("/inpaint-fill-reference.json")
+    val fixture=try NativeJson.parse(new String(stream.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8)).asInstanceOf[Obj].fields finally stream.close()
+    val width=fixture("width").asInstanceOf[Number].value.toInt
+    val height=fixture("height").asInstanceOf[Number].value.toInt
+    val source=new BufferedImage(width,height,BufferedImage.TYPE_INT_RGB)
+    fixture("pixels").asInstanceOf[Arr].values.zipWithIndex.foreach { (value,i) =>
+      source.setRGB(i%width,i/width,value.asInstanceOf[Number].value.toInt)
+    }
+    fixture("cases").asInstanceOf[Arr].values.foreach { value =>
+      val row=value.asInstanceOf[Obj].fields
+      val mask=new BufferedImage(width,height,BufferedImage.TYPE_INT_RGB)
+      row("mask").asInstanceOf[Arr].values.zipWithIndex.foreach { (value,i) =>
+        val v=value.asInstanceOf[Number].value.toInt
+        mask.setRGB(i%width,i/width,(v<<16)|(v<<8)|v)
+      }
+      val mode=row("fill").asInstanceOf[Number].value.toInt
+      val blur=row("blur").asInstanceOf[Number].value.toInt
+      val result=NativeInpaint.prepare(source,mask,width,height,0,blur,false,() => false,fill=mode,seed=42)
+      val image=scalatorch.models.DiffusionImageIO.toBufferedImage(result.image)
+      val actual=image.getRGB(0,0,width,height,null,0,width).toVector.map(_ & 0xffffff)
+      val expected=row("result").asInstanceOf[Arr].values.map(_.asInstanceOf[Number].value.toInt)
+      assertEquals(actual,expected,s"pattern=${row("pattern")} blur=$blur fill=$mode")
+    }
+  }
+  test("inpaint mask blur matches Pillow's reference bytes") {
+    val stream=getClass.getResourceAsStream("/inpaint-mask-reference.json")
+    val fixture=try NativeJson.parse(new String(stream.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8)).asInstanceOf[Obj].fields finally stream.close()
+    val width=fixture("width").asInstanceOf[Number].value.toInt
+    val height=fixture("height").asInstanceOf[Number].value.toInt
+    val source=new BufferedImage(width,height,BufferedImage.TYPE_INT_RGB)
+    fixture("cases").asInstanceOf[Arr].values.foreach { value =>
+      val row=value.asInstanceOf[Obj].fields
+      val input=row("input").asInstanceOf[Arr].values.map(_.asInstanceOf[Number].value.toInt)
+      val expected=row("output").asInstanceOf[Arr].values.map(_.asInstanceOf[Number].value.toInt)
+      val mask=new BufferedImage(width,height,BufferedImage.TYPE_INT_RGB)
+      for i <- input.indices do
+        val level=input(i)
+        mask.setRGB(i%width,i/width,(level<<16)|(level<<8)|level)
+      val radius=row("radius").asInstanceOf[Number].value.toInt
+      val actual=NativeInpaint.prepare(source,mask,width,height,0,radius,false,() => false).mask.toFloatArray
+        .map(value => math.round(value*255f)).toVector
+      assertEquals(actual,expected,s"pattern=${row("pattern")} radius=$radius")
+    }
+  }
   test("nine-channel masked pixels preserve values below 0.5 and zero values at or above it") {
     val image=Tensor.fromFloats(Array(.2f,.4f,.6f,.3f,.5f,.7f,.4f,.6f,.8f),Shape.from(Seq(1L,3L,1L,3L)))
     val mask=Tensor.fromFloats(Array(.49f,.5f,.51f),Shape.from(Seq(1L,1L,1L,3L)))

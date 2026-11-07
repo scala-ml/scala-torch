@@ -65,14 +65,16 @@ object NativeJson:
     }
     out.toString
 
-final case class NativeRequest(id: String,kind: String,params: Map[String,NativeJson],owner: Option[String])
+final case class NativeRequest(id: String,kind: String,params: Map[String,NativeJson],owner: Option[String],
+    imagePassword: Option[String]=None):
+  override def toString: String = s"NativeRequest($id,$kind,$params,$owner,${if imagePassword.nonEmpty then "<redacted>" else "None"})"
 object NativeRequest:
   import NativeJson.*
   def parse(line: String): NativeRequest =
     val fields=NativeJson.parse(line) match
       case Obj(values) => values
       case _ => throw IllegalArgumentException("request must be an object")
-    require(fields.keySet.subsetOf(Set("id","type","params","owner_id")),"unsupported envelope fields")
+    require(fields.keySet.subsetOf(Set("id","type","params","owner_id","image_password")),"unsupported envelope fields")
     def string(key: String): String=fields.get(key) match
       case Some(Str(s)) if s.nonEmpty && s.length<=256 => s
       case _ => throw IllegalArgumentException(s"invalid request $key")
@@ -80,7 +82,12 @@ object NativeRequest:
       case Null => Map.empty[String,NativeJson]
       case Obj(values) => values
       case _ => throw IllegalArgumentException("params must be an object")
-    NativeRequest(string("id"),string("type"),params,if fields.contains("owner_id") then Some(string("owner_id")) else None)
+    val kind=string("type")
+    val password=fields.get("image_password") match
+      case None => None
+      case Some(Str(value)) if value.nonEmpty && value.length<=4096 && kind=="vae_tools" => Some(value)
+      case _ => throw IllegalArgumentException("image password is invalid or unsupported for this request")
+    NativeRequest(string("id"),kind,params,if fields.contains("owner_id") then Some(string("owner_id")) else None,password)
 
 /** Single writer lock and explicit UTF-8; does not close the caller-owned stream. */
 final class NativeEmitter(out: OutputStream):

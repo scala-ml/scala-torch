@@ -12,12 +12,14 @@ import scala.util.Using
 /** AutoencoderKL structure and pipeline metadata; forward methods do not apply latent scaling. */
 final case class VaeConfig(inChannels: Int,outChannels: Int,latentChannels: Int,channels: Vector[Int],
     layersPerBlock: Int,groups: Int,scalingFactor: Double=.18215,quantConv: Boolean=true,
-    postQuantConv: Boolean=true,midAttention: Boolean=true,forceUpcast: Boolean=true):
+    postQuantConv: Boolean=true,midAttention: Boolean=true,forceUpcast: Boolean=true,
+    sampleHeight: Int=32,sampleWidth: Int=32):
   require(channels.nonEmpty && channels.size<=8 && (channels++Vector(inChannels,outChannels,latentChannels))
     .forall(n => n>0 && n<=16384),"invalid VAE channel/stage dimensions")
   require(layersPerBlock>0 && layersPerBlock<=16 && groups>0 && channels.forall(_%groups==0),"invalid VAE layers/groups")
   require(scalingFactor.isFinite && scalingFactor>0 && scalingFactor.toFloat>0 && scalingFactor.toFloat.isFinite &&
     (1/scalingFactor).toFloat.isFinite && (1/scalingFactor).toFloat>0,"invalid VAE scaling factor")
+  require(sampleHeight>0 && sampleWidth>0 && sampleHeight<=16384 && sampleWidth<=16384,"invalid VAE sample size")
 
 object VaeConfig:
   given Module[VaeConfig] with
@@ -81,16 +83,18 @@ object VaeConfig:
       val channels=array("block_out_channels").map(intValue(_,"block_out_channels"))
       require(array("down_block_types")==Vector.fill(channels.size)(Text("DownEncoderBlock2D")),"unsupported VAE down blocks")
       require(array("up_block_types")==Vector.fill(channels.size)(Text("UpDecoderBlock2D")),"unsupported VAE up blocks")
-      take("sample_size") match
-        case Null => ()
-        case Array(v) => require(v.size==2 && v.forall(x => intValue(x,"sample_size")>0),"invalid VAE sample size")
-        case v => require(intValue(v,"sample_size")>0,"invalid VAE sample size")
+      val (sampleHeight,sampleWidth)=take("sample_size") match
+        case Null => (32,32)
+        case Array(v) if v.size==2 => (intValue(v.head,"sample_size"),intValue(v(1),"sample_size"))
+        case Array(_) => throw IllegalArgumentException("VAE sample_size must have two dimensions")
+        case v => val size=intValue(v,"sample_size");(size,size)
       val scale=take("scaling_factor",Number(BigDecimal("0.18215"))) match
         case Number(n) => n.toDouble
         case _ => throw IllegalArgumentException("invalid VAE scaling factor")
       val c=VaeConfig(integer("in_channels",3),integer("out_channels",3),integer("latent_channels",4),channels,
         integer("layers_per_block",1),integer("norm_num_groups",32),scale,boolean("use_quant_conv",true),
-        boolean("use_post_quant_conv",true),boolean("mid_block_add_attention",true),boolean("force_upcast",true))
+        boolean("use_post_quant_conv",true),boolean("mid_block_add_attention",true),boolean("force_upcast",true),
+        sampleHeight,sampleWidth)
       require(fields.isEmpty,s"unknown VAE config fields: ${fields.keys.toVector.sorted.mkString(", ")}")
       c
     }

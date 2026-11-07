@@ -13,17 +13,67 @@ import scala.util.Using
 final case class ClipTokenBatch(ids: Tensor[Long],attentionMask: Tensor[Long])
 
 /** Explicit Transformers CLIPConverter fast profile; does not perform slow-tokenizer ftfy repair. */
-final class ClipFastTokenizer private (vocab: Map[String,Int],ranks: Map[(String,String),Int],val maxLength: Int,val padId: Long):
+final class ClipFastTokenizer private (vocab: Map[String,Int],ranks: Map[(String,String),Int],val maxLength: Int,val padId: Long,
+    addedTokenIds: Map[String,Long]=Map.empty,vectorGroups: Map[String,Vector[String]]=Map.empty,
+    nuiFallbackNormalization: Boolean=false):
   import ClipFastTokenizer.*
-  val vocabSize: Int=vocab.size
+  def vocabSize: Int=vocab.size+addedTokenIds.size
+  def baseVocabSize: Int=vocab.size
   val bosId: Long=vocab(bos).toLong
   val eosId: Long=vocab(eos).toLong
+  private lazy val inspectionVocab: Map[Long,String]=vocab.map((piece,id) => id.toLong->piece)++addedTokenIds.map((piece,id)=>id->piece)
+  private lazy val addedIds: Set[Long]=addedTokenIds.values.toSet
+  def isAddedToken(id: Long): Boolean=addedIds.contains(id)
+  /** Remove a complete added group and return old row IDs in the new vocabulary order. */
+  def withoutAddedTokenGroup(name: String): (ClipFastTokenizer,Vector[Long]) =
+    require(name!=null,"invalid textual-inversion token")
+    val key=name.toLowerCase(Locale.ROOT)
+    val removed=vectorGroups.getOrElse(key,throw IllegalArgumentException(s"unknown textual-inversion token: $name")).toSet
+    val remaining=addedTokenIds.toVector.filterNot((token,_)=>removed(token)).sortBy(_._2)
+    val keep=(0 until vocab.size).iterator.map(_.toLong).toVector++remaining.map(_._2)
+    val ids=remaining.zipWithIndex.map { case ((token,_),index) => token->(vocab.size.toLong+index) }.toMap
+    (new ClipFastTokenizer(vocab,ranks,maxLength,padId,ids,vectorGroups-key,nuiFallbackNormalization),keep)
+  /** Exact vocabulary piece and bytes used by token inspection, including dynamically added tokens. */
+  def inspectionPiece(id: Long): (String,Boolean,Array[Byte]) =
+    val piece=inspectionVocab.getOrElse(id,throw IllegalArgumentException(s"ID $id is not in tokenizer vocabulary"))
+    val special=id==bosId || id==eosId || id==padId
+    val raw=if special || addedTokenIds.contains(piece) then piece.getBytes(UTF_8)
+      else
+        val bytes=piece.stripSuffix("</w>").map(c => inverseAlphabet.getOrElse(c,
+          throw IllegalArgumentException("invalid CLIP byte alphabet"))).toArray
+        if piece.endsWith("</w>") then bytes :+ 32.toByte else bytes
+    (piece,special,raw)
+  private lazy val addedTokenPattern: Pattern =
+    val tokens=(addedTokenIds.keys.toVector++Vector(bos,eos)).sortBy(token => (-token.length,token))
+    Pattern.compile(tokens.map(Pattern.quote).mkString("(?:", "|", ")"),
+      if nuiFallbackNormalization then Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE else 0)
+  def withAddedTokens(tokens: Vector[(String,Int)]): ClipFastTokenizer =
+    require(tokens.nonEmpty && tokens.size<=256,"textual inversion must add between 1 and 256 tokens")
+    val nextIds=scala.collection.mutable.LinkedHashMap.from(addedTokenIds)
+    val nextGroups=scala.collection.mutable.Map.from(vectorGroups)
+    tokens.foreach { (raw,count) =>
+      val token=raw.toLowerCase(Locale.ROOT)
+      require(raw.nonEmpty && raw.length<=256 && !raw.exists(c => Character.isWhitespace(c) || Character.isISOControl(c)) &&
+        count>=1 && count<=256,"invalid textual-inversion token or vector count")
+      require(!vocab.contains(token) && !nextIds.contains(token),s"textual-inversion token already exists: $raw")
+      val names=Vector.tabulate(count)(index => if index==0 then token else s"${token}_$index")
+      require(names.distinct.size==names.size && names.forall(name => !vocab.contains(name) && !nextIds.contains(name)),
+        s"textual-inversion continuation token already exists: $raw")
+      names.foreach(name => nextIds(name)=vocab.size.toLong+nextIds.size)
+      nextGroups(token)=names
+    }
+    new ClipFastTokenizer(vocab,ranks,maxLength,padId,nextIds.toMap,nextGroups.toMap,nuiFallbackNormalization)
+  /** Transformers CLIPTokenizer fallback used when the optional ftfy package is absent. */
+  def withNuiFallbackNormalization: ClipFastTokenizer =
+    new ClipFastTokenizer(vocab,ranks,maxLength,padId,addedTokenIds,vectorGroups,true)
   def encode(text: String,addSpecialTokens: Boolean=true): Array[Long] =
     require(text.length<=1048576 && TokenizerJson.validUnicode(text),"invalid or oversized CLIP text")
     val normalizedBuilder=new java.lang.StringBuilder()
-    val clean=spaces.matcher(Normalizer.normalize(text,Normalizer.Form.NFC)).replaceAll(" ")
+    val nfc=Normalizer.normalize(text,Normalizer.Form.NFC)
+    val clean=if nuiFallbackNormalization then nfc else spaces.matcher(nfc).replaceAll(" ")
     // HF Lowercase expands each code point independently (no contextual final sigma).
-    clean.codePoints().forEach(cp => normalizedBuilder.append(new String(Character.toChars(cp)).toLowerCase(Locale.ROOT)))
+    if nuiFallbackNormalization then normalizedBuilder.append(clean)
+    else clean.codePoints().forEach(cp => normalizedBuilder.append(new String(Character.toChars(cp)).toLowerCase(Locale.ROOT)))
     val normalized=normalizedBuilder.toString
     val output=ArrayBuffer.empty[Long]
     if addSpecialTokens then output+=bosId
@@ -51,13 +101,27 @@ final class ClipFastTokenizer private (vocab: Map[String,Int],ranks: Map[(String
       require(output.size.toLong+symbols.size<=1048576,"too many CLIP token IDs")
       symbols.foreach(s => output+=vocab(s).toLong)
     def ordinary(segment: String): Unit =
-      val matcher=words.matcher(segment)
+      val prepared=if !nuiFallbackNormalization then segment else
+        val builder=new java.lang.StringBuilder()
+        segment.codePoints().forEach { cp =>
+          val kind=Character.getType(cp)
+          if cp==0 || cp==0xfffd || ((kind==Character.CONTROL || kind==Character.FORMAT) && cp!=9 && cp!=10 && cp!=13) then ()
+          else if cp==9 || cp==10 || cp==13 || kind==Character.SPACE_SEPARATOR then builder.append(' ')
+          else if isChinese(cp) then { builder.append(' ');builder.appendCodePoint(cp);builder.append(' ') }
+          else builder.appendCodePoint(cp)
+        }
+        builder.toString.toLowerCase(Locale.ROOT)
+      val matcher=words.matcher(prepared)
       while matcher.find() do piece(matcher.group())
-    val matcher=special.matcher(normalized)
+    val matcher=addedTokenPattern.matcher(normalized)
     var start=0
     while matcher.find() do
       ordinary(normalized.substring(start,matcher.start()))
-      output+=vocab(matcher.group()).toLong
+      val token=if nuiFallbackNormalization then matcher.group().toLowerCase(Locale.ROOT) else matcher.group()
+      vectorGroups.get(token) match
+        case Some(rows) => rows.foreach(name => output+=addedTokenIds(name))
+        case None => output+=vocab.get(token).map(_.toLong).orElse(addedTokenIds.get(token))
+          .getOrElse(throw IllegalStateException(s"missing CLIP special token: $token"))
       start=matcher.end()
     ordinary(normalized.substring(start))
     if addSpecialTokens then output+=eosId
@@ -83,13 +147,18 @@ object ClipFastTokenizer:
   private val eos="<|endoftext|>"
   private val spaces=Pattern.compile("\\s+",Pattern.UNICODE_CHARACTER_CLASS)
   private val words=Pattern.compile("'s|'t|'re|'ve|'m|'ll|'d|[\\p{L}]+|[\\p{N}]|[^\\s\\p{L}\\p{N}]+",Pattern.UNICODE_CHARACTER_CLASS)
-  private val special=Pattern.compile(Pattern.quote(bos)+"|"+Pattern.quote(eos))
+  private def isChinese(cp: Int): Boolean =
+    (cp>=0x4e00 && cp<=0x9fff) || (cp>=0x3400 && cp<=0x4dbf) ||
+    (cp>=0x20000 && cp<=0x2a6df) || (cp>=0x2a700 && cp<=0x2b73f) ||
+    (cp>=0x2b740 && cp<=0x2b81f) || (cp>=0x2b820 && cp<=0x2ceaf) ||
+    (cp>=0xf900 && cp<=0xfaff) || (cp>=0x2f800 && cp<=0x2fa1f)
   private val alphabet: Vector[String]=
     var next=256
     (0 to 255).map { b =>
       if (b>=33 && b<=126) || (b>=161 && b<=172) || b>=174 then b.toChar.toString
       else { val s=next.toChar.toString;next+=1;s }
     }.toVector
+  private lazy val inverseAlphabet: Map[Char,Byte]=alphabet.zipWithIndex.map((symbol,index)=>symbol.charAt(0)->index.toByte).toMap
   private def read(path: Path): String=Using.resource(Files.newInputStream(path)) { stream =>
     val bytes=stream.readNBytes(TokenizerJson.maxBytes+1)
     require(bytes.length<=TokenizerJson.maxBytes,"CLIP tokenizer file exceeds32MiB")

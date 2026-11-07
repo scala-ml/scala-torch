@@ -1,7 +1,7 @@
 package scalatorch.models.worker
 
 import scalatorch.*
-import scalatorch.models.{DiffusionImageInput,DiffusionImageResize}
+import scalatorch.models.{DiffusionImageInput,DiffusionImageResize,DiffusionImageIO}
 import java.awt.image.BufferedImage
 
 /** Bounded mask preprocessing and canvas restoration for the four-channel inpaint path. */
@@ -110,6 +110,24 @@ private[worker] object NativeInpaint:
         output.setRGB(0,0,original.getWidth,original.getHeight,pixels,0,original.getWidth)
         output
 
+  def sourceForVae(prepared: Prepared,factor: Int,cancelled: () => Boolean): (Tensor[Float],Tensor[Float]) =
+    val dims=prepared.image.shape.dims
+    require(factor>0 && dims.size==4 && dims(0)==1 && dims(1)==3,"invalid VAE source")
+    val sourceHeight=dims(2).toInt;val sourceWidth=dims(3).toInt
+    val width=sourceWidth/factor*factor;val height=sourceHeight/factor*factor
+    require(width>0 && height>0,"latent upscale source is smaller than the VAE scale")
+    if width==sourceWidth && height==sourceHeight then (prepared.image,prepared.mask)
+    else
+      val image=DiffusionImageResize(DiffusionImageIO.toBufferedImage(prepared.image),width,height,0)
+      val mask=prepared.mask.toFloatArray
+      val resized=Array.tabulate(width*height) { i =>
+        val x=i%width;val y=i/width
+        val sx=((2L*x+1)*sourceWidth/(2L*width)).toInt
+        val sy=((2L*y+1)*sourceHeight/(2L*height)).toInt
+        mask(sy*sourceWidth+sx)
+      }
+      (rgbTensor(image,cancelled),Tensor.fromFloats(resized,Shape.from(Seq(1L,1L,height.toLong,width.toLong))))
+
   private def grayRgb(source: BufferedImage): BufferedImage =
     val result=new BufferedImage(source.getWidth,source.getHeight,BufferedImage.TYPE_INT_RGB)
     for y <- 0 until source.getHeight; x <- 0 until source.getWidth do
@@ -130,35 +148,45 @@ private[worker] object NativeInpaint:
         values(plane*2+i)=((rgb&255)/127.5f)-1f
     Tensor.fromFloats(values,Shape.from(Seq(1L,3L,height.toLong,width.toLong)))
 
-  private def boxBlur(input: Array[Float],width: Int,height: Int,radius: Int,horizontal: Boolean,
-      cancelled: () => Boolean): Array[Float] =
+  private[worker] def gaussianBytes(input: Array[Int],width: Int,height: Int,radius: Int,cancelled: () => Boolean): Array[Int] =
     if radius==0 then input
     else
-      val output=new Array[Float](input.length)
-      val lines=if horizontal then height else width
-      val length=if horizontal then width else height
-      val window=radius*2+1
-      for line <- 0 until lines do
-        if cancelled() || Thread.currentThread().isInterrupted then throw new java.util.concurrent.CancellationException("inpainting cancelled")
-        def index(position: Int): Int =
-          val clamped=math.max(0,math.min(length-1,position))
-          if horizontal then line*width+clamped else clamped*width+line
-        var sum=0.0
-        for i <- -radius to radius do sum+=input(index(i))
-        for position <- 0 until length do
-          output(index(position))=(sum/window).toFloat
-          sum-=input(index(position-radius))
-          sum+=input(index(position+radius+1))
-      output
+      // Pillow's three fractional box passes, including byte rounding at every pass.
+      // See Pillow BoxBlur.c; its license is in META-INF/licenses/pillow.txt.
+      val sigma2=radius.toFloat*radius.toFloat/3f
+      val length=math.sqrt(12.0*sigma2+1.0).toFloat
+      val whole=math.floor((length-1.0)/2.0).toFloat
+      val fraction=((2f*whole+1f)*(whole*(whole+1f)-3f*sigma2))/(6f*(sigma2-(whole+1f)*(whole+1f)))
+      val boxRadius=(whole+fraction).toFloat
+      val integerRadius=boxRadius.toInt
+      val scale=1L<<24
+      val weight=(scale.toFloat/(boxRadius*2f+1f)).toLong
+      val edgeWeight=(scale-(integerRadius*2+1)*weight)/2
+      var pixels=input
+      def pass(horizontal: Boolean): Unit =
+        val output=new Array[Int](pixels.length)
+        val lines=if horizontal then height else width
+        val count=if horizontal then width else height
+        for line <- 0 until lines do
+          if cancelled() || Thread.currentThread().isInterrupted then throw new java.util.concurrent.CancellationException("inpainting cancelled")
+          def index(position: Int): Int =
+            val at=math.max(0,math.min(count-1,position))
+            if horizontal then line*width+at else at*width+line
+          var sum=0L
+          for position <- -integerRadius to integerRadius do sum+=pixels(index(position))
+          for position <- 0 until count do
+            val far=pixels(index(position-integerRadius-1))+pixels(index(position+integerRadius+1))
+            output(index(position))=((sum*weight+far.toLong*edgeWeight+(1L<<23))>>24).toInt
+            sum+=pixels(index(position+integerRadius+1))-pixels(index(position-integerRadius))
+        pixels=output
+      for _ <- 0 until 3 do pass(horizontal=true)
+      for _ <- 0 until 3 do pass(horizontal=false)
+      pixels
 
   private def blur(input: Array[Float],width: Int,height: Int,radius: Int,cancelled: () => Boolean): Array[Float] =
     if radius==0 then input
-    else
-      // Three separable box passes approximate a Gaussian with linear work in pixel count.
-      var output=input
-      for _ <- 0 until 3 do output=boxBlur(output,width,height,radius,horizontal=true,cancelled)
-      for _ <- 0 until 3 do output=boxBlur(output,width,height,radius,horizontal=false,cancelled)
-      output
+    else gaussianBytes(input.map(value => math.max(0,math.min(255,math.round(value*255f)))),
+      width,height,radius,cancelled).map(_/255f)
 
   private def cropRegion(mask: Array[Float],width: Int,height: Int,pad: Int): Option[(Int,Int,Int,Int)] =
     var minX=width;var minY=height;var maxX= -1;var maxY= -1
@@ -196,53 +224,57 @@ private[worker] object NativeInpaint:
     image.setRGB(0,0,width,height,pixels,0,width)
     image
 
-  /** Approximate Pillow's multi-radius alpha fill with one separable box blur per radius. */
+  /** Pillow-compatible multiscale premultiplied-alpha fill. */
   private def blurredColorFill(image: BufferedImage,mask: BufferedImage,cancelled: () => Boolean): BufferedImage =
     require(image.getWidth==mask.getWidth && image.getHeight==mask.getHeight,"inpaint fill image/mask size mismatch")
     val width=image.getWidth;val height=image.getHeight;val count=width*height
     val pixels=image.getRGB(0,0,width,height,null,0,width)
     val levels=mask.getRGB(0,0,width,height,null,0,width)
-    val premultiplied=Array.ofDim[Array[Float]](4)
-    for channel <- 0 until 4 do premultiplied(channel)=new Array[Float](count)
+    val premultiplied=Array.fill(4)(new Array[Int](count))
+    def div255(value: Int): Int =
+      val rounded=value+128
+      ((rounded>>>8)+rounded)>>>8
     for y <- 0 until height do
       if cancelled() || Thread.currentThread().isInterrupted then
         throw new java.util.concurrent.CancellationException("inpainting blur-fill preparation cancelled")
       for x <- 0 until width do
         val i=y*width+x
-        val alpha=(255-(levels(i)&255))/255f
-        premultiplied(0)(i)=((pixels(i)>>>16)&255)/255f*alpha
-        premultiplied(1)(i)=((pixels(i)>>>8)&255)/255f*alpha
-        premultiplied(2)(i)=(pixels(i)&255)/255f*alpha
+        val alpha=255-(levels(i)&255)
+        premultiplied(0)(i)=div255(((pixels(i)>>>16)&255)*alpha)
+        premultiplied(1)(i)=div255(((pixels(i)>>>8)&255)*alpha)
+        premultiplied(2)(i)=div255((pixels(i)&255)*alpha)
         premultiplied(3)(i)=alpha
-    val result=Array.fill(4)(new Array[Float](count))
+    val result=Array.fill(4)(new Array[Int](count))
     val radii=Vector((256,1),(64,1),(16,2),(4,4),(2,2),(0,1))
     for (radius,repeats) <- radii do
-      val blurred=if radius==0 then premultiplied else premultiplied.map { channel =>
-        boxBlur(boxBlur(channel,width,height,radius,horizontal=true,cancelled),width,height,radius,horizontal=false,cancelled)
-      }
+      val blurred=if radius==0 then premultiplied else premultiplied.map(channel => gaussianBytes(channel,width,height,radius,cancelled))
       for _ <- 0 until repeats do
         for y <- 0 until height do
           if cancelled() || Thread.currentThread().isInterrupted then
             throw new java.util.concurrent.CancellationException("inpainting blur-fill cancelled")
           for x <- 0 until width do
             val i=y*width+x
-            val alpha=math.max(0f,math.min(1f,blurred(3)(i)))
-            val inverse=1f-alpha
-            result(0)(i)=blurred(0)(i)+result(0)(i)*inverse
-            result(1)(i)=blurred(1)(i)+result(1)(i)*inverse
-            result(2)(i)=blurred(2)(i)+result(2)(i)*inverse
-            result(3)(i)=alpha+result(3)(i)*inverse
+            val alpha=blurred(3)(i)
+            if alpha>0 then
+              val outAlpha255=alpha*255+result(3)(i)*(255-alpha)
+              val foreground=alpha*255*255*128/outAlpha255
+              val background=255*128-foreground
+              for channel <- 0 until 3 do
+                val value=if alpha==255 then blurred(channel)(i) else math.min(255,blurred(channel)(i)*255/alpha)
+                val sum=value*foreground+result(channel)(i)*background+(128<<7)
+                result(channel)(i)=(((sum>>>8)+sum)>>>8)>>>7
+              val sum=outAlpha255+128
+              result(3)(i)=((sum>>>8)+sum)>>>8
     val output=new Array[Int](count)
     for y <- 0 until height do
       if cancelled() || Thread.currentThread().isInterrupted then
         throw new java.util.concurrent.CancellationException("inpainting blur-fill compositing cancelled")
       for x <- 0 until width do
         val i=y*width+x
-        val amount=(levels(i)&255)/255f
+        val amount=levels(i)&255
         def channel(index: Int,shift: Int): Int =
-          val fill=if result(3)(i)>0f then result(index)(i)/result(3)(i) else 0f
-          val original=((pixels(i)>>>shift)&255)/255f
-          math.rint(math.max(0f,math.min(1f,fill*amount+original*(1f-amount)))*255f).toInt
+          val original=(pixels(i)>>>shift)&255
+          div255(result(index)(i)*amount+original*(255-amount))
         output(i)=0xff000000|(channel(0,16)<<16)|(channel(1,8)<<8)|channel(2,0)
     val filled=new BufferedImage(width,height,BufferedImage.TYPE_INT_RGB)
     filled.setRGB(0,0,width,height,output,0,width)

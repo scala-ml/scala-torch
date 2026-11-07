@@ -11,7 +11,7 @@ class DpmPlusPlusSuite extends munit.FunSuite:
     assertEquals(schedule.timesteps,Vector(999f,687f,146f,0f))
     assertEquals(schedule.sigmas,noise.karrasEuler(4).sigmas)
     assertEquals(schedule.layout.initialNoiseSigma,1.0)
-    intercept[IllegalArgumentException](DpmSchedule(Vector(2f,1f),Vector(2.0,2.0,0.0)))
+    intercept[IllegalArgumentException](DpmSchedule(Vector(2f,1f),Vector(2.0,3.0,0.0)))
   }
   test("VP midpoint uses history and terminal zero returns current clean prediction") {
     val solver=DpmPlusPlus2M(Vector(4.0,2.0,1.0,0.0),DiffusionPrediction.Sample)
@@ -29,7 +29,15 @@ class DpmPlusPlusSuite extends munit.FunSuite:
       (DiffusionPrediction.VPrediction,alpha*noise-sigma*clean)) do
       val result=DpmPlusPlus2M(Vector(2.0,0.0),mode).step(0,v(output.toFloat),v(sample.toFloat))
       assertEqualsFloat(result.previous.data.toFloatArray.head,clean.toFloat,1e-6f)
-    intercept[IllegalArgumentException](DpmPlusPlus2M(Vector(2.0,2.0,0.0)))
+    intercept[IllegalArgumentException](DpmPlusPlus2M(Vector(2.0,3.0,0.0)))
+  }
+  test("repeated sigma leaves the sample unchanged and resets second-order correction") {
+    val solver=DpmPlusPlus2M(Vector(4.0,4.0,2.0,0.0),DiffusionPrediction.Sample)
+    val first=solver.step(0,v(1),v(2))
+    assertEqualsFloat(first.previous.data.toFloatArray.head,2f,0f)
+    val second=solver.step(1,v(3),first.previous,Some(first.predictedOriginal))
+    val firstOrder=DpmPlusPlus2M(Vector(4.0,2.0,0.0),DiffusionPrediction.Sample).step(0,v(3),v(2))
+    assertEqualsFloat(second.previous.data.toFloatArray.head,firstOrder.previous.data.toFloatArray.head,1e-6f)
   }
   test("history gradients and rejected updates preserve caller-owned state") {
     val solver=DpmPlusPlus2M(Vector(4.0,2.0,1.0,0.0),DiffusionPrediction.Sample)

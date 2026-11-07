@@ -3,12 +3,52 @@ package scalatorch.models
 import scalatorch.*
 import java.nio.{ByteBuffer,ByteOrder}
 import java.nio.file.Path
+import scalatorch.models.worker.NativeJson
+import NativeJson.*
 
 class SdxlImagePipelineSuite extends munit.FunSuite:
   private def reference(name: String,shape: Shape): Tensor[Float] =
     val stream=getClass.getResourceAsStream(s"/tiny-sdxl-pipeline/$name.bin")
     val bytes=try ByteBuffer.wrap(stream.readAllBytes()).order(ByteOrder.LITTLE_ENDIAN) finally stream.close()
     Tensor.fromFloats(Array.fill(bytes.remaining()/4)(bytes.getFloat()),shape)
+  test("SDXL rescale CFG matches Diffusers latents for text and image input") {
+    val configured=sys.props.get("scalatorch.sdxl.dir")
+    assume(configured.nonEmpty,"tiny SDXL required")
+    val root=Path.of(configured.get)
+    def tok(part: String)=ClipFastTokenizer.load(root.resolve(s"$part/vocab.json"),root.resolve(s"$part/merges.txt"))
+    val first=tok("tokenizer");val clip=PretrainedClip.load(root.resolve("text_encoder"))
+    val text=new SdxlTextConditioning(first,clip,tok("tokenizer_2"),PretrainedClip.load(root.resolve("text_encoder_2")))
+    val pipe=new EulerImagePipeline(first,clip,PretrainedUNet.load(root.resolve("unet")),PretrainedVae.load(root.resolve("vae")),sdxlConditioning=Some(text))
+    val shape=Shape.from(Seq(1L,4L,4L,4L));val imageShape=Shape.from(Seq(1L,3L,8L,8L))
+    val noise=reference("noise",shape)
+    val source=DiffusionImageSource(reference("source",imageShape),.5,Some(reference("posterior-noise",shape)))
+    val schedule=EulerSchedule(Vector(500f,250f),Vector(1.0,.5,0.0),1.0)
+    val stream=getClass.getResourceAsStream("/sdxl-rescale-reference.json")
+    val refs=try NativeJson.parse(new String(stream.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8)).asInstanceOf[Obj].fields finally stream.close()
+    for img <- Seq(false,true);dpm <- Seq(false,true) do
+      val request=DiffusionImageRequest("a red apple","blur",8,8,42,guidanceScale=7.5f,guidanceRescale=.7f,
+        sdxlSize=Option.when(img)(SdxlImageSize(12,16,1,2)))
+      var last: Tensor[Float]=null
+      val sourceOpt=Option.when(img)(source)
+      if dpm then pipe.generateDpm(request,DpmSchedule(schedule.timesteps,schedule.sigmas),Some(noise),onProgress=p=>last=p.latents,source=sourceOpt)
+      else pipe.generate(request,schedule,Some(noise),onProgress=p=>last=p.latents,source=sourceOpt)
+      val key=(if dpm then "dpm_" else "euler_")+(if img then "img2img" else "txt2img")
+      val expected=refs(key).asInstanceOf[Arr].values.map(_.asInstanceOf[Number].value.toFloat)
+      val error=last.toFloatArray.zip(expected).map((a,b)=>math.abs(a.toDouble-b)).max
+      println(s"SDXL $key rescale max error $error")
+      assert(error<0.0001,s"$key $error")
+    if sys.env.get("SCALATORCH_CUDA_TESTS").contains("1") then
+      val gpu=new EulerImagePipeline(first,clip,pipe.unet,pipe.vae,
+        vaeExecution=VaeExecution.Cuda(maxBytes=16777216,offloadWeights=true),
+        unetExecution=UNetExecution.Cuda(maxBytes=16777216,offloadWeights=true),sdxlConditioning=Some(text))
+      val request=DiffusionImageRequest("a red apple","blur",8,8,42,guidanceScale=7.5f,resharpen=Some(Resharpen(1.5,"Cos")),
+        colorGrading=Some(LatentColorGrading(true,.8,.4,-.3,.7,true,.6)))
+      val longer=EulerSchedule(Vector(500f,375f,250f),Vector(1.0,.75,.5,0.0),1.0)
+      val cpu=pipe.generate(request,longer,Some(noise)).toFloatArray
+      val cuda=gpu.generate(request,longer,Some(noise)).toFloatArray
+      val error=cpu.zip(cuda).map((a,b)=>math.abs(a.toDouble-b)).max
+      assert(error<.0001,s"SDXL CUDA resharpen error $error")
+  }
   test("native SDXL Euler and DPM images match Diffusers with CFG, size IDs and image input") {
     val directory=sys.props.get("scalatorch.sdxl.dir")
     assume(directory.nonEmpty,"tiny SDXL required")

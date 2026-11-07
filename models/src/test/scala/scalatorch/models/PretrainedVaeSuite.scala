@@ -334,6 +334,14 @@ class PretrainedVaeSuite extends munit.FunSuite:
     assertEquals(dpmProgress.toVector,Vector(1,2,3))
     assert(dpmImage.toFloatArray.forall(_.isFinite))
     assertEquals(dpmImage.toFloatArray.toVector,pipeline.generateDpm(request,dpmSchedule).toFloatArray.toVector)
+    val baseLatents=pipeline.generateDpmLatents(request,dpmSchedule)
+    assertEquals(baseLatents.shape,Shape.from(Seq(1L,4L,3L,5L)),"latent output geometry")
+    val encoderMustNotRun=pipeline.vae.copy(encoder=pipeline.vae.encoder.copy(maxFeatureElements=0))
+    val latentSourcePipeline=new EulerImagePipeline(pipeline.tokenizer,pipeline.textEncoder,pipeline.unet,encoderMustNotRun)
+    val secondPass=latentSourcePipeline.generateDpm(request,dpmSchedule,
+      latentSource=Some(DiffusionLatentSource(baseLatents,0.5)))
+    assertEquals(secondPass.shape,Shape.from(Seq(1L,3L,6L,10L)),"latent source decode geometry")
+    assert(secondPass.toFloatArray.forall(_.isFinite),"latent-source output must be finite")
     var dpmCancel=false
     intercept[java.util.concurrent.CancellationException] {
       pipeline.generateDpm(request,dpmSchedule,onProgress=_ => dpmCancel=true,cancelled=() => dpmCancel)

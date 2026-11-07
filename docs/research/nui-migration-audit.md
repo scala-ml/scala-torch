@@ -78,16 +78,26 @@ Two compatibility decisions must be resolved without silently dropping features.
 
 The application worker now crosses the existing NUI JSON Lines launch seam and
 supports tiny-checkpoint SD1.5/SDXL text-to-image, standard linear LoRA,
-img2img (including four- and nine-channel masked U-Nets), image metadata/replay,
-and sequential `batch_size × n_iter`. Nine-channel routing is verified with
+two-pass txt2img latent Hires with six latent upscalers,
+img2img (including four- and nine-channel masked U-Nets), safetensors textual
+inversion for SD1.x and SDXL, image metadata/replay, and sequential
+`batch_size × n_iter`. Nine-channel routing is verified with
 synthetic widened tiny weights; trained inpaint weights are not locally tested.
+NUI `engine` owns backend selection and child-worker launch; scala-torch
+model/tensor dependencies remain outside `core`, `ui`, `plugins` and `mcp`.
+The NUI SBT graph and assembly contain no PyTorch or scala-torch model/tensor
+JARs; core/UI retain only generic configuration values and protocol data.
 These are verified subsets; the default NUI
 engine remains Python. Continue from the refreshed 48-request/121-plugin
 inventory, porting high-value generation and model capabilities while keeping
 unsupported requests explicit. In particular, normal-checkpoint quality and
 throughput, Pillow-exact mask blur and exact Pillow parity for blurred-color
-inpaint fill mode 0, trained inpaint-checkpoint quality, ControlNet,
-textual-inversion embeddings, Hires, remaining plugin/runtime extension behavior, packaging, and Python-absent
+inpaint fill mode 0, trained inpaint-checkpoint quality, larger-image seams,
+perceptual quality and NUI request-path verification for the new tiled RRDBNet
+x4+ pixel-upscaler, other neural/model pixel upscalers and latent img2img/inpaint Hires, refinement
+LoRA/ControlNet replay, ControlNet generation, unsupported PyTorch checkpoint layouts,
+embedding inspection/edit/merge, Hires overrides and hooks, remaining plugin/runtime
+extension behavior, packaging, and Python-absent
 JavaFX/MCP acceptance are still open. Preserve the complete
 application scope; the native worker, one image, or a tiny model does not mark
 Python removal complete.

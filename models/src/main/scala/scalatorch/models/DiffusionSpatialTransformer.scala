@@ -25,6 +25,6 @@ final case class DiffusionSpatialTransformer(norm: GroupNorm,projIn: Conv2d,
     val projected=projIn(norm(input))
     val batch=shape.dims(0);val height=shape.dims(2);val width=shape.dims(3)
     val tokens=projected.reshape(Shape.from(Seq(batch,inner,height*width))).transpose(1,2)
-    val transformed=blocks.foldLeft(tokens)((value,block) => block(value,context))
+    val transformed=TokenDownsampling.withSpatialShape(height.toInt,width.toInt) { HyperTile.inSpatial { blocks.foldLeft(tokens)((value,block) => block(value,context)) } }
     val image=transformed.transpose(1,2).reshape(Shape.from(Seq(batch,inner,height,width)))
     input+projOut(image)

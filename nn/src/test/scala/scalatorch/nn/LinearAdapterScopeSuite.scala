@@ -52,3 +52,16 @@ class LinearAdapterScopeSuite extends munit.FunSuite:
     }
     assertEquals(output,Vector(1f,2f))
   }
+
+  test("step filters compose and restore after failures") {
+    LinearAdapterScope.withAdapters(Map(weight->Vector(first->.5f,second->2f))) {
+      assertEquals(LinearAdapterScope.withFilter(_._1 eq first)(output),Vector(2f,3.5f))
+      intercept[IllegalStateException] {
+        LinearAdapterScope.withFilter(_._1 eq first) {
+          assertEquals(LinearAdapterScope.withFilter(_._1 eq second)(output),Vector(1f,2f))
+          throw IllegalStateException("failure")
+        }
+      }
+      assertEquals(output,Vector(6f,-.5f))
+    }
+  }

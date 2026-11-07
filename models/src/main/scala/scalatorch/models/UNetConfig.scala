@@ -48,7 +48,7 @@ object UNetConfig:
     require(bytes.length<=1048576,"U-Net config exceeds 1MiB")
     fromJson(UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString)
   }
-  def fromJson(json: String): UNetConfig =
+  def fromJson(json: String,expectedClass: String="UNet2DConditionModel",ignoredFields: Set[String]=Set.empty): UNetConfig =
     require(json.length<=1048576,"U-Net config exceeds size limit")
     try Using.resource(factory.createParser(json)) { p =>
       def value(arrayAllowed: Boolean=true): Value = p.currentToken() match
@@ -86,7 +86,7 @@ object UNetConfig:
       def array(key: String): Vector[Value]=take(key,Null) match
         case Array(v) => v
         case _ => throw IllegalArgumentException(s"missing U-Net array: $key")
-      exact("_class_name",Text("UNet2DConditionModel"))
+      exact("_class_name",Text(expectedClass))
       take("_diffusers_version",Null) match
         case Null | Text(_) => ()
         case _ => throw IllegalArgumentException("invalid diffusers version metadata")
@@ -122,13 +122,16 @@ object UNetConfig:
         case value => Vector.fill(channels.size)(integerValue(value,key))
       val heads=stageValues("attention_head_dim",8)
       val depths=stageValues("transformer_layers_per_block",1)
-      def blocks(key: String,basic: String,cross: String): Vector[Boolean]=array(key).map {
+      def parseBlocks(values: Vector[Value],key: String,basic: String,cross: String): Vector[Boolean]=values.map {
         case Text(s) if s==basic => false
         case Text(s) if s==cross => true
         case _ => throw IllegalArgumentException(s"unsupported U-Net block: $key")
       }
-      val down=blocks("down_block_types","DownBlock2D","CrossAttnDownBlock2D")
-      val up=blocks("up_block_types","UpBlock2D","CrossAttnUpBlock2D")
+      val down=parseBlocks(array("down_block_types"),"down_block_types","DownBlock2D","CrossAttnDownBlock2D")
+      val up=fields.remove("up_block_types") match
+        case None if expectedClass=="ControlNetModel" => down.reverse
+        case Some(Array(values)) => parseBlocks(values,"up_block_types","UpBlock2D","CrossAttnUpBlock2D")
+        case _ => throw IllegalArgumentException("missing U-Net array: up_block_types")
       val time=take("time_embedding_dim",Null) match
         case Null => channels.head*4
         case v => integerValue(v,"time_embedding_dim")
@@ -137,6 +140,7 @@ object UNetConfig:
         integer("norm_num_groups",32),number("norm_eps",1e-5),depths.head,
         integer("downsample_padding",1),time,boolean("flip_sin_to_cos",true),number("freq_shift",0),number("mid_block_scale_factor",1),
         heads,depths,boolean("use_linear_projection",false),addition.map(_._1),addition.map(_._2))
+      ignoredFields.foreach(fields.remove)
       require(fields.isEmpty,s"unknown U-Net config fields: ${fields.keys.toVector.sorted.mkString(", ")}")
       config
     }

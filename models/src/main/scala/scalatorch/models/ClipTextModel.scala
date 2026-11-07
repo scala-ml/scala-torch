@@ -48,6 +48,41 @@ final case class ClipTextModel(tokenEmbedding: Embedding,positionEmbedding: Embe
   require(maxScoreElements>=0 && maxHiddenElements>=0,"negative CLIP workspace limit")
   require(eosTokenId>=0,"negative CLIP EOS ID")
   textProjection.foreach(p => require(p.weight.data.shape.dims(1)==width && p.bias.isEmpty,"invalid CLIP text projection"))
+  /** Reorder vocabulary rows without mutating the original model. */
+  def withSelectedTokenEmbeddings(ids: Vector[Long]): ClipTextModel =
+    val current=tokenEmbedding.weight.data
+    val count=current.shape.dims.head
+    require(ids.nonEmpty && ids.size<=count && ids.distinct.size==ids.size && ids.forall(id=>id>=0 && id<count),
+      "invalid CLIP vocabulary selection")
+    require(ids.size.toLong*width<=Int.MaxValue,"CLIP vocabulary selection exceeds allocation limit")
+    val original=current.toFloatArray
+    val selected=new Array[Float](ids.size*width)
+    ids.zipWithIndex.foreach((id,index)=>Array.copy(original,id.toInt*width,selected,index*width,width))
+    copy(tokenEmbedding=Embedding(Parameter(Tensor.fromFloats(selected,Shape.from(Seq(ids.size.toLong,width.toLong))),
+      tokenEmbedding.weight.trainable)))
+  /** Replace selected rows in a separate model for a scoped preview. */
+  def withReplacedTokenEmbeddings(ids: Vector[Long],rows: Vector[Array[Float]]): ClipTextModel =
+    val tensor=tokenEmbedding.weight.data
+    require(ids.nonEmpty && ids.size==rows.size && ids.distinct.size==ids.size &&
+      ids.forall(id=>id>=0 && id<tensor.shape.dims.head),"invalid CLIP embedding row selection")
+    require(rows.forall(row=>row!=null && row.length==width && row.forall(_.isFinite)),"invalid CLIP embedding rows")
+    val values=tensor.toFloatArray
+    ids.zip(rows).foreach((id,row)=>Array.copy(row,0,values,id.toInt*width,width))
+    copy(tokenEmbedding=Embedding(Parameter(Tensor.fromFloats(values,tensor.shape),tokenEmbedding.weight.trainable)))
+  def withAddedTokenEmbeddings(rows: Vector[Array[Float]]): ClipTextModel =
+    require(rows.nonEmpty && rows.size<=256,"CLIP token extension must contain 1..256 rows")
+    val current=tokenEmbedding.weight.data
+    val vocabulary=current.shape.dims(0).toInt
+    val rowWidth=current.shape.dims(1).toInt
+    require(rows.forall(row => row.length==rowWidth && row.forall(_.isFinite)),
+      "CLIP textual-inversion rows have invalid width or nonfinite values")
+    require(vocabulary.toLong+rows.size<=Int.MaxValue && (vocabulary.toLong+rows.size)*rowWidth<=Int.MaxValue,
+      "CLIP textual-inversion extension exceeds allocation limit")
+    val original=current.toFloatArray
+    val extended=java.util.Arrays.copyOf(original,original.length+rows.size*rowWidth)
+    rows.zipWithIndex.foreach { (row,index) => Array.copy(row,0,extended,original.length+index*rowWidth,rowWidth) }
+    copy(tokenEmbedding=Embedding(Parameter(Tensor.fromFloats(extended,
+      Shape.from(Seq(vocabulary.toLong+rows.size,rowWidth.toLong))),tokenEmbedding.weight.trainable)))
   private def input(tokens: Tensor[Long],skipLastLayers: Int): Variable =
     require(tokens.shape.rank==2,"CLIP token IDs must have shape (batch,tokens)")
     val b=tokens.shape.dims(0);val t=tokens.shape.dims(1)

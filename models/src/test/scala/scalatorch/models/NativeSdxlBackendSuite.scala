@@ -90,7 +90,8 @@ class NativeSdxlBackendSuite extends munit.FunSuite:
       val imgExpected=pixels(run("img2img",imgParams))
       assertEquals(pixels(run("img2img",imgParams)),imgExpected)
       val badPrompt=params.updated("params",Obj(fields.updated("prompt",Str("<lora:test:1> apple"))))
-      assertEquals(intercept[NativeBackendError](run("txt2img",badPrompt)).code,"unsupported")
+      // Prompt LoRA tags are supported; a tag without a NUI-resolved path is rejected explicitly.
+      assert(intercept[IllegalArgumentException](run("txt2img",badPrompt)).getMessage.contains("missing resolved path for LoRA: test"))
       def fileCount(): Long =
         val files=Files.list(root)
         try files.count() finally files.close()
