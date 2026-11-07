@@ -48,7 +48,7 @@ object PretrainedVae:
       trainable,maxParameters,maxFeatureElements,maxScoreElements)
 
   private[models] def loadSd1View(archive: SingleFileTensorView,maxScoreElements: Long): VaeModel =
-    loadFromView(archive,SingleFileSd1Config.vaeConfig,false,1000000000L,134217728L,maxScoreElements)
+    loadFromView(archive,SingleFileSd1Config.vaeConfig,false,1000000000L,536870912L,maxScoreElements)
 
   /** Loads the SD2 VAE from a checkpoint whose archive remains owned by the caller. */
   private[models] def loadSd2SingleFile(archive: SafeTensorSet,trainable: Boolean=false,
@@ -59,7 +59,7 @@ object PretrainedVae:
       trainable,maxParameters,maxFeatureElements,maxScoreElements)
 
   private[models] def loadSdxlView(archive: SingleFileTensorView,maxScoreElements: Long): VaeModel =
-    loadFromView(archive,SingleFileSdxlConfig.vaeConfig,false,1000000000L,134217728L,maxScoreElements)
+    loadFromView(archive,SingleFileSdxlConfig.vaeConfig,false,1000000000L,536870912L,maxScoreElements)
 
   /** Loads the SDXL VAE from a checkpoint whose archive remains owned by the caller. */
   private[models] def loadSdxlSingleFile(archive: SafeTensorSet,trainable: Boolean=false,

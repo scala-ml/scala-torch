@@ -128,7 +128,7 @@ class PretrainedClipSuite extends munit.FunSuite:
     val parts=line.split("\t")
     parts(0)->parts(1).split(",").map(_.toInt).toVector
   }.toVector
-  private def fixture(entries: Vector[(String,Vector[Int])]=shapes,dtype: String="F32",sharded: Boolean=false,positionOffset: Long=0)(f: Path => Unit): Unit =
+  private def fixture(entries: Vector[(String,Vector[Int])]=shapes,dtype: String="F32",sharded: Boolean=false,positionOffset: Long=0,positionDtype: String="I64")(f: Path => Unit): Unit =
     val dir=Files.createTempDirectory("scala-torch-clip")
     try
       Files.write(dir.resolve("config.json"),resource("config.json"))
@@ -136,16 +136,24 @@ class PretrainedClipSuite extends munit.FunSuite:
         val elementBytes=if dtype=="BOOL" then 1 else if dtype=="F32" then 4 else 2
         var offset=0
         val header=subset.map { (key,dims) =>
-          val kind=if key=="text_model.embeddings.position_ids" then "I64" else dtype
-          val begin=offset;offset+=dims.product*(if kind=="I64" then 8 else elementBytes)
+          val kind=if key=="text_model.embeddings.position_ids" then positionDtype else dtype
+          val begin=offset;offset+=dims.product*(kind match
+            case "I64" => 8
+            case "F32" => 4
+            case "F16" | "BF16" => 2
+            case _ => elementBytes)
           s"\"$key\":{\"dtype\":\"$kind\",\"shape\":[${dims.mkString(",")}],\"data_offsets\":[$begin,$offset]}"
         }.mkString("{",",","}").getBytes(UTF_8)
         val data=ByteBuffer.allocate(offset).order(ByteOrder.LITTLE_ENDIAN)
         subset.foreach { (key,dims) =>
           for i <- 0 until dims.product do
             val v=if key=="text_model.final_layer_norm.bias" then 1f else 0f
-            (if key=="text_model.embeddings.position_ids" then "I64" else dtype) match
+            val isPosition=key=="text_model.embeddings.position_ids"
+            (if isPosition then positionDtype else dtype) match
               case "I64" => data.putLong(i.toLong+positionOffset)
+              case "F32" if isPosition => data.putFloat((i+positionOffset).toFloat)
+              case "F16" if isPosition => data.putShort(java.lang.Float.floatToFloat16((i+positionOffset).toFloat))
+              case "BF16" if isPosition => data.putShort((java.lang.Float.floatToRawIntBits((i+positionOffset).toFloat) >>> 16).toShort)
               case "F32" => data.putFloat(v)
               case "F16" => data.putShort(java.lang.Float.floatToFloat16(v))
               case "BF16" => data.putShort((java.lang.Float.floatToRawIntBits(v) >>> 16).toShort)
@@ -209,6 +217,14 @@ class PretrainedClipSuite extends munit.FunSuite:
     fixture(shapes :+ (key->Vector(1,77)),positionOffset=1) { dir =>
       intercept[IllegalArgumentException](PretrainedClip.load(dir))
     }
+    // SDXL checkpoints saved in half precision keep position_ids as F16 (BF16 / F32 behave the same way).
+    for dtype <- Seq("F16","BF16","F32") do
+      fixture(shapes :+ (key->Vector(1,77)),positionDtype=dtype) { dir =>
+        assertEquals(Module.parameters(PretrainedClip.load(dir)).size,84)
+      }
+      fixture(shapes :+ (key->Vector(1,77)),positionOffset=1,positionDtype=dtype) { dir =>
+        intercept[IllegalArgumentException](PretrainedClip.load(dir))
+      }
     fixture(shapes :+ (key->Vector(77))) { dir =>
       intercept[IllegalArgumentException](PretrainedClip.load(dir))
     }

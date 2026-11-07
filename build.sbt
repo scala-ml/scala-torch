@@ -1,6 +1,6 @@
 ThisBuild / scalaVersion := "3.3.8"
 ThisBuild / organization := "com.github.kmizu"
-ThisBuild / version := "0.1.0"
+ThisBuild / version := "0.1.1"
 ThisBuild / organizationName := "Kota Mizushima"
 ThisBuild / homepage := Some(uri("https://github.com/scala-ml/scala-torch"))
 ThisBuild / licenses := Seq("BSD-3-Clause" -> uri("https://opensource.org/licenses/BSD-3-Clause"))
