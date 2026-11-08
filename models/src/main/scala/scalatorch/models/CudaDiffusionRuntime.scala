@@ -122,7 +122,49 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     out
   }
 
-  def linear(x: CudaTensor,l: Linear): CudaTensor = scope { use =>
+  // LoRA merged into a private copy of the Float16 weight: one GEMM per step instead of five kernels. Rebuilt whenever
+  // the adapter set or a multiplier changes (per-step LoRA schedules), and disabled with SCALATORCH_LORA_MERGE=0.
+  private val mergedWeights=scala.collection.mutable.HashMap.empty[Parameter,(Vector[(AnyRef,Float)],CudaTensor)]
+  private val mergeEnabled= !sys.env.get("SCALATORCH_LORA_MERGE").contains("0")
+
+  private def mergedWeight(l: Linear,adapters: Vector[(LowRankAdapter,Float)]): CudaTensor =
+    val signature=adapters.map((a,m)=>(a:AnyRef,m))
+    mergedWeights.get(l.weight) match
+      case Some((sig,w)) if sig.size==signature.size && sig.zip(signature).forall((x,y)=>(x._1 eq y._1) && x._2==y._2) => w
+      case old =>
+        old.foreach(_._2.close())
+        mergedWeights.remove(l.weight)
+        val base=weights(l.weight)
+        var acc=session.scale(base,1f)
+        try
+          adapters.foreach { (a,multiplier) =>
+            val rank=weightShape(a.a).dims.head
+            val at=session.transpose(weights(a.a),0,1)
+            val delta=try session.matmulTransposedB(weights(a.b),at) finally at.close()
+            val scaled=try session.scale(delta,multiplier*(a.alpha/rank).toFloat) finally delta.close()
+            val sum=try session.add(acc,scaled) finally scaled.close()
+            acc.close();acc=sum
+          }
+        catch case e: Throwable => { acc.close();throw e }
+        mergedWeights(l.weight)=(signature,acc)
+        acc
+
+  def linear(x: CudaTensor,l: Linear): CudaTensor =
+    val adapters=l.lora.toVector.map(a=>(a,1f))++LinearAdapterScope.forWeight(l.weight).toVector
+    if mergeEnabled && adapters.nonEmpty && host.isEmpty && session.hasCublas && session.shape(x).rank==2 &&
+        weightShape(l.weight).rank==2 && weights.contains(l.weight) && adapters.forall((a,_)=>weights.contains(a.a) && weights.contains(a.b)) then
+      scope { use =>
+        val merged=mergedWeight(l,adapters)
+        val out=use(session.matmulTransposedB(x,merged))
+        l.bias.fold(out) { p =>
+          val withBias=use(session.addBroadcast(out,weight(p,use)))
+          out.close()
+          withBias
+        }
+      }
+    else linearPlain(x,l)
+
+  private def linearPlain(x: CudaTensor,l: Linear): CudaTensor = scope { use =>
     val base=use(project(x,l.weight))
     val attached=l.lora.fold(base) { a =>
       val first=use(project(x,a.a));val second=use(project(first,a.b))
@@ -743,6 +785,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
           f"uploaded=${offloadedWeightUploadBytes/1048576.0}%.1f MiB retained=${offloadedWeightBytes/1048576.0}%.1f MiB " +
           f"transient=$offloadedWeightTransientUploads evictions=$offloadedWeightEvictions")
       weights.values.foreach(_.close())
+      mergedWeights.values.foreach(_._2.close());mergedWeights.clear()
       clearOffloadedWeights()
       host=Map.empty
       closed=true

@@ -31,6 +31,7 @@ class CudaDiffusionResnetSuite extends munit.FunSuite:
       CudaSession.withDevice() { s =>
         val resident=CudaDiffusionResnet.upload(s,cpu)
         val x=s.upload(input);val t=time.map(s.upload)
+        resident(x,t).close() // warm-up: LoRA-merged weights are cached for the runtime lifetime
         val before=s.allocatedBytes
         for _ <- 0 until 2 do
           val out=resident(x,t)
