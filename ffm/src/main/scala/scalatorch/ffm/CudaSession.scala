@@ -54,7 +54,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.loadModule(opsPtx)
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("geglu","geglu_fast","broadcast_add5","transpose5","softmax_par","gelu_erf","quick_gelu","broadcast_add","concat_copy","resize_nearest","groupnorm","groupnorm_stats","groupnorm_stats_par","groupnorm_apply","conv2d","conv2d_fast","im2col","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","leaky_relu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_scores","attention_prepare","attention_output","attention_fused_fp32","attention_fused_multiquery_fp32","attention_scores_fp32","attention_prepare_fp32","attention_output_fp32","attention_backward","attention_gradient_cast","cache_append").map { name =>
+  private val kernels=Seq("geglu","geglu_fast","f32_to_f16","broadcast_add5","transpose5","softmax_par","gelu_erf","quick_gelu","broadcast_add","concat_copy","resize_nearest","groupnorm","groupnorm_stats","groupnorm_stats_par","groupnorm_apply","conv2d","conv2d_fast","im2col","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","leaky_relu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_scores","attention_prepare","attention_output","attention_fused_fp32","attention_fused_multiquery_fp32","attention_scores_fp32","attention_prepare_fp32","attention_output_fp32","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -613,6 +613,60 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     execute(output,tiles,tiledFunction,threadsPerBlock=256,threadsPerOutput=256,label=s"gemm_tiled[$m,$n,$k]") { (arena,result) =>
       Seq(a.address,b.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
         Seq(m,n,k,n).map(v => arena.allocateFrom(JAVA_INT,v.toInt))
+    }
+
+  def hasCublas: Boolean = cublas.isDefined
+
+  /** x[m,k] * w[n,k]^T without materialising the transpose; requires cuBLAS (see hasCublas). */
+  def matmulTransposedB(x: CudaTensor,w: CudaTensor): CudaTensor =
+    validate(x);validate(w)
+    require(cublas.isDefined,"matmulTransposedB requires cuBLAS")
+    require(x.shape.rank==2 && w.shape.rank==2 && x.shape.dims(1)==w.shape.dims(1),"CUDA GEMM shape mismatch")
+    val m=x.shape.dims(0).toInt;val k=x.shape.dims(1).toInt;val n=w.shape.dims(0).toInt
+    val result=allocate(Shape.from(Seq(m.toLong,n.toLong)))
+    try
+      if m>0 && n>0 && k>0 then
+        val started=if profileEnabled then System.nanoTime() else 0L
+        cublas.get.sgemmRowMajorBT(m,n,k,x.address,w.address,result.address)
+        driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+        if profileEnabled then record(s"cublas_sgemm_bt[$m,$n,$k]",started)
+      result
+    catch case error: Throwable =>
+      try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
+  /** Opaque Float16 copy of a Float32 tensor (2 bytes per element). Only matmulTransposedBHalf may read it. */
+  def toHalf(value: CudaTensor): CudaTensor =
+    validate(value)
+    val packed=allocate(Shape.from(Seq((value.shape.numel+1)/2)))
+    try
+      launch(value.shape.numel,kernels("f32_to_f16"),threadsPerBlock=256,label="f32_to_f16") { arena =>
+        Seq(arena.allocateFrom(JAVA_LONG,value.address),arena.allocateFrom(JAVA_LONG,packed.address),
+          arena.allocateFrom(JAVA_INT,value.shape.numel.toInt))
+      }
+      packed
+    catch case error: Throwable =>
+      try packed.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
+  /** x[m,k] (Float32, cast to Float16 internally) * wHalf[n,k]^T on tensor cores; Float32 output. */
+  def matmulTransposedBHalf(x: CudaTensor,wHalf: CudaTensor,n: Int,k: Int): CudaTensor =
+    validate(x);validate(wHalf)
+    require(cublas.isDefined,"FP16 GEMM requires cuBLAS")
+    require(x.shape.rank==2 && x.shape.dims(1)==k,"CUDA GEMM shape mismatch")
+    val m=x.shape.dims(0).toInt
+    Using.resource(toHalf(x)) { xHalf =>
+      val result=allocate(Shape.from(Seq(m.toLong,n.toLong)))
+      try
+        if m>0 && n>0 && k>0 then
+          val started=if profileEnabled then System.nanoTime() else 0L
+          cublas.get.gemmExHalfBT(m,n,k,xHalf.address,wHalf.address,result.address)
+          driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+          if profileEnabled then record(s"cublas_gemm_fp16[$m,$n,$k]",started)
+        result
+      catch case error: Throwable =>
+        try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+        throw error
     }
 
   private def matmulInto(a: Long,b: Long,c: Long,m: Int,n: Int,k: Int,ldc: Int): Unit =

@@ -2065,3 +2065,18 @@ T5_DONE: ret;
  mul.wide.u32 offset,i,4; add.u64 addr,po,offset; st.global.f32 [addr],x;
 B5_DONE: ret;
 }
+
+.visible .entry f32_to_f16(.param .u64 h_in,.param .u64 h_out,.param .u32 h_count) {
+ .reg .pred p;
+ .reg .u32 count,i,t,tid;
+ .reg .u64 pin,pout,offset,addr;
+ .reg .f32 x;
+ .reg .b16 h;
+ ld.param.u64 pin,[h_in]; ld.param.u64 pout,[h_out]; ld.param.u32 count,[h_count];
+ mov.u32 i,%ctaid.x; mov.u32 t,%ntid.x; mov.u32 tid,%tid.x; mad.lo.u32 i,i,t,tid;
+ setp.ge.u32 p,i,count; @p bra H_DONE;
+ mul.wide.u32 offset,i,4; add.u64 addr,pin,offset; ld.global.f32 x,[addr];
+ cvt.rn.f16.f32 h,x;
+ mul.wide.u32 offset,i,2; add.u64 addr,pout,offset; st.global.b16 [addr],h;
+H_DONE: ret;
+}

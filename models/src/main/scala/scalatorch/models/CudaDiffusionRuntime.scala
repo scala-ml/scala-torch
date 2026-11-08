@@ -108,7 +108,20 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     }
   }
 
-  private def project(x: CudaTensor,p: Parameter): CudaTensor = scope { use =>
+  private val halfEnabled=sys.env.get("SCALATORCH_CUDA_FP16").contains("1")
+  private val halfWeights=scala.collection.mutable.Map.empty[Parameter,CudaTensor]
+
+  private def project(x: CudaTensor,p: Parameter): CudaTensor =
+    if session.hasCublas && weightShape(p).rank==2 && session.shape(x).rank==2 then scope { use =>
+      val w=weight(p,use)
+      val shape=session.shape(w)
+      if halfEnabled && host.get(p).isEmpty then
+        val packed=halfWeights.getOrElseUpdate(p,session.toHalf(w))
+        use(session.matmulTransposedBHalf(x,packed,shape.dims(0).toInt,shape.dims(1).toInt))
+      else use(session.matmulTransposedB(x,w))
+    } else projectGeneric(x,p)
+
+  private def projectGeneric(x: CudaTensor,p: Parameter): CudaTensor = scope { use =>
     val transposed=use(session.transpose(weight(p,use),0,1))
     val out=use(session.matmul(x,transposed))
     transposed.close()
@@ -704,6 +717,8 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
           f"hit=${offloadedWeightCacheHitBytes/1048576.0}%.1f MiB uploads=$offloadedWeightUploads " +
           f"uploaded=${offloadedWeightUploadBytes/1048576.0}%.1f MiB retained=${offloadedWeightBytes/1048576.0}%.1f MiB " +
           f"transient=$offloadedWeightTransientUploads evictions=$offloadedWeightEvictions")
+      halfWeights.values.foreach(_.close())
+      halfWeights.clear()
       weights.values.foreach(_.close())
       clearOffloadedWeights()
       host=Map.empty
