@@ -11,7 +11,7 @@ import scala.util.Using
 object DiffusionLoRA:
   private val maxTensors=20000
   private val maxRank=256L
-  private val maxElements=100000000L
+  private val maxElements=536870912L
 
   private trait LoraArchive extends AutoCloseable:
     def tensors: Map[String,TensorInfo]

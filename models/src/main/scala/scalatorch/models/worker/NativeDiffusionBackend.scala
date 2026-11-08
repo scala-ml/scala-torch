@@ -1669,7 +1669,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           case None | Some(Null) => None
           case value => Some(parseLoras(value))
         val nineChannelModel=pipeline.unet.convIn.weight.data.shape.dims(1)==2*pipeline.vae.config.latentChannels+1
-        var remainingAdapterElements=100000000L
+        var remainingAdapterElements=536870912L
         val adapterCache=scala.collection.mutable.Map.empty[(Path,Option[Int]),Map[scalatorch.nn.Parameter,Vector[LinearAdapterScope.Applied]]]
         val adapterWindows=new java.util.IdentityHashMap[scalatorch.nn.LowRankAdapter,LoraStepWindow]()
         val adaptersByName=scala.collection.mutable.HashMap.empty[String,scala.collection.mutable.ArrayBuffer[scalatorch.nn.LowRankAdapter]]
