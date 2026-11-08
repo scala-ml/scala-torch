@@ -538,6 +538,14 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       }
       val skips=scala.collection.mutable.ArrayBuffer.empty[CudaTensor]
       var skipIndex=0
+      // DeepCache: reuse the deep features recorded by the last full call (see DeepCache.scala).
+      val dcState=if control.isEmpty then DeepCache.current else None
+      val dcDims=session.shape(input).dims.toSeq
+      val (dcSlot,dcReuse)=dcState.fold((0,false))(st => st.beginCall(timesteps.toFloatArray(0),dcDims))
+      val dcBranch=dcState.fold(0)(_.config.branch)
+      require(dcState.isEmpty || dcBranch<=model.downBlocks.size-2,"DeepCache branch is too deep for this U-Net")
+      val dcUpKeep=model.upBlocks.size-1-dcBranch
+      val dcNeededSkips=model.upBlocks.drop(math.max(dcUpKeep,0)).map(_.layers.size).sum
       control.foreach(c=>require(c.down.size==1+model.downBlocks.map(_.layers.size).sum+model.downBlocks.dropRight(1).size,
         "ControlNet down residual count mismatch"))
       def saveSkip(): Unit=
@@ -563,7 +571,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         val (cfg,t)=kohya.get
         if KohyaHrFix.isActive(cfg,t) && cfg.downscaleFactor!=1.0 then
           next(up(KohyaHrFix.shrinkIfActive(hidden.toCpu,cfg,t)))
-      model.downBlocks.zipWithIndex.foreach { (block,blockIdx) => Pag.withSection(s"down.$blockIdx") {
+      model.downBlocks.zipWithIndex.foreach { (block,blockIdx) => if !(dcReuse && blockIdx>dcBranch) then Pag.withSection(s"down.$blockIdx") {
         block.layers.zipWithIndex.foreach { (l,layerIdx) =>
           layer(l)
           if kohyaLoc.contains((blockIdx,layerIdx)) then
@@ -585,16 +593,24 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       }
       control.foreach(c=>require(skipIndex==c.down.size,
         s"ControlNet down residual count mismatch: expected $skipIndex, got ${c.down.size}"))
-      next(resnet(hidden,model.midBlock.first,Some(time)))
-      next(Pag.withSection("mid")(spatialTransformer(hidden,model.midBlock.attention,context)))
-      next(resnet(hidden,model.midBlock.second,Some(time)))
-      control.foreach { residuals =>
-        val residual=residuals.middle
-        require(session.shape(residual)==hidden.shape,"ControlNet middle residual shape mismatch")
-        next(session.add(hidden,residual))
-      }
+      if !dcReuse then
+        next(resnet(hidden,model.midBlock.first,Some(time)))
+        next(Pag.withSection("mid")(spatialTransformer(hidden,model.midBlock.attention,context)))
+        next(resnet(hidden,model.midBlock.second,Some(time)))
+        control.foreach { residuals =>
+          val residual=residuals.middle
+          require(session.shape(residual)==hidden.shape,"ControlNet middle residual shape mismatch")
+          next(session.add(hidden,residual))
+        }
       val freeU=FreeU.current
-      model.upBlocks.zipWithIndex.foreach { (block,stageIndex) => Pag.withSection(s"up.$stageIndex") {
+      model.upBlocks.zipWithIndex.foreach { (block,stageIndex) => if !(dcReuse && stageIndex<dcUpKeep) then Pag.withSection(s"up.$stageIndex") {
+        dcState.foreach { st =>
+          if stageIndex==dcUpKeep then
+            if dcReuse then
+              while skips.size>dcNeededSkips do skips.remove(skips.size-1).close()
+              next(session.scale(st.feature(dcSlot),1f))
+            else st.record(dcSlot,dcDims,session.scale(hidden,1f))
+        }
         kohya.foreach { case (cfg,_) =>
           val startIdx=skips.size-block.layers.size
           val (_,maxH,maxW)=(startIdx until skips.size).map { k =>

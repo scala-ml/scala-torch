@@ -39,7 +39,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
   if !sys.env.contains("SCALATORCH_CLIP_DEVICE") then unetExecution.device match
     case value if value.startsWith("cuda") => ClipCuda.enable(value.drop(5).toIntOption.getOrElse(0))
     case _ => ()
-  override def features: Vector[String]=Vector("img2img_hires_fix","loopback_scaler","tokenizer","latent_upscale","inpaint_difference","gpu_temperature_guard","rescale_cfg","cfg_schedule","resharpen","latent_mirroring","color_grading","anti_burn","vectorscope_cc","detail_daemon","vae_tools","model_keyword","freeu","dynamic_thresholding","tiling","cads","hypertile","metadata_utils","model_sampling","apg","mahiro","pag","weight_gradient","negpip","kohya_hrfix","token_downsampling","conditioning_highres_fix","multidiffusion","latent_modifier","soft_inpainting","neveroom","semantic_guidance","sonar","hires_fix_tweaks","pnginfo_injection","prevent_interrupt","controlnet","controlnet_preprocess_extras","system_info","save_intermediate","steps_animation","img2imgalt","cd_tuner","llul","agent_attention","incantations","characteristic_guidance","clip_io","prompt_fusion","neutral_prompt","composable_lora","embedding_merge","aesthetic_gradients","sag","reference","revision","ip_adapter","controllllite","fooocus_inpaint","compile","taesd","spandrel","vram_estimator","adetailer","batch_face_swap","face_restore","nsfw_checker","aesthetic_score","animatediff","cn_animation","controlnet_fastload_data","photomaker","caption","img2vid","novel_view","custom_code","ldsr","marigold","controlnet_aux","temporal_lab","clip_interrogator","chara_searcher","batch_interrogate_wd_v3_partial")
+  override def features: Vector[String]=Vector("img2img_hires_fix","loopback_scaler","tokenizer","latent_upscale","inpaint_difference","gpu_temperature_guard","rescale_cfg","cfg_schedule","resharpen","latent_mirroring","color_grading","anti_burn","vectorscope_cc","detail_daemon","vae_tools","model_keyword","freeu","deepcache","dynamic_thresholding","tiling","cads","hypertile","metadata_utils","model_sampling","apg","mahiro","pag","weight_gradient","negpip","kohya_hrfix","token_downsampling","conditioning_highres_fix","multidiffusion","latent_modifier","soft_inpainting","neveroom","semantic_guidance","sonar","hires_fix_tweaks","pnginfo_injection","prevent_interrupt","controlnet","controlnet_preprocess_extras","system_info","save_intermediate","steps_animation","img2imgalt","cd_tuner","llul","agent_attention","incantations","characteristic_guidance","clip_io","prompt_fusion","neutral_prompt","composable_lora","embedding_merge","aesthetic_gradients","sag","reference","revision","ip_adapter","controllllite","fooocus_inpaint","compile","taesd","spandrel","vram_estimator","adetailer","batch_face_swap","face_restore","nsfw_checker","aesthetic_score","animatediff","cn_animation","controlnet_fastload_data","photomaker","caption","img2vid","novel_view","custom_code","ldsr","marigold","controlnet_aux","temporal_lab","clip_interrogator","chara_searcher","batch_interrogate_wd_v3_partial")
   override def usesCuda: Boolean=vaeExecution.device!="cpu" || unetExecution.device!="cpu"
   override def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot(modelSummary,vaeExecution.device,unetExecution.device,
     vaeExecution.offloadWeights,unetExecution.offloadWeights,maxAttentionScoreElements,vaeTilingEnabled,vaeAttentionLimit)
@@ -1207,6 +1207,22 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
                 number(fields,"b",0).toDouble,str(fields,"method","Straight"),str(fields,"scaling","Flat"),number(fields,"strength",1).toDouble))
           }
           case _ => None
+        val deepCache=g.get("hooks") match
+          case Some(Obj(hooks)) => hooks.get("deepcache").flatMap {
+            case Null | Bool(false) => None
+            case Obj(fields) if fields.get("enabled").contains(Bool(false)) => None
+            case value =>
+              val fields=value match
+                case Bool(true) => Map.empty[String,NativeJson]
+                case Obj(v) => v
+                case _ => throw IllegalArgumentException("invalid deepcache hook")
+              require(fields.keySet.subsetOf(Set("enabled","interval","branch","full_first")),"unknown deepcache option")
+              require(usesCuda,"DeepCache needs the CUDA U-Net")
+              Some(DeepCacheConfig(number(fields,"interval",BigDecimal(3)).toInt,number(fields,"branch",BigDecimal(0)).toInt,
+                number(fields,"full_first",BigDecimal(5)).toInt))
+          }
+          case _ => None
+        DeepCache.install(deepCache)
         val freeU=g.get("hooks") match
           case Some(Obj(hooks)) => hooks.get("freeu").flatMap {
             case Null | Bool(false) => None
@@ -1799,7 +1815,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val imageRequest=baseImageRequest.copy(controlNets=controlNet)
         val keywordPlan=NativeKeywordHook.plan(g.get("hooks"),imageRequest.prompt,
           modelSummary("hash").asInstanceOf[Str].value,root.getFileName.toString,iterations,seed,keywordState,
-          () => context.checkCancelled(),allowActive=Set("img2img_hires_fix","latent_upscale","inpaint_difference","gpu_temperature_guard","rescale_cfg","cfg_schedule","resharpen","latent_mirroring","color_grading","anti_burn","vectorscope_cc","detail_daemon","freeu","dynamic_thresholding","tiling","cads","hypertile","model_sampling","apg","mahiro","pag","weight_gradient","negpip","kohya_hrfix","token_downsampling","conditioning_highres_fix","multidiffusion","latent_modifier","soft_inpainting","neveroom","semantic_guidance","sonar","hires_fix_tweaks","pnginfo_injection","prevent_interrupt","save_intermediate","steps_animation","img2imgalt","cd_tuner","llul","agent_attention","incantations","characteristic_guidance","clip_io","prompt_fusion","neutral_prompt","composable_lora","embedding_merge","aesthetic_gradients","sag","reference","revision","ip_adapter","controllllite","fooocus_inpaint","compile","adetailer","batch_face_swap","face_restore","nsfw_checker","aesthetic_score","animatediff","photomaker"))
+          () => context.checkCancelled(),allowActive=Set("img2img_hires_fix","latent_upscale","inpaint_difference","gpu_temperature_guard","rescale_cfg","cfg_schedule","resharpen","latent_mirroring","color_grading","anti_burn","vectorscope_cc","detail_daemon","freeu","deepcache","dynamic_thresholding","tiling","cads","hypertile","model_sampling","apg","mahiro","pag","weight_gradient","negpip","kohya_hrfix","token_downsampling","conditioning_highres_fix","multidiffusion","latent_modifier","soft_inpainting","neveroom","semantic_guidance","sonar","hires_fix_tweaks","pnginfo_injection","prevent_interrupt","save_intermediate","steps_animation","img2imgalt","cd_tuner","llul","agent_attention","incantations","characteristic_guidance","clip_io","prompt_fusion","neutral_prompt","composable_lora","embedding_merge","aesthetic_gradients","sag","reference","revision","ip_adapter","controllllite","fooocus_inpaint","compile","adetailer","batch_face_swap","face_restore","nsfw_checker","aesthetic_score","animatediff","photomaker"))
         val keywordRefinement=hiresFix.filter(_.prompt.isEmpty).flatMap(_ => keywordPlan.map(_.preview))
         val keywordRefinementAdapters=keywordRefinement.map { text =>
           val refs=manualLoras++NativeLoraPrompt.parse(text)._2
