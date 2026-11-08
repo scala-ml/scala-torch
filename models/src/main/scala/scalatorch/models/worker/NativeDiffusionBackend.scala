@@ -178,7 +178,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
               else SingleFileSd1Config.unetConfigFor(archive)
             }
           else UNetConfig.read(root.resolve("unet/config.json")))
-        val model=PretrainedControlNet.loadWithProgress(real,500000000L,maxAttentionScoreElements,context.cancelled,() =>
+        val model=PretrainedControlNet.loadWithProgress(real,2000000000L,maxAttentionScoreElements,context.cancelled,() =>
           context.event("log",Map("level"->Str("info"),"message"->Str("Reading ControlNet tensor weights"))))
         context.checkCancelled()
         require(controlNetStamp(real,context)==stamp,"ControlNet files changed during loading")

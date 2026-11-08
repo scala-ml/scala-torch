@@ -423,8 +423,9 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
 
   /** Computes one ControlNet pass in this CUDA session and returns caller-owned residual tensors. */
   def controlNet(sample: CudaTensor,model: ConditionalControlNet2d,timesteps: Tensor[Float],
-      context: CudaTensor,image: CudaTensor,scales: Vector[Float]): CudaControlNetResiduals =
+      context: CudaTensor,image: CudaTensor,scales: Vector[Float],added: Option[CudaTensor]=None): CudaControlNetResiduals =
     check()
+    require(added.isDefined==model.additionEmbedding.isDefined,"ControlNet additional conditioning presence mismatch")
     val shape=session.shape(sample)
     val contextShape=session.shape(context)
     val imageShape=session.shape(image)
@@ -448,7 +449,14 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         val embedded=use(up(features))
         val projected=use(linear(embedded,model.timeEmbedding.linear1));embedded.close()
         val activated=use(session.silu(projected));projected.close()
-        val time=use(linear(activated,model.timeEmbedding.linear2));activated.close()
+        val baseTime=use(linear(activated,model.timeEmbedding.linear2));activated.close()
+        val time=model.additionEmbedding.fold(baseTime) { embedding =>
+          val addProjected=use(linear(added.get,embedding.linear1))
+          val addActivated=use(session.silu(addProjected));addProjected.close()
+          val addEmbedded=use(linear(addActivated,embedding.linear2));addActivated.close()
+          val sum=use(session.add(baseTime,addEmbedded));baseTime.close();addEmbedded.close()
+          sum
+        }
         var hidden=use(conv(sample,model.convIn))
         def next(value: CudaTensor): Unit =
           val owned=use(value)

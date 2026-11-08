@@ -277,12 +277,12 @@ object UNetExecution:
                 val input=temporary(session.upload(sample))
                 val controlSample=if controls.nonEmpty && sample.shape.dims(1)!=4 then
                   temporary(session.upload(controlInput(sample))) else input
-                def residuals(context: scalatorch.ffm.CudaTensor,includeConditionalOnly: Boolean): Option[CudaControlNetResiduals]=
+                def residuals(context: scalatorch.ffm.CudaTensor,includeConditionalOnly: Boolean,addition: Option[scalatorch.ffm.CudaTensor]=None): Option[CudaControlNetResiduals]=
                   var combined: Option[CudaControlNetResiduals]=None
                   controls.foreach { case (request,runtime,image) =>
                     if includeConditionalOnly || !request.conditionalOnly then
                       request.scales(controlProgress,controlProgressEnd).foreach { values =>
-                        val contribution=temporary(runtime.controlNet(controlSample,request.model,timesteps,context,image,values))
+                        val contribution=temporary(runtime.controlNet(controlSample,request.model,timesteps,context,image,values,addition))
                         combined match
                           case None => combined=Some(contribution)
                           case Some(previous) =>
@@ -301,7 +301,7 @@ object UNetExecution:
                 val baseUncond=unconditionalOverride.orElse(unconditional)
                 val baseNegCtx=unconditionalOverride.fold(negativeContext)(u => Some(temporary(session.upload(u))))
                 val baseNegAddition=negativeAddedOverride.fold(negativeAddition)(na => baseUncond.flatMap(u => model.addedFeatures(u.shape.dims.head,Some(na)).map(x => temporary(session.upload(x)))))
-                val positiveControl=residuals(basePosCtx,true)
+                val positiveControl=residuals(basePosCtx,true,basePosAddition)
                 def adjusted(isPositive: Boolean): (scalatorch.ffm.CudaTensor,Tensor[Float]) =
                   val selected=detail.filter(d=>baseNegCtx.isEmpty || d.mode=="both" || (isPositive && d.mode=="cond") || (!isPositive && d.mode=="uncond"))
                   selected.fold((input,timesteps))(d=>(temporary(session.scale(input,d.scale)),Tensor.fromFloats(Array(d.timestep),Shape.from(Seq(1L)))))
@@ -364,7 +364,7 @@ object UNetExecution:
                     st.stepCorrection(stepIdx,timesteps.toFloatArray(0),guidance,sample.shape,(uIn,cIn) => {
                       val uGpu=temporary(session.upload(uIn))
                       val cGpu=temporary(session.upload(cIn))
-                      val uOut=NegPip.withSigns(negativeSigns)(evalCudaModel(uGpu,positiveTime,effNegCtx.get,baseNegAddition,residuals(effNegCtx.get,false))).toCpu
+                      val uOut=NegPip.withSigns(negativeSigns)(evalCudaModel(uGpu,positiveTime,effNegCtx.get,baseNegAddition,residuals(effNegCtx.get,false,baseNegAddition))).toCpu
                       val cOut=NegPip.withSigns(positiveSigns)(evalCudaModel(cGpu,positiveTime,effPosCtx,basePosAddition,positiveControl)).toCpu
                       (uOut,cOut)
                     },sample,prediction)
@@ -392,7 +392,7 @@ object UNetExecution:
                   val degGpu=temporary(session.upload(degSample))
                   val degCtx=effNegCtx.getOrElse(effPosCtx)
                   val degAdd=if effNegCtx.isDefined then baseNegAddition else basePosAddition
-                  val degCtrl=if effNegCtx.isDefined then residuals(degCtx,false) else positiveControl
+                  val degCtrl=if effNegCtx.isDefined then residuals(degCtx,false,degAdd) else positiveControl
                   val degOut=evalCudaModel(degGpu,positiveTime,degCtx,degAdd,degCtrl).toCpu
                   (posCpuForSag,degOut,sagCfg.scale)
                 }
@@ -408,7 +408,7 @@ object UNetExecution:
                 var scheduledResult: Option[Tensor[Float]]=None
                 VaeExecution.checkCancelled(cancelled)
                 val predicted=effNegCtx.fold(positive) { context =>
-                  val negativeControl=residuals(context,false)
+                  val negativeControl=residuals(context,false,baseNegAddition)
                   val (negativeInputBase,negativeTime)=adjusted(false)
                   val negativeInput=chgShifted.fold(negativeInputBase)(s => temporary(session.upload(s._1)))
                   val negativeWithRef=Incantations.withSeg(segUncond) {

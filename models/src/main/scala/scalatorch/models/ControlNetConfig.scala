@@ -12,8 +12,8 @@ import scala.util.Using
 /** The supported image-conditioning settings around a standard Diffusers SD1 ControlNet U-Net config. */
 final case class ControlNetConfig(unet: UNetConfig,conditioningChannels: Int,
     conditioningEmbeddingChannels: Vector[Int],channelOrder: String,globalPoolConditions: Boolean):
-  require(unet.inChannels==4 && unet.outChannels==4 && unet.additionInputWidth.isEmpty,
-    "native ControlNet currently requires an SD1 four-channel U-Net")
+  require(unet.inChannels==4 && unet.outChannels==4,
+    "native ControlNet requires a four-channel U-Net")
   require(conditioningChannels==3,"native ControlNet requires RGB control images")
   require(conditioningEmbeddingChannels.size==4 && conditioningEmbeddingChannels.forall(n=>n>=1 && n<=4096),
     "ControlNet conditioning embedding requires four bounded channel stages")
