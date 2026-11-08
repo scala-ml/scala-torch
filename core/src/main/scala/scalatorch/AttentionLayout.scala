@@ -1,7 +1,7 @@
 package scalatorch
 
 private[scalatorch] object AttentionLayout:
-  def validate(q: Shape,k: Shape,v: Shape,start: Int,maxScores: Long): (Shape,Long) =
+  def validate(q: Shape,k: Shape,v: Shape,start: Int,maxScores: Long,int32Scores: Boolean=true): (Shape,Long) =
     require(q.rank==4 && k.rank==4 && v.rank==4,"attention expects (batch,heads,tokens,width)")
     require(start>=0 && maxScores>=0,"invalid attention offset or workspace limit")
     require(q.dims(0)==k.dims(0) && k.dims(0)==v.dims(0),"attention batch mismatch")
@@ -12,7 +12,7 @@ private[scalatorch] object AttentionLayout:
     if q.numel==0 then return (output,0L)
     require(k.dims(2)>0,"nonempty queries require keys")
     val scores=Shape.from(Seq(q.dims(0),q.dims(1),q.dims(2),k.dims(2))).numel
-    require(scores<=maxScores && scores<=Int.MaxValue,"attention score workspace limit exceeded")
+    require(scores<=maxScores && (!int32Scores || scores<=Int.MaxValue),"attention score workspace limit exceeded")
     (output,scores)
 
 private[scalatorch] object RotaryCoefficients:

@@ -318,7 +318,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       maxScoreElements: Long=16777216L,maxWorkspaceBytes: Long=16777216L): CudaTensor =
     validate(query);validate(key);validate(value)
     require(maxWorkspaceBytes>=0,"negative attention workspace budget")
-    AttentionLayout.validate(query.shape,key.shape,value.shape,0,maxScoreElements)
+    AttentionLayout.validate(query.shape,key.shape,value.shape,0,maxScoreElements,!query.half)
     attentionFromStorage(query,key,value,0,key.shape.dims(2),key.shape.dims(2),maxScoreElements,
       causal=false,maxWorkspaceBytes=maxWorkspaceBytes)
 
@@ -327,7 +327,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       maxWorkspaceBytes: Long=Long.MaxValue): CudaTensor =
     val keyShape=Shape.from(key.shape.dims.updated(2,tokens))
     val valueShape=Shape.from(value.shape.dims.updated(2,tokens))
-    val (output,scores)=AttentionLayout.validate(query.shape,keyShape,valueShape,queryStart,maxScores)
+    val (output,scores)=AttentionLayout.validate(query.shape,keyShape,valueShape,queryStart,maxScores,!query.half)
     if output.numel==0 then return allocate(output,query.half)
     if query.half then return attentionHalf(query,key,value,output,causal,queryStart)
     if causal then require(scores*2<=Int.MaxValue,"attention Double workspace exceeds Int indexing")

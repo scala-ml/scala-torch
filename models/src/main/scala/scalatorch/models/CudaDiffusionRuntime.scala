@@ -193,7 +193,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     val batch=x.dims(0);val queries=x.dims(1);val keys=c.dims(1)
     AttentionLayout.validate(Shape.from(Seq(batch,model.heads.toLong,queries,inner/model.heads)),
       Shape.from(Seq(batch,model.heads.toLong,keys,inner/model.heads)),
-      Shape.from(Seq(batch,model.heads.toLong,keys,inner/model.heads)),0,model.maxScoreElements)
+      Shape.from(Seq(batch,model.heads.toLong,keys,inner/model.heads)),0,model.maxScoreElements,!input.half)
     if context.isEmpty && Pag.isCurrentLayerPerturbed then
       return scope { use =>
         val flat=use(session.reshape(input,Shape.from(Seq(batch*queries,queryWidth))))

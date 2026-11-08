@@ -12,8 +12,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
     vaeExecution: VaeExecution=VaeExecution.Cpu,unetExecution: UNetExecution=UNetExecution.Cpu,
     maxAttentionScoreElements: Long=16777216L,maxVaeAttentionScoreElements: Long= -1L,
     tinyPreviewEnvironment: Map[String,String]=sys.env) extends NativeWorkerBackend:
-  require(maxAttentionScoreElements>=0 && maxAttentionScoreElements<=Int.MaxValue,"invalid attention work limit")
-  private val vaeAttentionLimit=if maxVaeAttentionScoreElements<0 then maxAttentionScoreElements else maxVaeAttentionScoreElements
+  require(maxAttentionScoreElements>=0 && maxAttentionScoreElements<=(1L<<36),"invalid attention work limit")
+  private val vaeAttentionLimit=if maxVaeAttentionScoreElements<0 then math.min(maxAttentionScoreElements,Int.MaxValue.toLong) else maxVaeAttentionScoreElements
   require(vaeAttentionLimit<=Int.MaxValue,"invalid VAE attention work limit")
   import NativeJson.*
   private val root=modelRoot.toRealPath()
@@ -2491,11 +2491,13 @@ object NativeWorkerMain:
   private val DefaultMaxAttentionScoreElements=134217728L
   private[models] def attentionScoreLimit(configured: Option[String],cudaUnet: Boolean): Long =
     // CUDA attention slices its score scratch to a fixed byte budget; keep a high-resolution total-work cap.
-    val limit=configured.fold(if cudaUnet then Int.MaxValue.toLong else DefaultMaxAttentionScoreElements)(_.toLong)
-    require(limit>=0 && limit<=Int.MaxValue,"invalid attention work limit")
+    val cap=if cudaUnet then 1L<<36 else Int.MaxValue.toLong
+    val limit=configured.fold(if cudaUnet then cap else DefaultMaxAttentionScoreElements)(_.toLong)
+    require(limit>=0 && limit<=cap,"invalid attention work limit")
     limit
   private[models] def vaeAttentionLimit(configured: Long,explicit: Boolean,cuda: Boolean): Long =
-    if cuda && !explicit then math.max(configured,268435456L) else configured
+    val c=math.min(configured,Int.MaxValue.toLong)
+    if cuda && !explicit then math.max(c,268435456L) else c
   private[worker] def schedulerFor(initial: Path,configured: Path,selected: Path): Path =
     val default=initial.resolve("scheduler/scheduler_config.json").toAbsolutePath.normalize()
     val automatic=configured.toString=="-" || configured.toAbsolutePath.normalize()==default

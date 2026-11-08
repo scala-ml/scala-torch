@@ -6,10 +6,10 @@ import java.util.concurrent.{CountDownLatch,LinkedBlockingQueue,TimeUnit}
 class NativeWorkerSuite extends munit.FunSuite:
   test("CUDA U-Net attention can use bounded CUDA scratch at higher image sizes") {
     assertEquals(NativeWorkerMain.attentionScoreLimit(None,cudaUnet=false),134217728L)
-    assertEquals(NativeWorkerMain.attentionScoreLimit(None,cudaUnet=true),Int.MaxValue.toLong)
+    assertEquals(NativeWorkerMain.attentionScoreLimit(None,cudaUnet=true),(1L<<36))
     assertEquals(NativeWorkerMain.attentionScoreLimit(Some("2097152000"),cudaUnet=true),2097152000L)
     assertEquals(NativeWorkerMain.attentionScoreLimit(Some("2097152000"),cudaUnet=false),2097152000L)
-    intercept[IllegalArgumentException](NativeWorkerMain.attentionScoreLimit(Some("2147483648"),cudaUnet=true))
+    intercept[IllegalArgumentException](NativeWorkerMain.attentionScoreLimit(Some("137438953472"),cudaUnet=true))
   }
   test("out of memory reports the failed request and leaves the worker responsive") {
     val lines=new LinkedBlockingQueue[String]()
