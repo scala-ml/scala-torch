@@ -2409,7 +2409,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
               case failure: VaeDecodeFailure =>
                 context.checkCancelled()
                 val artifact=NativeVaeRecovery.save(failure.decoderInput,recovery)
-                throw new NativeBackendError("vae_decode_failed",s"VAE decode failed; exact decoder input saved to $artifact",failure)
+                throw new NativeBackendError("vae_decode_failed",s"VAE decode failed (${Option(failure.getCause).getOrElse(failure).toString.take(300)}); exact decoder input saved to $artifact",failure)
             context.checkCancelled()
             val pastedImage=preparedInpaint.filter(_.pasteBox.nonEmpty).filter(_ => hiresFix.isEmpty)
               .map(_.pasteBack(DiffusionImageIO.toBufferedImage(image),context.cancelled))
