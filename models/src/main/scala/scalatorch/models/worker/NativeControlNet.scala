@@ -226,19 +226,7 @@ private[worker] object NativeControlNet:
           NativeControlNetImageOps.bicubic(small,source.getWidth,source.getHeight,cancelled)
       case "tile_colorfix" => NativeControlNetImageOps.gaussian(source,math.max(1,numeric("variation",8).toInt).toDouble,cancelled)
       case "blur_gaussian" => NativeControlNetImageOps.gaussian(source,numeric("sigma",9.0),cancelled)
-      case "depth" | "depth_marigold" =>
-        val blurred=NativeControlNetImageOps.gaussian(source,2.0,cancelled)
-        val w=source.getWidth;val h=source.getHeight
-        val out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB)
-        for y <- 0 until h do
-          if cancelled() then throw new java.util.concurrent.CancellationException("preprocess cancelled")
-          val vCue=(y.toDouble/math.max(1,h-1))*40.0
-          for x <- 0 until w do
-            val c=blurred.getRGB(x,y)
-            val lum=0.299*((c>>>16)&255)+0.587*((c>>>8)&255)+0.114*(c&255)
-            val d=math.max(0,math.min(255,math.round(lum*0.85+vCue).toInt))
-            out.setRGB(x,y,0xff000000.toInt|(d<<16)|(d<<8)|d)
-        out
+      case "depth" | "depth_marigold" => NativeDepthAnything.preprocess(source,cancelled)
       case "normal_marigold" | "normal_bae" =>
         val w=source.getWidth;val h=source.getHeight
         val out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB)
