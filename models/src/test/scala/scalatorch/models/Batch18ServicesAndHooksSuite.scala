@@ -153,17 +153,19 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
     val backend = makeBackend()
     val ctx = makeWorkContext()
 
-    // person_mask needs the YOLOv8 person-seg weights and remove_background (U2-Net) has no native implementation: both fail loudly
+    // person_mask needs the YOLOv8 person-seg weights and remove_background the U2-Net weights: without them both fail loudly (no fake fallback)
     val personWeights = scalatorch.models.worker.NativeAnnotatorFiles.candidates("adetailer/person_yolov8n-seg.safetensors").exists(Files.isRegularFile(_))
     def toolReq(toolName: String) = NativeRequest(s"tool-$toolName", "image_tool", Map(
       "tool" -> Str(toolName), "image_path" -> Str(srcFile.toString), "output_dir" -> Str(tmpDir.toString)), None)
-    val bgErr = intercept[Throwable](backend.execute(toolReq("remove_background"), ctx))
-    assert(bgErr.getMessage.contains("not implemented"), bgErr.toString)
+    val u2Weights = scala.util.Try(scalatorch.models.worker.NativeU2Net.locate()).isSuccess
+    if !u2Weights then
+      val bgErr = intercept[Throwable](backend.execute(toolReq("remove_background"), ctx))
+      assert(bgErr.getMessage.contains("weights not found"), bgErr.toString)
     if !personWeights then
       val pmErr = intercept[Throwable](backend.execute(toolReq("person_mask"), ctx))
       assert(pmErr.getMessage.contains("weights not found"), pmErr.toString)
 
-    for toolName <- Vector("aesthetic_score", "waifu2x") ++ (if sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") then Vector("depth_mask") else Vector.empty) ++ (if personWeights then Vector("person_mask") else Vector.empty) do
+    for toolName <- Vector("aesthetic_score", "waifu2x") ++ (if sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") then Vector("depth_mask") else Vector.empty) ++ (if personWeights then Vector("person_mask") else Vector.empty) ++ (if u2Weights then Vector("remove_background") else Vector.empty) do
       val extra = if toolName == "waifu2x" then Map("scale" -> Number(2.0)) else Map.empty[String, NativeJson]
       val r = backend.execute(
         NativeRequest(s"tool-$toolName", "image_tool", Map(

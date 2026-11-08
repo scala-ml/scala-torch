@@ -180,15 +180,8 @@ private[worker] object NativeBatch18Services:
 
       case "remove_background" =>
         val bg = optStr(p, "background", "transparent").toLowerCase(Locale.ROOT)
-        val det = Adetailer.detect(img, "u2net", 0.25)
         val w = img.getWidth; val h = img.getHeight
-        val alpha = new Array[Int](w * h)
-        if det.masks.nonEmpty then
-          for m <- det.masks do
-            var i = 0
-            while i < alpha.length do { if m(i) > alpha(i) then alpha(i) = m(i); i += 1 }
-        else
-          java.util.Arrays.fill(alpha, 255)
+        val alpha = NativeU2Net.alpha(img)
         val outImg =
           if bg.isEmpty || bg == "transparent" then
             val rgba = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB)

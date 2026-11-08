@@ -2,7 +2,7 @@ package scalatorch.models.worker
 
 import java.awt.image.BufferedImage
 import java.nio.file.{Files,Path}
-import scalatorch.models.{AnimeLineartUnet,ControlNetHed,LineartGenerator,MlsdLarge}
+import scalatorch.models.{AnimeLineartUnet,ControlNetHed,LineartGenerator,MlsdLarge,U2Net}
 
 /** Weight lookup shared by the annotators: SDFX_SCALATORCH_ANNOTATOR_DIR, then models/annotators in the working directory and
   * each of its parents. There is no fallback when the weights are missing. */
@@ -151,3 +151,46 @@ object NativeMlsd:
     val working=NativeAnnotatorFiles.resize(source,w,h,cancelled)
     val lines=render(segments(working,weights,thrV,thrD,cancelled).map(_._2),w,h)
     NativeAnnotatorFiles.resize(lines,source.getWidth,source.getHeight,cancelled)
+
+/** The `remove_background` image tool: U2-Net (full, rembg's `u2net` weights converted to `u2net/u2net.safetensors` by
+  * scripts/convert_u2net_onnx_to_safetensors.py) on the CPU. Documented rembg preprocessing: RGB, resize to 320x320, divide by the image
+  * maximum, ImageNet mean/std; the fused map d0 (sigmoid already applied) is min-max normalised to 0..1 and resized back to the source
+  * size to be the alpha matte. U2-Net code is Apache-2.0 (Qin et al. 2020); no upstream code is copied. */
+object NativeU2Net:
+  val FileName="u2net/u2net.safetensors"
+  val InputSize=320
+  private var cached: Option[(Path,U2Net)]=None
+  def locate(env: Map[String,String]=sys.env,cwd: Path=Path.of("").toAbsolutePath): Path=NativeAnnotatorFiles.locate(FileName,"U2-Net (u2net)",env,cwd)
+  private def model(file: Path): U2Net=synchronized {
+    cached match
+      case Some((p,m)) if p==file => m
+      case _ => val m=U2Net.load(file);cached=Some((file,m));m
+  }
+
+  /** Normalised 3x320x320 network input for `image`. */
+  def input(image: BufferedImage,cancelled: () => Boolean): Array[Float]=
+    val small=NativeControlNetImageOps.cvResize(image,InputSize,InputSize,"area",cancelled)
+    val chw=NativeAnnotatorFiles.rgbChw(small,1f,0f)
+    var mx=0f;var i=0
+    while i<chw.length do { if chw(i)>mx then mx=chw(i);i+=1 }
+    val inv=1f/math.max(mx,1e-6f);val n=InputSize*InputSize
+    val mean=Array(0.485f,0.456f,0.406f);val std=Array(0.229f,0.224f,0.225f)
+    i=0
+    while i<chw.length do { val c=i/n;chw(i)=(chw(i)*inv-mean(c))/std(c);i+=1 }
+    chw
+
+  /** d0 and the side maps (sigmoid) at 320x320. */
+  def maps(image: BufferedImage,weights: Path,cancelled: () => Boolean): Vector[Array[Float]]=
+    model(weights).infer(input(image,cancelled),InputSize,InputSize)
+
+  /** Min-max normalised d0 resized (bilinear) to `w` x `h`, 0..1. */
+  def matte(d0: Array[Float],w: Int,h: Int): Array[Float]=
+    var lo=Float.PositiveInfinity;var hi=Float.NegativeInfinity
+    for v <- d0 do { if v<lo then lo=v;if v>hi then hi=v }
+    val range=math.max(hi-lo,1e-12f)
+    U2Net.bilinear(d0.map(v=>(v-lo)/range),1,InputSize,InputSize,h,w).map(v=>math.max(0f,math.min(1f,v)))
+
+  /** Alpha matte (0..255, row-major) at the source size. */
+  def alpha(image: BufferedImage,cancelled: () => Boolean=()=>false,env: Map[String,String]=sys.env): Array[Int]=
+    val weights=locate(env)
+    matte(maps(image,weights,cancelled).head,image.getWidth,image.getHeight).map(v=>math.round(v*255f))
