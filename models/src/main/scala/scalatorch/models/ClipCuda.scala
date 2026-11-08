@@ -30,7 +30,7 @@ object ClipCuda:
         val weightBytes=Module.parameters(stack).map(_.data.shape.numel*4L).sum
         val budget=weightBytes+(embedded.shape.numel*4L*48)+(768L<<20)
         Some(CudaSession.withDevice(index,maxBytes=budget) { session =>
-          Using.resource(CudaDiffusionRuntime.upload(session,stack,includeAdapters=false)) { runtime =>
+          Using.resource(CudaDiffusionRuntime.upload(session,stack,includeAdapters=false,half=CudaDiffusionRuntime.fp16Default)) { runtime =>
             runtime.clipStates(stack,session.upload(embedded),selectedDepth,model.maxScoreElements)
           }
         })

@@ -82,7 +82,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),loaded) }
     loaded
   private lazy val halfKernels=Seq("h_f32_to_f16","h_f16_to_f32","h_fill","h_add","h_add5","h_scale","h_silu","h_geglu","h_transpose5",
-      "h_concat","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_im2col","h_softmax").map { name =>
+      "h_concat","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_im2col","h_softmax","h_gelu_erf","h_quick_gelu","h_softmax_causal").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),halfModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -329,7 +329,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val valueShape=Shape.from(value.shape.dims.updated(2,tokens))
     val (output,scores)=AttentionLayout.validate(query.shape,keyShape,valueShape,queryStart,maxScores)
     if output.numel==0 then return allocate(output,query.half)
-    if query.half then return attentionHalf(query,key,value,output,causal)
+    if query.half then return attentionHalf(query,key,value,output,causal,queryStart)
     if causal then require(scores*2<=Int.MaxValue,"attention Double workspace exceeds Int indexing")
     val q=query.shape.dims;val k=keyShape.dims;val v=valueShape.dims
     val rows=output.numel/v(3)
@@ -644,8 +644,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     }
 
   /** Non-causal attention over [batch, heads, tokens, width] Float16 tensors via cuBLAS and a block softmax. */
-  private def attentionHalf(query: CudaTensor,key: CudaTensor,value: CudaTensor,output: Shape,causal: Boolean): CudaTensor =
-    require(!causal,"Float16 attention is non-causal only")
+  private def attentionHalf(query: CudaTensor,key: CudaTensor,value: CudaTensor,output: Shape,causal: Boolean,queryStart: Int): CudaTensor =
     require(cublas.isDefined,"Float16 attention requires cuBLAS")
     require(key.half && value.half,"Float16 attention needs Float16 key and value")
     val q=query.shape.dims;val k=key.shape.dims;val v=value.shape.dims
@@ -670,9 +669,15 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
           if profileEnabled then
             driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
             record("half_attention_scores",started)
-          launch(n.toLong*qt,halfKernels("h_softmax"),256,256,"h_softmax") { arena =>
-            Seq(arena.allocateFrom(JAVA_LONG,scratch.address),arena.allocateFrom(JAVA_INT,(n.toLong*qt).toInt),arena.allocateFrom(JAVA_INT,kt))
-          }
+          if causal then
+            launch(n.toLong*qt,halfKernels("h_softmax_causal"),256,256,"h_softmax_causal") { arena =>
+              Seq(arena.allocateFrom(JAVA_LONG,scratch.address),arena.allocateFrom(JAVA_INT,(n.toLong*qt).toInt),
+                arena.allocateFrom(JAVA_INT,kt),arena.allocateFrom(JAVA_INT,qt),arena.allocateFrom(JAVA_INT,queryStart))
+            }
+          else
+            launch(n.toLong*qt,halfKernels("h_softmax"),256,256,"h_softmax") { arena =>
+              Seq(arena.allocateFrom(JAVA_LONG,scratch.address),arena.allocateFrom(JAVA_INT,(n.toLong*qt).toInt),arena.allocateFrom(JAVA_INT,kt))
+            }
           val started2=if profileEnabled then System.nanoTime() else 0L
           cublas.get.gemmHalfStridedBatched(0,0,dv,qt,kt,1f,va,dv,kt.toLong*dv,scratch.address,kt,qt.toLong*kt,ra,dv,qt.toLong*dv,n)
           if profileEnabled then
@@ -1102,6 +1107,10 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   private def unary(value: CudaTensor,kernel: String): CudaTensor =
     validate(value)
     require(value.shape.numel<=Int.MaxValue,"elementwise kernel exceeds Int indexing")
+    if value.half then return hexecute(value.shape,value.shape.numel,"h_"+kernel) { (arena,result) =>
+      Seq(arena.allocateFrom(JAVA_LONG,value.address),arena.allocateFrom(JAVA_LONG,result.address),
+        arena.allocateFrom(JAVA_INT,value.shape.numel.toInt))
+    }
     execute(value.shape,value.shape.numel,kernels(kernel)) { (arena,result) =>
       Seq(arena.allocateFrom(JAVA_LONG,value.address),arena.allocateFrom(JAVA_LONG,result.address),
         arena.allocateFrom(JAVA_INT,value.shape.numel.toInt))

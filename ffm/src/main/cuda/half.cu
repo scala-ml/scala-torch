@@ -168,4 +168,30 @@ __global__ void h_softmax(__half* x, unsigned rows, unsigned width) {
   for (unsigned i = threadIdx.x; i < width; i += blockDim.x) st(base, i, __expf(ld(base, i) - m) * inv);
 }
 
+__global__ void h_gelu_erf(const __half* a, __half* out, unsigned n) {
+  GRID_INDEX(i, n) { float x = ld(a, i); st(out, i, 0.5f * x * (1.f + erff(x * 0.70710678118654752f))); }
+}
+
+__global__ void h_quick_gelu(const __half* a, __half* out, unsigned n) {
+  GRID_INDEX(i, n) { float x = ld(a, i); st(out, i, x / (1.f + __expf(-1.702f * x))); }
+}
+
+// Causal softmax over [rows, width]: row r attends to keys j <= (r % queries) + queryStart; the rest become 0.
+__global__ void h_softmax_causal(__half* x, unsigned rows, unsigned width, unsigned queries, unsigned queryStart) {
+  __shared__ float shared[32];
+  unsigned row = blockIdx.x;
+  if (row >= rows) return;
+  __half* base = x + (unsigned long long)row * width;
+  unsigned limit = min(width, (row % queries) + queryStart + 1);
+  float m = -3.402823466e+38f;
+  for (unsigned i = threadIdx.x; i < limit; i += blockDim.x) m = fmaxf(m, ld(base, i));
+  m = block_max(m, shared);
+  float s = 0.f;
+  for (unsigned i = threadIdx.x; i < limit; i += blockDim.x) s += __expf(ld(base, i) - m);
+  s = block_sum(s, shared);
+  float inv = 1.f / s;
+  for (unsigned i = threadIdx.x; i < width; i += blockDim.x)
+    st(base, i, i < limit ? __expf(ld(base, i) - m) * inv : 0.f);
+}
+
 }

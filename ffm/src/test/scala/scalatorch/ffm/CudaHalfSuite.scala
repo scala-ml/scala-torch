@@ -76,3 +76,13 @@ class CudaHalfSuite extends FunSuite:
     compare(Seq(tensor(x,2,8,12,12),tensor(data(8*4*3*3,25,0.2),8,4,3,3)),1e-2)((s,v) =>
       s.conv2dFast(v(0),v(1),Conv2dConfig(padding=(1,1),groups=2)))
   }
+
+  test("GELU, QuickGELU and causal attention") {
+    gpu()
+    compare(Seq(tensor(data(5*33,26,2.0),5,33)),3e-3)((s,v) => s.geluErf(v(0)))
+    compare(Seq(tensor(data(5*33,27,2.0),5,33)),3e-3)((s,v) => s.quickGelu(v(0)))
+    val (b,h,t,d)=(2,3,23,16)
+    compare(Seq(tensor(data(b*h*t*d,28),b.toLong,h.toLong,t.toLong,d.toLong),
+        tensor(data(b*h*t*d,29),b.toLong,h.toLong,t.toLong,d.toLong),tensor(data(b*h*t*d,30),b.toLong,h.toLong,t.toLong,d.toLong)),1e-2)(
+      (s,v) => s.causalAttention(v(0),v(1),v(2)))
+  }

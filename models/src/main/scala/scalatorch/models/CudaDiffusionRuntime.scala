@@ -605,7 +605,15 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       hidden
     }
 
+  /** Float32 in and out; Float16 inside when this runtime was uploaded with half=true. */
   def encode(input: CudaTensor,model: VaeEncoder): CudaTensor =
+    if !half then encodeCore(input,model)
+    else scope { use =>
+      val out=use(encodeCore(if input.half then input else use(session.castToHalf(input)),model))
+      use(session.castToFloat(out))
+    }
+
+  private def encodeCore(input: CudaTensor,model: VaeEncoder): CudaTensor =
     check()
     model.preflight(session.shape(input))
     scope { use =>
@@ -632,7 +640,15 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       hidden
     }
 
+  /** Float32 in and out; Float16 inside when this runtime was uploaded with half=true. */
   def decode(input: CudaTensor,model: VaeDecoder): CudaTensor =
+    if !half then decodeCore(input,model)
+    else scope { use =>
+      val out=use(decodeCore(if input.half then input else use(session.castToHalf(input)),model))
+      use(session.castToFloat(out))
+    }
+
+  private def decodeCore(input: CudaTensor,model: VaeDecoder): CudaTensor =
     check()
     model.preflight(session.shape(input))
     scope { use =>
@@ -701,8 +717,12 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
 
   /** Runs the whole stack; consumes `embedded`. selected is the state after `selectedDepth` layers. */
   def clipStates(model: ClipStack,embedded: CudaTensor,selectedDepth: Int,maxScoreElements: Long): ClipCuda.States =
-    var hidden=embedded
-    var selected: Option[Tensor[Float]]=if selectedDepth==0 then Some(embedded.toCpu) else None
+    var hidden=if half && !embedded.half then
+      val converted=session.castToHalf(embedded)
+      embedded.close()
+      converted
+    else embedded
+    var selected: Option[Tensor[Float]]=if selectedDepth==0 then Some(hidden.toCpu) else None
     try
       model.layers.zipWithIndex.foreach { (layer,index) =>
         val next=clipLayer(hidden,layer,maxScoreElements)
