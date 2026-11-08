@@ -14,9 +14,10 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
     Seq(
       Path.of(".superpowers/models/tiny-sd-pipe"),
       Path.of("../.superpowers/models/tiny-sd-pipe")
-    ).find(p => Files.isDirectory(p.resolve("text_encoder"))).getOrElse(
-      sys.error("missing tiny-sd-pipe fixture")
-    ).toRealPath()
+    ).find(p => Files.isDirectory(p.resolve("text_encoder"))).getOrElse {
+      assume(false,"tiny-sd-pipe fixture not present (.superpowers/models/tiny-sd-pipe)")
+      Path.of(".")
+    }.toRealPath()
 
   private def makeBackend(): NativeDiffusionBackend =
     val root = tinyModelRoot

@@ -28,8 +28,10 @@ class ClipCudaSuite extends FunSuite:
       ClipCuda.enable(0)
       assert(ClipCuda.run(m,Tensor.fromFloats(Array.fill(1*4*64)(0.1f),Shape.from(Seq(1L,4L,64L))),1).isDefined,"CUDA CLIP path did not run")
       val cuda=try Autograd.noGrad(m.encode(tokens,skipLastLayers=1)) finally ClipCuda.disable()
+      // Float16 is the CUDA default, so the CPU reference only matches to half precision.
+      val tolerance=if CudaDiffusionRuntime.fp16Default then 1e-2 else 2e-4
       def close(a: Tensor[Float],b: Tensor[Float]) =
-        a.toFloatArray.zip(b.toFloatArray).foreach { (x,y) => assert(math.abs(x-y)<=2e-4*(1+math.abs(y)),s"$x vs $y") }
+        a.toFloatArray.zip(b.toFloatArray).foreach { (x,y) => assert(math.abs(x-y)<=tolerance*(1+math.abs(y)),s"$x vs $y") }
       close(cuda.hidden.data,cpu.hidden.data);close(cuda.finalHidden.data,cpu.finalHidden.data)
       close(cuda.pooled.data,cpu.pooled.data)
     }

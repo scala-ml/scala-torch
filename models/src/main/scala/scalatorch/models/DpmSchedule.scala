@@ -39,26 +39,9 @@ object DpmSchedule:
   def beta(noise: DiffusionNoiseSchedule,steps: Int,alpha: Double=0.6,beta: Double=0.6): DpmSchedule =
     require(steps>0 && steps<=10000,"invalid DPM inference step count")
     require(alpha.isFinite && alpha>0 && beta.isFinite && beta>0,"Beta schedule alpha and beta must be finite and positive")
-    val training=noise.floatTrainingSigmas
-    val logs=training.map(s => math.log(s.toDouble).toFloat)
-    val sigmaMin=training.head.toDouble
-    val sigmaMax=training.last.toDouble
-    val levels=Vector.tabulate(steps) { i =>
-      val q=if steps==1 then 1.0 else 1.0-i.toDouble/(steps-1)
-      sigmaMin+noise.betaPpf(q,alpha,beta)*(sigmaMax-sigmaMin)
-    }
-    val times=levels.map { sigma =>
-      if logs.size==1 then 0f
-      else
-        val target=math.log(math.max(sigma,1e-10))
-        var lo=0;var hi=logs.size-1
-        while hi-lo>1 do
-          val mid=(lo+hi)/2
-          if logs(mid).toDouble<=target then lo=mid else hi=mid
-        val weight=math.max(0.0,math.min(1.0,(target-logs(lo))/(logs(hi)-logs(lo))))
-        (lo+weight).toInt.toFloat
-    }
-    DpmSchedule(times,levels.map(_.toFloat.toDouble) :+ 0.0)
+    // A1111/NUI Beta: Beta(alpha,beta) quantiles of the timestep index, repeated steps removed (same as Euler).
+    val e=noise.betaEuler(steps,alpha,beta)
+    DpmSchedule(e.timesteps.map(t=>math.rint(t.toDouble).toFloat),e.sigmas)
 
   /** Diffusers converts exponential model timesteps to int64 by truncation. */
   def exponential(noise: DiffusionNoiseSchedule,steps: Int): DpmSchedule =
