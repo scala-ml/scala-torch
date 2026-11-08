@@ -24,6 +24,9 @@ object AnnotatorOps:
         case PyTorchTensorArchive.TensorValue(t) =>
           require(t.shape.map(_.toInt)==dims.toVector,s"$label weight shape mismatch: $name, expected ${dims.mkString("x")}, got ${t.shape.mkString("x")}")
           name->t.values
+        case PyTorchTensorArchive.IntegerTensorValue(t) if name.endsWith(".num_batches_tracked") => // BatchNorm bookkeeping, unused at inference
+          require(t.shape.isEmpty,s"$label weight shape mismatch: $name")
+          name->Array.empty[Float]
         case _ => throw IllegalArgumentException(s"$label weight is not a tensor: $name")
     }
 

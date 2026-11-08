@@ -255,21 +255,9 @@ private[worker] object NativeControlNet:
       case "lineart" => NativeLineart.preprocess(source,resolution,cancelled)
       case "lineart_anime" => NativeLineartAnime.preprocess(source,cancelled)
       case "mlsd" =>
-        val w=source.getWidth;val h=source.getHeight
-        val out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB)
-        def lumAt(x: Int,y: Int): Double =
-          val cx=math.max(0,math.min(w-1,x));val cy=math.max(0,math.min(h-1,y))
-          val c=source.getRGB(cx,cy)
-          0.299*((c>>>16)&255)+0.587*((c>>>8)&255)+0.114*(c&255)
-        for y <- 0 until h do
-          if cancelled() then throw new java.util.concurrent.CancellationException("preprocess cancelled")
-          for x <- 0 until w do
-            val gx=lumAt(x+1,y)-lumAt(x-1,y)
-            val gy=lumAt(x,y+1)-lumAt(x,y-1)
-            val mag=math.min(255,math.round(math.hypot(gx,gy)*1.5).toInt)
-            val v=if mag<32 then 0 else mag
-            out.setRGB(x,y,0xff000000.toInt|(v<<16)|(v<<8)|v)
-        out
+        val thrV=args.get("thr_v") match { case Some(Number(v)) if v>=0 => v.toFloat; case None => 0.1f; case _ => throw IllegalArgumentException("ControlNet mlsd thr_v must be a non-negative number") }
+        val thrD=args.get("thr_d") match { case Some(Number(v)) if v>=0 => v.toFloat; case None => 0.1f; case _ => throw IllegalArgumentException("ControlNet mlsd thr_d must be a non-negative number") }
+        NativeMlsd.preprocess(source,resolution,thrV,thrD,cancelled)
       case "openpose" => NativeOpenPose.preprocess(source,resolution,cancelled)
       case other => throw new NativeBackendError("unsupported",s"preprocessor '$other' is not available")
 

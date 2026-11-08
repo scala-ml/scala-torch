@@ -2,7 +2,7 @@ package scalatorch.models.worker
 
 import java.awt.image.BufferedImage
 import java.nio.file.{Files,Path}
-import scalatorch.models.{AnimeLineartUnet,ControlNetHed,LineartGenerator}
+import scalatorch.models.{AnimeLineartUnet,ControlNetHed,LineartGenerator,MlsdLarge}
 
 /** Weight lookup shared by the annotators: SDFX_SCALATORCH_ANNOTATOR_DIR, then models/annotators in the working directory and
   * each of its parents. There is no fallback when the weights are missing. */
@@ -115,3 +115,39 @@ object NativeLineartAnime:
     val working=NativeAnnotatorFiles.resize(source,w,h,cancelled)
     val out=raw(working,weights,cancelled)
     NativeAnnotatorFiles.resize(NativeAnnotatorFiles.grey(out.map(_*127.5f+127.5f),w,h,invert=true),source.getWidth,source.getHeight,cancelled)
+
+/** The `mlsd` ControlNet preprocessor: the M-LSD large line-segment detector (`mlsd_large_512_fp32.pth`) on the CPU. */
+object NativeMlsd:
+  val FileName="mlsd_large_512_fp32.pth"
+  val InputSize=512
+  private var cached: Option[(Path,MlsdLarge)]=None
+  def locate(env: Map[String,String]=sys.env,cwd: Path=Path.of("").toAbsolutePath): Path=NativeAnnotatorFiles.locate(FileName,"M-LSD",env,cwd)
+  private def model(file: Path,cancelled: () => Boolean): MlsdLarge=synchronized {
+    cached match
+      case Some((p,m)) if p==file => m
+      case _ => val m=MlsdLarge.load(file,cancelled);cached=Some((file,m));m
+  }
+
+  /** Segments (best first) in the coordinates of `image`: the image is area-resized to 512x512, the network runs on it and the
+    * decoded 512-space segments are scaled back. */
+  def segments(image: BufferedImage,weights: Path,thrV: Float,thrD: Float,cancelled: () => Boolean): Vector[(Float,MlsdLarge.Segment)]=
+    val net=NativeControlNetImageOps.cvResize(image,InputSize,InputSize,"area",cancelled)
+    val (tp,h,w)=model(weights,cancelled).tpMap(NativeAnnotatorFiles.rgbChw(net,1f,0f),InputSize,InputSize,cancelled)
+    val sx=image.getWidth.toFloat/InputSize;val sy=image.getHeight.toFloat/InputSize
+    MlsdLarge.decode(tp,h,w,thrV,thrD).map { (s,l) => (s,(l._1*sx,l._2*sy,l._3*sx,l._4*sy)) }
+
+  /** White 1-pixel lines on black (integer endpoints, truncated like `int()`), at the working size. */
+  def render(segs: Seq[MlsdLarge.Segment],w: Int,h: Int): BufferedImage=
+    val pix=new Array[Boolean](w*h)
+    for (x0,y0,x1,y1) <- segs do MlsdLarge.drawLine(pix,w,h,x0.toInt,y0.toInt,x1.toInt,y1.toInt)
+    val image=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB)
+    image.setRGB(0,0,w,h,Array.tabulate(w*h)(i=>if pix(i) then 0xffffffff else 0xff000000.toInt),0,w);image
+
+  /** ControlNet defaults: `thr_v` 0.1, `thr_d` 0.1; the source is resized to `resolution` (multiples of 64) first and the
+    * line map is resized back to the source size. */
+  def preprocess(source: BufferedImage,resolution: Int,thrV: Float,thrD: Float,cancelled: () => Boolean,env: Map[String,String]=sys.env): BufferedImage=
+    val weights=locate(env)
+    val (w,h)=NativeAnnotatorFiles.workingSize(source.getWidth,source.getHeight,resolution,64,roundUp=false)
+    val working=NativeAnnotatorFiles.resize(source,w,h,cancelled)
+    val lines=render(segments(working,weights,thrV,thrD,cancelled).map(_._2),w,h)
+    NativeAnnotatorFiles.resize(lines,source.getWidth,source.getHeight,cancelled)
