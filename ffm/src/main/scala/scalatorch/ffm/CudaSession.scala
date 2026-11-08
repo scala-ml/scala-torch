@@ -54,7 +54,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.loadModule(opsPtx)
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("geglu","geglu_fast","softmax_par","gelu_erf","quick_gelu","broadcast_add","concat_copy","resize_nearest","groupnorm","groupnorm_stats","groupnorm_stats_par","groupnorm_apply","conv2d","conv2d_fast","im2col","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","leaky_relu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_scores","attention_prepare","attention_output","attention_fused_fp32","attention_fused_multiquery_fp32","attention_scores_fp32","attention_prepare_fp32","attention_output_fp32","attention_backward","attention_gradient_cast","cache_append").map { name =>
+  private val kernels=Seq("geglu","geglu_fast","broadcast_add5","transpose5","softmax_par","gelu_erf","quick_gelu","broadcast_add","concat_copy","resize_nearest","groupnorm","groupnorm_stats","groupnorm_stats_par","groupnorm_apply","conv2d","conv2d_fast","im2col","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","leaky_relu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_scores","attention_prepare","attention_output","attention_fused_fp32","attention_fused_multiquery_fp32","attention_scores_fp32","attention_prepare_fp32","attention_output_fp32","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -511,14 +511,14 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     def swap[A](v: Vector[A]) = v.updated(dim0,v(dim1)).updated(dim1,v(dim0))
     val output=Shape.from(swap(dims))
     if output.numel==0 then return allocate(output)
-    // Nonempty allocated tensors have Int-bounded dimensions and contiguous strides.
-    val strides=dims.scanRight(1L)(_ * _).tail
-    val metadata=(output.dims ++ swap(strides)).map(_.toInt).toArray
-    withInts(metadata) { address =>
-      execute(output,output.numel,kernels("transpose")) { (arena,result) =>
-        Seq(value.address,result.address,address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
-          Seq(output.numel.toInt,dims.size).map(v => arena.allocateFrom(JAVA_INT,v))
-      }
+    // Nonempty allocated tensors have Int-bounded dimensions and contiguous strides. Swapping axes lo<hi of
+    // [outer,X,mid,Y,inner] gives [outer,Y,mid,X,inner]; only the sizes are passed, so no device metadata is needed.
+    val lo=math.min(dim0,dim1);val hi=math.max(dim0,dim1)
+    val x=dims(lo);val y=dims(hi)
+    val mid=dims.slice(lo+1,hi).product;val inner=dims.drop(hi+1).product
+    execute(output,output.numel,kernels("transpose5"),threadsPerBlock=256) { (arena,result) =>
+      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+        Seq(output.numel,x,mid,y,inner).map(v => arena.allocateFrom(JAVA_INT,v.toInt))
     }
 
   def embedding(table: CudaTensor,indices: Tensor[Long]): CudaTensor =
@@ -653,6 +653,13 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     require(output.numel<=Int.MaxValue,"broadcast output exceeds Int indexing")
     if output.numel==0 then return allocate(output)
     def strides(ds: Vector[Long])=ds.scanRight(1L)(_ * _).tail.zip(ds).map((s,d) => if d==1 then 0L else s)
+    if rank<=5 then
+      def lead(v: Vector[Long],fill: Long)=Vector.fill(5-rank)(fill)++v
+      val dimsP=lead(output.dims,1L);val aS=lead(strides(ad),0L);val bS=lead(strides(bd),0L)
+      return execute(output,output.numel,kernels("broadcast_add5"),threadsPerBlock=256) { (arena,result) =>
+        Seq(a.address,b.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+          (Vector(output.numel)++dimsP++aS++bS).map(v => arena.allocateFrom(JAVA_INT,v.toInt))
+      }
     withInts((output.dims++strides(ad)++strides(bd)).map(_.toInt).toArray) { metadata =>
       execute(output,output.numel,kernels("broadcast_add")) { (arena,result) =>
         Seq(a.address,b.address,result.address,metadata).map(v => arena.allocateFrom(JAVA_LONG,v)) ++

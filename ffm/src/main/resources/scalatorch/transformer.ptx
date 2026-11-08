@@ -2018,3 +2018,50 @@ SM_OUT:
  add.u32 i,i,256; bra SM_OUT;
 SM_DONE: ret;
 }
+
+.visible .entry transpose5(.param .u64 t_in,.param .u64 t_out,.param .u32 t_count,
+ .param .u32 t_x,.param .u32 t_mid,.param .u32 t_y,.param .u32 t_inner) {
+ .reg .pred p;
+ .reg .u32 count,x,mid,y,inner,i,e,t,xi,m,yi,o,idx;
+ .reg .u64 pin,pout,offset,addr;
+ .reg .b32 value;
+ ld.param.u64 pin,[t_in]; ld.param.u64 pout,[t_out]; ld.param.u32 count,[t_count];
+ ld.param.u32 x,[t_x]; ld.param.u32 mid,[t_mid]; ld.param.u32 y,[t_y]; ld.param.u32 inner,[t_inner];
+ mov.u32 i,%ctaid.x; mov.u32 t,%ntid.x; mov.u32 e,%tid.x; mad.lo.u32 i,i,t,e;
+ setp.ge.u32 p,i,count; @p bra T5_DONE;
+ rem.u32 e,i,inner; div.u32 t,i,inner;
+ rem.u32 xi,t,x; div.u32 t,t,x;
+ rem.u32 m,t,mid; div.u32 t,t,mid;
+ rem.u32 yi,t,y; div.u32 o,t,y;
+ mad.lo.u32 idx,o,x,xi; mad.lo.u32 idx,idx,mid,m; mad.lo.u32 idx,idx,y,yi; mad.lo.u32 idx,idx,inner,e;
+ mul.wide.u32 offset,idx,4; add.u64 addr,pin,offset; ld.global.b32 value,[addr];
+ mul.wide.u32 offset,i,4; add.u64 addr,pout,offset; st.global.b32 [addr],value;
+T5_DONE: ret;
+}
+
+.visible .entry broadcast_add5(.param .u64 b_pa,.param .u64 b_pb,.param .u64 b_po,.param .u32 b_count,
+ .param .u32 b_d0, .param .u32 b_d1, .param .u32 b_d2, .param .u32 b_d3, .param .u32 b_d4, .param .u32 b_a0, .param .u32 b_a1, .param .u32 b_a2, .param .u32 b_a3, .param .u32 b_a4, .param .u32 b_b0, .param .u32 b_b1, .param .u32 b_b2, .param .u32 b_b3, .param .u32 b_b4) {
+ .reg .pred p;
+ .reg .u32 count,i,t,c,ia,ib,tid,dim,sta,stb;
+ .reg .u64 pa,pb,po,offset,addr;
+ .reg .f32 x,y;
+ ld.param.u64 pa,[b_pa]; ld.param.u64 pb,[b_pb]; ld.param.u64 po,[b_po]; ld.param.u32 count,[b_count];
+ mov.u32 i,%ctaid.x; mov.u32 t,%ntid.x; mov.u32 tid,%tid.x; mad.lo.u32 i,i,t,tid;
+ setp.ge.u32 p,i,count; @p bra B5_DONE;
+ mov.u32 t,i; mov.u32 ia,0; mov.u32 ib,0;
+ ld.param.u32 dim,[b_d4]; ld.param.u32 sta,[b_a4]; ld.param.u32 stb,[b_b4];
+ rem.u32 c,t,dim; div.u32 t,t,dim; mad.lo.u32 ia,c,sta,ia; mad.lo.u32 ib,c,stb,ib;
+ ld.param.u32 dim,[b_d3]; ld.param.u32 sta,[b_a3]; ld.param.u32 stb,[b_b3];
+ rem.u32 c,t,dim; div.u32 t,t,dim; mad.lo.u32 ia,c,sta,ia; mad.lo.u32 ib,c,stb,ib;
+ ld.param.u32 dim,[b_d2]; ld.param.u32 sta,[b_a2]; ld.param.u32 stb,[b_b2];
+ rem.u32 c,t,dim; div.u32 t,t,dim; mad.lo.u32 ia,c,sta,ia; mad.lo.u32 ib,c,stb,ib;
+ ld.param.u32 dim,[b_d1]; ld.param.u32 sta,[b_a1]; ld.param.u32 stb,[b_b1];
+ rem.u32 c,t,dim; div.u32 t,t,dim; mad.lo.u32 ia,c,sta,ia; mad.lo.u32 ib,c,stb,ib;
+ ld.param.u32 dim,[b_d0]; ld.param.u32 sta,[b_a0]; ld.param.u32 stb,[b_b0];
+ rem.u32 c,t,dim; div.u32 t,t,dim; mad.lo.u32 ia,c,sta,ia; mad.lo.u32 ib,c,stb,ib;
+ mul.wide.u32 offset,ia,4; add.u64 addr,pa,offset; ld.global.f32 x,[addr];
+ mul.wide.u32 offset,ib,4; add.u64 addr,pb,offset; ld.global.f32 y,[addr];
+ add.rn.f32 x,x,y;
+ mul.wide.u32 offset,i,4; add.u64 addr,po,offset; st.global.f32 [addr],x;
+B5_DONE: ret;
+}
