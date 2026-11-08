@@ -821,70 +821,12 @@ object AestheticScore:
   final case class NumericScore(value: Double) extends ScoreValue
   final case class DistributionScore(probs: Vector[(String, Double)]) extends ScoreValue
 
+  /** The previous implementation derived "scores" from contrast / saturation / edge statistics, which is not any of
+    * the real scorers (improved aesthetic predictor on CLIP ViT-L/14, simulacra aesthetic models, cafe ViT classifiers).
+    * Until those networks are implemented the scorers fail loudly instead of returning invented numbers. */
   def scoreImage(image: BufferedImage, cfg: AestheticScoreConfig): Vector[(String, ScoreValue)] =
-    val w = image.getWidth
-    val h = image.getHeight
-    val n = math.max(1, w * h)
-    var sumR = 0.0; var sumG = 0.0; var sumB = 0.0
-    var sumL = 0.0; var sumLSq = 0.0; var sumSat = 0.0; var edgeEnergy = 0.0
-    var y = 0
-    while y < h do
-      var x = 0
-      while x < w do
-        val rgb = image.getRGB(x, y)
-        val r = ((rgb >> 16) & 0xff) / 255.0
-        val g = ((rgb >> 8) & 0xff) / 255.0
-        val b = (rgb & 0xff) / 255.0
-        sumR += r; sumG += g; sumB += b
-        val lum = 0.299 * r + 0.587 * g + 0.114 * b
-        sumL += lum
-        sumLSq += lum * lum
-        val maxC = math.max(r, math.max(g, b))
-        val minC = math.min(r, math.min(g, b))
-        sumSat += (if maxC > 1e-6 then (maxC - minC) / maxC else 0.0)
-        if x + 1 < w then
-          val rgbR = image.getRGB(x + 1, y)
-          val lumR = (0.299 * ((rgbR >> 16) & 0xff) + 0.587 * ((rgbR >> 8) & 0xff) + 0.114 * (rgbR & 0xff)) / 255.0
-          edgeEnergy += math.abs(lum - lumR)
-        x += 1
-      y += 1
-    val meanL = sumL / n
-    val stdL = math.sqrt(math.max(0.0, sumLSq / n - meanL * meanL))
-    val meanSat = sumSat / n
-    val meanEdge = edgeEnergy / n
-    val rawQuality = math.max(1.0, math.min(9.5, 4.5 + stdL * 4.0 + meanSat * 1.8 + meanEdge * 3.0 - math.abs(meanL - 0.5) * 1.5))
-
-    cfg.scorers.map {
-      case "improved" =>
-        "improved" -> NumericScore(math.rint(rawQuality * 10.0) / 10.0)
-      case name if name.startsWith("simulacra_") =>
-        val offset = if name.endsWith("l14") then 0.15 else -0.10
-        val v = math.max(0.0, math.min(10.0, rawQuality + offset))
-        name -> NumericScore(math.rint(v * 100.0) / 100.0)
-      case "cafe_aesthetic" =>
-        val pAes = math.rint(math.max(0.01, math.min(0.99, rawQuality / 10.0)) * 10000.0) / 10000.0
-        val pNot = math.rint((1.0 - pAes) * 10000.0) / 10000.0
-        "cafe_aesthetic" -> DistributionScore(Vector("not_aesthetic" -> pNot, "aesthetic" -> pAes))
-      case "cafe_style" =>
-        val logits = Vector(
-          0.5 + meanSat * 1.5,
-          0.4 + stdL * 1.2,
-          0.2 + meanEdge * 0.8,
-          0.3 + (1.0 - meanSat) * 1.0,
-          0.1
-        )
-        val maxLog = logits.max
-        val exps = logits.map(l => math.exp(l - maxLog))
-        val sumExp = exps.sum
-        val probs = CafeLabels("cafe_style").zip(exps).map { case (lbl, e) =>
-          lbl -> (math.rint((e / sumExp) * 10000.0) / 10000.0)
-        }
-        "cafe_style" -> DistributionScore(probs)
-      case "cafe_waifu" =>
-        val pW = math.rint(math.max(0.01, math.min(0.99, 0.35 + meanSat * 0.45)) * 10000.0) / 10000.0
-        val pNot = math.rint((1.0 - pW) * 10000.0) / 10000.0
-        "cafe_waifu" -> DistributionScore(Vector("not_waifu" -> pNot, "waifu" -> pW))
-    }
+    throw new scalatorch.models.worker.NativeBackendError("unsupported",
+      s"aesthetic scorers ${cfg.scorers.mkString(", ")} are not implemented (the CLIP ViT-L/14 predictor and the cafe classifiers are missing in the native runtime)")
 
   def infotextFields(scores: Vector[(String, ScoreValue)]): Vector[(String, String)] =
     scores.map {

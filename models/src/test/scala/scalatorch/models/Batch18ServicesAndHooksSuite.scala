@@ -134,7 +134,13 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
       generationFields = true,
       hash = true
     )
-    val scores = AestheticScore.scoreImage(img, aCfg)
+    // The scorers are not implemented (no invented numbers): they must fail loudly; formatting is checked on literal scores.
+    assert(intercept[scalatorch.models.worker.NativeBackendError](AestheticScore.scoreImage(img, aCfg)).getMessage.contains("not implemented"))
+    val scores = Vector[(String, AestheticScore.ScoreValue)](
+      "improved" -> AestheticScore.NumericScore(5.0), "simulacra_l14" -> AestheticScore.NumericScore(5.1),
+      "cafe_aesthetic" -> AestheticScore.DistributionScore(Vector("not_aesthetic" -> 0.4, "aesthetic" -> 0.6)),
+      "cafe_style" -> AestheticScore.DistributionScore(Vector("anime" -> 0.5, "real_life" -> 0.2, "3d" -> 0.1, "manga_like" -> 0.1, "other" -> 0.1)),
+      "cafe_waifu" -> AestheticScore.DistributionScore(Vector("not_waifu" -> 0.3, "waifu" -> 0.7)))
     assertEquals(scores.size, 5)
     val infoFields = AestheticScore.infotextFields(scores).toMap
     assert(infoFields.contains("aesthetic_score"))
@@ -165,7 +171,7 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
       val pmErr = intercept[Throwable](backend.execute(toolReq("person_mask"), ctx))
       assert(pmErr.getMessage.contains("weights not found"), pmErr.toString)
 
-    for toolName <- Vector("aesthetic_score", "waifu2x") ++ (if sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") then Vector("depth_mask") else Vector.empty) ++ (if personWeights then Vector("person_mask") else Vector.empty) ++ (if u2Weights then Vector("remove_background") else Vector.empty) do
+    for toolName <- Vector("waifu2x") ++ (if sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") then Vector("depth_mask") else Vector.empty) ++ (if personWeights then Vector("person_mask") else Vector.empty) ++ (if u2Weights then Vector("remove_background") else Vector.empty) do
       val extra = if toolName == "waifu2x" then Map("scale" -> Number(2.0)) else Map.empty[String, NativeJson]
       val r = backend.execute(
         NativeRequest(s"tool-$toolName", "image_tool", Map(
@@ -393,8 +399,8 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
           "sampler_name" -> Str("Euler"),
           "hooks" -> Obj(Map(
             // adetailer (needs the YOLOv8 face weights) and nsfw_checker (NudeNet, not implemented) fail loudly and are covered separately
-            "face_restore" -> Obj(Map("enabled" -> Bool(true), "visibility" -> Number(0.5))),
-            "aesthetic_score" -> Obj(Map("enabled" -> Bool(true), "improved" -> Bool(true), "generation_fields" -> Bool(true), "hash" -> Bool(true)))
+            // aesthetic_score is not implemented either (no invented numbers) and fails loudly
+            "face_restore" -> Obj(Map("enabled" -> Bool(true), "visibility" -> Number(0.5)))
           ))
         ))
       ), None),
@@ -402,9 +408,6 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
     )
     val firstImgObj = genRes("images").asInstanceOf[Arr].values.head.asInstanceOf[Obj].fields
     assert(Files.isRegularFile(Path.of(firstImgObj("path").asInstanceOf[Str].value)))
-    assert(firstImgObj.contains("aesthetic_scores"))
-    assert(firstImgObj.contains("aesthetic_score"))
-    assert(firstImgObj.contains("png_chunks"))
 
     // 8. batch_interrogate_prepare & batch_interrogate_execute + extra preprocessors & upscalers
     assert(backend.features.contains("batch_interrogate_wd_v3_partial"))
