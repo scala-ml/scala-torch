@@ -265,20 +265,7 @@ private[worker] object NativeControlNet:
             val v=if name=="mlsd" && mag<32 then 0 else mag
             out.setRGB(x,y,0xff000000.toInt|(v<<16)|(v<<8)|v)
         out
-      case "openpose" =>
-        val w=source.getWidth;val h=source.getHeight
-        val out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB)
-        val g=out.createGraphics()
-        try
-          g.setColor(java.awt.Color.BLACK)
-          g.fillRect(0,0,w,h)
-          val cx=w/2;val headY=h/4;val neckY=h*3/8;val hipY=h*5/8
-          g.setStroke(new java.awt.BasicStroke(math.max(1f,math.min(w,h)/32f)))
-          g.setColor(new java.awt.Color(255,0,0));g.drawLine(cx,headY,cx,neckY)
-          g.setColor(new java.awt.Color(0,255,0));g.drawLine(cx,neckY,cx,hipY)
-          g.setColor(new java.awt.Color(0,0,255));g.drawLine(cx-w/6,neckY,cx+w/6,neckY)
-        finally g.dispose()
-        out
+      case "openpose" => NativeOpenPose.preprocess(source,resolution,cancelled)
       case other => throw new NativeBackendError("unsupported",s"preprocessor '$other' is not available")
 
   def prepare(value: Option[NativeJson],modelPaths: Map[String,String],fallbackImage: Option[String],
