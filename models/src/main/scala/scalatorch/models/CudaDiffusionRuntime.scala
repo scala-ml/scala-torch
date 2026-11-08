@@ -801,6 +801,7 @@ private[models] object CudaDiffusionRuntime:
   def upload[A: Module](session: CudaSession,model: A,cancelled: () => Boolean=() => false,offloadWeights: Boolean=false,
       includeAdapters: Boolean=true,half: Boolean=false): CudaDiffusionRuntime =
     session.allocatedBytes
+    val uploadStart=System.nanoTime()
     val host=scala.collection.mutable.LinkedHashMap.empty[Parameter,Tensor[Float]]
     val uploaded=scala.collection.mutable.LinkedHashMap.empty[Parameter,CudaTensor]
     try
@@ -809,6 +810,8 @@ private[models] object CudaDiffusionRuntime:
         if offloadWeights then host(p)=p.data else uploaded(p)=(if half then session.uploadHalf(p.data) else session.upload(p.data))
       }
       VaeExecution.checkCancelled(cancelled)
+      if sys.env.get("SCALATORCH_LOAD_PROFILE").contains("1") then
+        System.err.println(f"[scala-torch load] CUDA weight upload (${model.getClass.getSimpleName}, half=$half): ${(System.nanoTime()-uploadStart)/1e9}%.2f s, ${uploaded.size} tensors")
       new CudaDiffusionRuntime(session,uploaded.toMap,host.toMap,cancelled,half)
     catch case error: Throwable =>
       uploaded.values.toVector.reverse.foreach { t =>

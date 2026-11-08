@@ -106,18 +106,20 @@ private[models] object SingleFileSd1Model:
     val model=if isPyTorch(real) then loadPyTorch(real,maxScoreElements,cancelled,maxVaeScoreElements) else
       Using.resource(SafeTensorSet.openFile(real)) { archive =>
         if SingleFileSdxlConfig.isSdxl(archive.tensors) then
-          SingleFileSdxlConfig.inspect(archive)
-          cancelled()
+          val prof=sys.env.get("SCALATORCH_LOAD_PROFILE").contains("1");var mark=System.nanoTime()
+          def lap(label: String): Unit = if prof then { val n=System.nanoTime();System.err.println(f"[scala-torch load]   $label: ${(n-mark)/1e9}%.2f s");mark=n }
+          SingleFileSdxlConfig.inspect(archive);lap("inspect")
+          lap("pre");cancelled()
           val clip=PretrainedClip.loadSdxlView(SingleFileTensorView.sdxlClip(archive),maxScoreElements)
-          cancelled()
+          lap("clip");cancelled()
           val clip2=PretrainedClip.loadSdxlClip2View(SingleFileTensorView.sdxlClip2(archive),maxScoreElements)
-          cancelled()
+          lap("clip2");cancelled()
           val unet=PretrainedUNet.loadSd1View(SingleFileTensorView.unet(archive),
             SingleFileSdxlConfig.unetConfigFor(archive),maxScoreElements,maxParameters=3000000000L)
-          cancelled()
+          lap("unet");cancelled()
           val vae=PretrainedVae.loadSdxlView(SingleFileTensorView.vae(archive),
             if maxVaeScoreElements<0 then maxScoreElements else maxVaeScoreElements)
-          cancelled()
+          lap("vae");cancelled()
           SingleFileSd1Model(clip.model,unet.model,vae,clip.linearTargets++clip2.linearTargets++unet.linearTargets,"sdxl",Some(clip2.model))
         else if SingleFileSd2Config.isSd2(archive.tensors) then
           SingleFileSd2Config.inspect(archive)

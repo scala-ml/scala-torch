@@ -854,7 +854,23 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val tokenizer=ClipFastTokenizer.load(tokenizerDir.resolve("vocab.json"),tokenizerDir.resolve("merges.txt")).withNuiFallbackNormalization
         val tiling=bool(p,"vae_tiling",false)
         val before=Files.readAttributes(root,classOf[java.nio.file.attribute.BasicFileAttributes])
-        val components=SingleFileSd1Model.load(root,maxAttentionScoreElements,() => context.checkCancelled(),vaeAttentionLimit)
+        // The checkpoint hash is independent of tensor loading: compute it on another thread while the tensors load.
+        val hashStart=System.nanoTime()
+        val hashFuture=java.util.concurrent.CompletableFuture.supplyAsync(() =>
+          val digest=java.security.MessageDigest.getInstance("SHA-256")
+          val stream=Files.newInputStream(root)
+          try
+            val buffer=new Array[Byte](1<<20)
+            var n=stream.read(buffer)
+            while n != -1 do
+              digest.update(buffer,0,n)
+              n=stream.read(buffer)
+          finally stream.close()
+          digest)
+        val loadStart=System.nanoTime()
+        val components=try SingleFileSd1Model.load(root,maxAttentionScoreElements,() => context.checkCancelled(),vaeAttentionLimit) catch case error: Throwable =>
+          hashFuture.cancel(true);throw error
+        if sys.env.get("SCALATORCH_LOAD_PROFILE").contains("1") then System.err.println(f"[scala-torch load] single-file tensors+modules: ${(System.nanoTime()-loadStart)/1e9}%.1f s")
         val sdxlText=components.clip2.map { clip2 =>
           val secondDir=sys.env.get("SDFX_SCALATORCH_TOKENIZER_2").map(Path.of(_)).getOrElse(tokenizerDir.resolveSibling("tokenizer_2"))
           val tokenizer2=(if Files.isRegularFile(secondDir.resolve("vocab.json")) && Files.isRegularFile(secondDir.resolve("merges.txt")) then
@@ -866,16 +882,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val (vae,vaeInfo)=selectedVae.fold((components.vae,Map[String,NativeJson]("vae_name"->Null,"vae_hash"->Null)))(p => readVae(Some(p),context,Some(components.vae.config)))
         val pipeline=new EulerImagePipeline(tokenizer,components.clip,components.unet,vae,
           vaeExecution=vaeExecution,unetExecution=unetExecution,sdxlConditioning=sdxlText,vaeTiling=tiling)
-        val digest=java.security.MessageDigest.getInstance("SHA-256")
-        val stream=Files.newInputStream(root)
-        try
-          val buffer=new Array[Byte](65536)
-          var n=stream.read(buffer)
-          while n != -1 do
-            context.checkCancelled()
-            digest.update(buffer,0,n)
-            n=stream.read(buffer)
-        finally stream.close()
+        val digest=hashFuture.get()
+        if sys.env.get("SCALATORCH_LOAD_PROFILE").contains("1") then System.err.println(f"[scala-torch load] sha256 of checkpoint: ${(System.nanoTime()-hashStart)/1e9}%.1f s")
         val after=Files.readAttributes(root,classOf[java.nio.file.attribute.BasicFileAttributes])
         require(before.size()==after.size() && before.lastModifiedTime()==after.lastModifiedTime() &&
           before.fileKey()==after.fileKey(),"checkpoint changed during loading or hashing")
