@@ -118,7 +118,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
     val directory=Files.isDirectory(selected)
     val folder=if directory then selected else selected.getParent
     val filename=if directory then "diffusion_pytorch_model.safetensors" else selected.getFileName.toString
-    val vae=PretrainedVae.load(folder,maxScoreElements=vaeAttentionLimit,
+    val vae=PretrainedVae.load(folder,maxFeatureElements=Int.MaxValue.toLong,maxScoreElements=vaeAttentionLimit,
       configOverride=if directory then None else Some(if Files.isRegularFile(root) then singleFileVaeOverride.getOrElse(if singleFileFamily=="sdxl" then SingleFileSdxlConfig.vaeConfig else SingleFileSd1Config.vaeConfig)
         else VaeConfig.read(root.resolve("vae/config.json"))),filename=filename)
     context.checkCancelled()
