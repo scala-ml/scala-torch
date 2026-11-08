@@ -229,27 +229,11 @@ private[worker] object NativeControlNet:
       case "depth" | "depth_marigold" => NativeDepthAnything.preprocess(source,cancelled)
       case "normal_bae" => NativeNormalBae.preprocess(source,resolution,cancelled)
       case "normal_marigold" =>
-        val w=source.getWidth;val h=source.getHeight
-        val out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB)
-        def lumAt(x: Int,y: Int): Double =
-          val cx=math.max(0,math.min(w-1,x));val cy=math.max(0,math.min(h-1,y))
-          val c=source.getRGB(cx,cy)
-          (0.299*((c>>>16)&255)+0.587*((c>>>8)&255)+0.114*(c&255))/255.0
-        for y <- 0 until h do
-          if cancelled() then throw new java.util.concurrent.CancellationException("preprocess cancelled")
-          for x <- 0 until w do
-            val gx=(lumAt(x+1,y)-lumAt(x-1,y))*2.0
-            val gy=(lumAt(x,y+1)-lumAt(x,y-1))*2.0
-            val gz=1.0
-            val norm=math.sqrt(gx*gx+gy*gy+gz*gz)
-            val nx=(-gx/norm*0.5+0.5)*255.0
-            val ny=(-gy/norm*0.5+0.5)*255.0
-            val nz=(gz/norm*0.5+0.5)*255.0
-            val r=math.max(0,math.min(255,math.round(nx).toInt))
-            val g=math.max(0,math.min(255,math.round(ny).toInt))
-            val b=math.max(0,math.min(255,math.round(nz).toInt))
-            out.setRGB(x,y,0xff000000.toInt|(r<<16)|(g<<8)|b)
-        out
+        // the model is trained for a 768 px longer side, so processor_res is not used; preprocessor_args can override it
+        NativeMarigoldNormals.preprocess(source,cancelled,
+          numeric("denoising_steps",scalatorch.models.MarigoldNormals.DefaultSteps).toInt,
+          numeric("processing_resolution",scalatorch.models.MarigoldNormals.DefaultResolution).toInt,
+          numeric("seed",0).toLong)
       case "softedge_hed" =>
         val safe=args.get("safe") match { case Some(Bool(true)) => true; case _ => false }
         NativeHed.preprocess(source,resolution,safe,cancelled)

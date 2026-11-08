@@ -513,9 +513,12 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
     }
 
     // Extra ControlNet preprocessors & LDSR/Waifu2x upscalers
-    val needsWeights = Set("depth", "depth_marigold", "openpose", "lineart", "lineart_anime", "softedge_hed", "mlsd", "normal_bae")
+    val needsWeights = Set("depth", "depth_marigold", "normal_marigold", "openpose", "lineart", "lineart_anime", "softedge_hed", "mlsd", "normal_bae")
+    // normal_marigold runs an SD2-size diffusion U-Net: only exercised here when the weights are reachable and the U-Net runs on CUDA (CPU takes minutes)
+    val marigoldRunnable = scala.util.Try(scalatorch.models.worker.NativeMarigoldNormals.locate()).isSuccess &&
+      sys.env.get("SDFX_SCALATORCH_UNET_DEVICE").exists(_.startsWith("cuda"))
     for pre <- Vector("depth", "depth_marigold", "normal_marigold", "openpose", "lineart", "lineart_anime", "softedge_hed", "mlsd", "normal_bae")
-        if sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") || !needsWeights(pre) do
+        if (sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") || !needsWeights(pre)) && (pre != "normal_marigold" || marigoldRunnable) do
       val preRes = backend.execute(
         NativeRequest(s"pre-$pre", "preprocess", Map(
           "preprocessor" -> Str(pre),
@@ -532,6 +535,20 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
         backend.execute(
           NativeRequest("pre-normal_bae-missing", "preprocess", Map(
             "preprocessor" -> Str("normal_bae"),
+            "image_path" -> Str(sampleImg.toString),
+            "output_dir" -> Str(tmpDir.toString)
+          ), None),
+          ctx
+        )
+      }
+      assert(missing.getMessage.contains("weights not found"), missing.getMessage)
+
+    // normal_marigold is the real Marigold diffusion model now: without its weights it must say so instead of approximating a normal map
+    if scala.util.Try(scalatorch.models.worker.NativeMarigoldNormals.locate()).isFailure then
+      val missing = intercept[Exception] {
+        backend.execute(
+          NativeRequest("pre-normal_marigold-missing", "preprocess", Map(
+            "preprocessor" -> Str("normal_marigold"),
             "image_path" -> Str(sampleImg.toString),
             "output_dir" -> Str(tmpDir.toString)
           ), None),
