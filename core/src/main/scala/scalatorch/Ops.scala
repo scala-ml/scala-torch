@@ -66,16 +66,33 @@ object Ops:
     val n = shape.dims(1).toInt
     val k = a.shape.dims(1).toInt
     val out = new Array[Float](shape.numel.toInt)
-    var i = 0
-    while i < m do
-      var j = 0
-      while j < n do
-        var acc = 0f
-        var p = 0
-        while p < k do
-          acc += a.storage.data(a.layout.index(i * k + p)) * b.storage.data(b.layout.index(p * n + j))
-          p += 1
-        out(i * n + j) = acc
-        j += 1
-      i += 1
+    val left = if a.layout.isContiguous then a.storage.data else a.toFloatArray
+    val leftOffset = if a.layout.isContiguous then a.layout.offset.toInt else 0
+    val right = if b.layout.isContiguous then b.storage.data else b.toFloatArray
+    val rightOffset = if b.layout.isContiguous then b.layout.offset.toInt else 0
+    // Each output element keeps the sequential p = 0..k-1 Float accumulation, so results match the
+    // scalar triple loop bit for bit; only the loop order, memory access and parallelism change.
+    val block = 256
+    val columnBlocks = (n + block - 1) / block
+    val tasks = m.toLong * columnBlocks
+    def run(task: Int): Unit =
+      val i = task / columnBlocks
+      val j0 = (task % columnBlocks) * block
+      val j1 = math.min(n, j0 + block)
+      val acc = new Array[Float](j1 - j0)
+      var p = 0
+      while p < k do
+        val x = left(leftOffset + i * k + p)
+        val base = rightOffset + p * n + j0
+        var j = 0
+        while j < acc.length do
+          acc(j) += x * right(base + j)
+          j += 1
+        p += 1
+      System.arraycopy(acc, 0, out, i * n + j0, acc.length)
+    if tasks > 1 && m.toLong * n * k >= 262144L then
+      java.util.stream.IntStream.range(0, tasks.toInt).parallel().forEach(task => run(task))
+    else
+      var task = 0
+      while task < tasks do { run(task); task += 1 }
     Tensor.fromFloats(out, shape)

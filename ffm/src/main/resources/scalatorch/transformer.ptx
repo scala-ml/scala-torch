@@ -1920,3 +1920,47 @@ GP_DONE: ret;
  mul.wide.u32 d3,r2,4; add.u64 d3,d1,d3; st.global.f32 [d3],f8;
 GF_DONE: ret;
 }
+
+.visible .entry gelu_erf(.param .u64 ge_input, .param .u64 ge_output, .param .u32 ge_count) {
+ .reg .pred p;
+ .reg .b32 r<4>;
+ .reg .b64 d<4>;
+ .reg .f32 f<10>;
+ ld.param.u64 d0,[ge_input]; ld.param.u64 d1,[ge_output];
+ ld.param.u32 r0,[ge_count];
+ mov.u32 r1,%ctaid.x; mov.u32 r2,%ntid.x; mov.u32 r3,%tid.x;
+ mad.lo.u32 r1,r1,r2,r3; setp.ge.u32 p,r1,r0; @p bra GE_DONE;
+ mul.wide.u32 d2,r1,4; add.u64 d3,d0,d2; ld.global.f32 f0,[d3];
+ abs.f32 f2,f0; mul.rn.f32 f2,f2,0f3F3504F3;
+ mul.rn.f32 f3,f2,f2; mul.rn.f32 f3,f3,0fBFB8AA3B; ex2.approx.f32 f3,f3;
+ fma.rn.f32 f4,f2,0f3EA7BA05,0f3F800000; rcp.rn.f32 f4,f4;
+ mov.f32 f5,0f3F87DC22;
+ fma.rn.f32 f5,f5,f4,0fBFBA00E3;
+ fma.rn.f32 f5,f5,f4,0f3FB5F0E3;
+ fma.rn.f32 f5,f5,f4,0fBE91A98E;
+ fma.rn.f32 f5,f5,f4,0f3E827906;
+ mul.rn.f32 f5,f5,f4; mul.rn.f32 f5,f5,f3; mul.rn.f32 f5,f5,0f3F000000;
+ sub.rn.f32 f6,0f3F800000,f5;
+ setp.ge.f32 p,f0,0f00000000; selp.f32 f7,f6,f5,p;
+ mul.rn.f32 f8,f0,f7;
+ add.u64 d3,d1,d2; st.global.f32 [d3],f8;
+GE_DONE: ret;
+}
+
+.visible .entry quick_gelu(.param .u64 qg_input, .param .u64 qg_output, .param .u32 qg_count) {
+ .reg .pred p;
+ .reg .b32 r<4>;
+ .reg .b64 d<4>;
+ .reg .f32 f<6>;
+ ld.param.u64 d0,[qg_input]; ld.param.u64 d1,[qg_output];
+ ld.param.u32 r0,[qg_count];
+ mov.u32 r1,%ctaid.x; mov.u32 r2,%ntid.x; mov.u32 r3,%tid.x;
+ mad.lo.u32 r1,r1,r2,r3; setp.ge.u32 p,r1,r0; @p bra QG_DONE;
+ mul.wide.u32 d2,r1,4; add.u64 d3,d0,d2; ld.global.f32 f0,[d3];
+ mul.rn.f32 f1,f0,0fC01D265F;
+ ex2.approx.f32 f1,f1;
+ add.rn.f32 f1,f1,0f3F800000;
+ div.rn.f32 f2,f0,f1;
+ add.u64 d3,d1,d2; st.global.f32 [d3],f2;
+QG_DONE: ret;
+}

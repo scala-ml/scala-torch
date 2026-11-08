@@ -53,7 +53,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.loadModule(opsPtx)
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("geglu","geglu_fast","broadcast_add","concat_copy","resize_nearest","groupnorm","groupnorm_stats","groupnorm_stats_par","groupnorm_apply","conv2d","conv2d_fast","im2col","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","leaky_relu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_scores","attention_prepare","attention_output","attention_fused_fp32","attention_fused_multiquery_fp32","attention_scores_fp32","attention_prepare_fp32","attention_output_fp32","attention_backward","attention_gradient_cast","cache_append").map { name =>
+  private val kernels=Seq("geglu","geglu_fast","gelu_erf","quick_gelu","broadcast_add","concat_copy","resize_nearest","groupnorm","groupnorm_stats","groupnorm_stats_par","groupnorm_apply","conv2d","conv2d_fast","im2col","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","leaky_relu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_scores","attention_prepare","attention_output","attention_fused_fp32","attention_fused_multiquery_fp32","attention_scores_fp32","attention_prepare_fp32","attention_output_fp32","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -777,6 +777,17 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     execute(value.shape,value.shape.numel,kernels("silu")) { (arena,result) =>
       Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
         Seq(arena.allocateFrom(JAVA_INT,value.shape.numel.toInt),arena.allocateFrom(JAVA_LONG,0L),arena.allocateFrom(JAVA_INT,0))
+    }
+  /** Exact (erf) GELU in Float32, accurate to about 1e-6 relative. */
+  def geluErf(value: CudaTensor): CudaTensor = unary(value,"gelu_erf")
+  /** CLIP QuickGELU: x * sigmoid(1.702 x). */
+  def quickGelu(value: CudaTensor): CudaTensor = unary(value,"quick_gelu")
+  private def unary(value: CudaTensor,kernel: String): CudaTensor =
+    validate(value)
+    require(value.shape.numel<=Int.MaxValue,"elementwise kernel exceeds Int indexing")
+    execute(value.shape,value.shape.numel,kernels(kernel)) { (arena,result) =>
+      Seq(arena.allocateFrom(JAVA_LONG,value.address),arena.allocateFrom(JAVA_LONG,result.address),
+        arena.allocateFrom(JAVA_INT,value.shape.numel.toInt))
     }
   /** Elementwise LeakyReLU used by RRDB image restoration models. */
   def leakyRelu(value: CudaTensor,negativeSlope: Float=0.01f): CudaTensor =

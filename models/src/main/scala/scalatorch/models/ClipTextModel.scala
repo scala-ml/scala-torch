@@ -120,11 +120,17 @@ final case class ClipTextModel(tokenEmbedding: Embedding,positionEmbedding: Embe
     var hidden=input(tokens,0)
     var selected=hidden
     val selectedDepth=layers.size-skipLastLayers
-    layers.zipWithIndex.foreach { (layer,index) =>
-      hidden=layer(hidden,maxScoreElements)
-      if index+1==selectedDepth then selected=hidden
-    }
-    val normalized=finalNorm(hidden)
+    val accelerated=if ClipCuda.enabled && !hidden.requiresGrad then ClipCuda.run(this,hidden.data,selectedDepth) else None
+    val normalized=accelerated match
+      case Some(states) =>
+        selected=Variable(states.selected,requiresGrad=false)
+        Variable(states.normalized,requiresGrad=false)
+      case None =>
+        layers.zipWithIndex.foreach { (layer,index) =>
+          hidden=layer(hidden,maxScoreElements)
+          if index+1==selectedDepth then selected=hidden
+        }
+        finalNorm(hidden)
     val ids=tokens.toLongArray
     val batch=tokens.shape.dims.head.toInt;val count=tokens.shape.dims(1).toInt
     val rows=Vector.tabulate(batch) { row =>

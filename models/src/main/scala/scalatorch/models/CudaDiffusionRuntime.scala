@@ -643,6 +643,59 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       hidden
     }
 
+  private def clipActivation(x: CudaTensor,activation: ClipActivation): CudaTensor = activation match
+    case ClipActivation.QuickGelu => session.quickGelu(x)
+    case ClipActivation.Gelu => session.geluErf(x)
+    case ClipActivation.GeluTanh => throw UnsupportedOperationException("CLIP tanh GELU has no CUDA kernel")
+
+  /** One pre-norm causal CLIP layer on a (batch,tokens,width) activation; the caller keeps ownership of `input`. */
+  def clipLayer(input: CudaTensor,layer: ClipTextLayer,maxScoreElements: Long): CudaTensor = scope { use =>
+    val shape=session.shape(input)
+    val b=shape.dims(0);val t=shape.dims(1);val width=layer.width.toLong
+    val rows=Shape.from(Seq(b*t,width))
+    val headDim=width/layer.heads
+    val normalized=use(layerNorm(input,layer.norm1))
+    val flat=use(session.reshape(normalized,rows));normalized.close()
+    def heads(l: Linear): CudaTensor =
+      val projected=use(linear(flat,l))
+      val view=use(session.reshape(projected,Shape.from(Seq(b,t,layer.heads.toLong,headDim))));projected.close()
+      val out=use(session.transpose(view,1,2));view.close()
+      out
+    val q=heads(layer.qProj);val k=heads(layer.kProj);val v=heads(layer.vProj)
+    flat.close()
+    val attended=use(session.causalAttention(q,k,v,0,maxScoreElements))
+    q.close();k.close();v.close()
+    val packed=use(session.transpose(attended,1,2));attended.close()
+    val packedFlat=use(session.reshape(packed,rows));packed.close()
+    val projected=use(linear(packedFlat,layer.outProj));packedFlat.close()
+    val projectedView=use(session.reshape(projected,shape));projected.close()
+    val hidden=use(session.add(input,projectedView));projectedView.close()
+    val norm2=use(layerNorm(hidden,layer.norm2))
+    val flat2=use(session.reshape(norm2,rows));norm2.close()
+    val up=use(linear(flat2,layer.fc1));flat2.close()
+    val activated=use(clipActivation(up,layer.activation));up.close()
+    val down=use(linear(activated,layer.fc2));activated.close()
+    val downView=use(session.reshape(down,shape));down.close()
+    val result=use(session.add(hidden,downView))
+    hidden.close();downView.close()
+    result
+  }
+
+  /** Runs the whole stack; consumes `embedded`. selected is the state after `selectedDepth` layers. */
+  def clipStates(model: ClipStack,embedded: CudaTensor,selectedDepth: Int,maxScoreElements: Long): ClipCuda.States =
+    var hidden=embedded
+    var selected: Option[Tensor[Float]]=if selectedDepth==0 then Some(embedded.toCpu) else None
+    try
+      model.layers.zipWithIndex.foreach { (layer,index) =>
+        val next=clipLayer(hidden,layer,maxScoreElements)
+        hidden.close();hidden=next
+        if index+1==selectedDepth then selected=Some(hidden.toCpu)
+      }
+      val normalized=layerNorm(hidden,model.finalNorm)
+      try ClipCuda.States(selected.getOrElse(hidden.toCpu),normalized.toCpu)
+      finally normalized.close()
+    finally hidden.close()
+
   def close(): Unit =
     if !closed then
       session.allocatedBytes
