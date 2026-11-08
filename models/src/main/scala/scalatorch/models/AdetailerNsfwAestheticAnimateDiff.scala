@@ -83,99 +83,28 @@ object Adetailer:
       m
     }
 
-  /** Detect candidate face/hand/person regions using skin/salience connected components, or full center fallback when requested. */
+  /** Weights file of a trained detector (converted by scripts/convert_yolov8_to_safetensors.py), relative to the annotator folder. */
+  private val YoloName = """((?:face|hand|person|deepfashion2)_yolov8[nsmlx](?:-seg)?)\.pt""".r
+  private val yoloCache = new java.util.concurrent.ConcurrentHashMap[java.nio.file.Path, YoloV8]()
+
+  /** Whether `model` names a detector this runtime implements (YOLOv8 face/hand/person/deepfashion2 checkpoints). */
+  def isImplemented(model: String): Boolean = YoloName.matches(model)
+
+  /** Detect regions with a real YOLOv8 detector (face/hand/person; `-seg` models give instance masks, others box masks). The weights are
+    * `<annotator dir>/adetailer/<name>.safetensors` (SDFX_SCALATORCH_ANNOTATOR_DIR or models/annotators); there is no heuristic fallback:
+    * unavailable weights throw IllegalStateException and models without an implementation throw NativeBackendError("unsupported"). */
   def detect(image: BufferedImage, model: String, confidence: Double): Detection =
-    val w = image.getWidth
-    val h = image.getHeight
-    val visited = new Array[Boolean](w * h)
-    val salient = new Array[Boolean](w * h)
-
-    // Compute mean luminance and skin/contrast salience
-    var sumL = 0.0
-    var y = 0
-    while y < h do
-      var x = 0
-      while x < w do
-        val rgb = image.getRGB(x, y)
-        val r = (rgb >> 16) & 0xff
-        val g = (rgb >> 8) & 0xff
-        val b = rgb & 0xff
-        sumL += 0.299 * r + 0.587 * g + 0.114 * b
-        x += 1
-      y += 1
-    val meanL = sumL / math.max(1, w * h)
-
-    y = 0
-    while y < h do
-      var x = 0
-      while x < w do
-        val rgb = image.getRGB(x, y)
-        val r = (rgb >> 16) & 0xff
-        val g = (rgb >> 8) & 0xff
-        val b = rgb & 0xff
-        val lum = 0.299 * r + 0.587 * g + 0.114 * b
-        // Skin-tone heuristic (YCbCr / RGB rule) OR strong local object contrast from background
-        val cb = 128.0 - 0.168736 * r - 0.331264 * g + 0.5 * b
-        val cr = 128.0 + 0.5 * r - 0.418688 * g - 0.081312 * b
-        val isSkin = (r > 60 && g > 40 && b > 20 && r > g && r > b && math.abs(r - g) > 10 && cr >= 133 && cr <= 177 && cb >= 77 && cb <= 127)
-        val isHighContrast = (lum - meanL) > 28.0
-        salient(y * w + x) = isSkin || isHighContrast
-        x += 1
-      y += 1
-
-    val boxes = new ArrayBuffer[(Double, Double, Double, Double)]()
-    val confs = new ArrayBuffer[Double]()
-    val minArea = math.max(4, (w * h) / 256)
-
-    val queue = new Array[Int](w * h)
-    var idx = 0
-    while idx < w * h do
-      if salient(idx) && !visited(idx) then
-        var qHead = 0
-        var qTail = 0
-        queue(qTail) = idx
-        qTail += 1
-        visited(idx) = true
-        var minX = idx % w
-        var maxX = minX
-        var minY = idx / w
-        var maxY = minY
-        var count = 0
-        while qHead < qTail do
-          val cur = queue(qHead)
-          qHead += 1
-          count += 1
-          val cx = cur % w
-          val cy = cur / w
-          if cx < minX then minX = cx
-          if cx > maxX then maxX = cx
-          if cy < minY then minY = cy
-          if cy > maxY then maxY = cy
-          val neighbors = Array(
-            if cx > 0 then cur - 1 else -1,
-            if cx + 1 < w then cur + 1 else -1,
-            if cy > 0 then cur - w else -1,
-            if cy + 1 < h then cur + w else -1
-          )
-          var ni = 0
-          while ni < 4 do
-            val nb = neighbors(ni)
-            if nb >= 0 && salient(nb) && !visited(nb) then
-              visited(nb) = true
-              queue(qTail) = nb
-              qTail += 1
-            ni += 1
-        val boxArea = (maxX - minX + 1) * (maxY - minY + 1)
-        if count >= minArea && boxArea >= minArea then
-          val fillRatio = count.toDouble / math.max(1, boxArea).toDouble
-          val score = math.min(0.99, 0.35 + 0.6 * fillRatio)
-          if score >= confidence then
-            boxes += ((minX.toDouble, minY.toDouble, maxX.toDouble, maxY.toDouble))
-            confs += score
-      idx += 1
-
-    val finalBoxes = boxes.toVector
-    Detection(finalBoxes, boxMasks(w, h, finalBoxes), confs.toVector, w, h)
+    val stem = model match
+      case YoloName(s) => s
+      case other =>
+        throw new scalatorch.models.worker.NativeBackendError("unsupported",
+          s"detection model '$other' is not implemented (no trained network or weights available in the native runtime); only YOLOv8 face/hand/person models are supported")
+    val file = scalatorch.models.worker.NativeAnnotatorFiles.locate(s"adetailer/$stem.safetensors", s"YOLOv8 $stem")
+    val net = yoloCache.computeIfAbsent(file.toAbsolutePath.normalize, f => YoloV8.load(f))
+    val r = net.detect(image, confidence, withMasks = stem.endsWith("-seg"))
+    val boxes = r.boxes
+    val masks = r.masks.getOrElse(boxMasks(image.getWidth, image.getHeight, boxes))
+    Detection(boxes, masks, r.scores, image.getWidth, image.getHeight)
 
   def filterByRatio(d: Detection, lo: Double, hi: Double): Detection =
     val area = math.max(1.0, (d.width * d.height).toDouble)

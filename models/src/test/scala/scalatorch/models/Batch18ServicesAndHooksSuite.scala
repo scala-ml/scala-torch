@@ -6,6 +6,7 @@ import java.nio.file.{ Files, Path }
 import javax.imageio.ImageIO
 import munit.FunSuite
 import scalatorch.models.*
+import scalatorch.models.worker.NativeBackendError
 import scalatorch.models.worker.NativeJson.*
 
 final class Batch18ServicesAndHooksSuite extends FunSuite:
@@ -40,8 +41,10 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
 
   test("Adetailer and BatchFaceSwap detect, filter, mask, matchColors, and expand prompts") {
     val img = createSalientTestImage(64, 64)
-    val det = Adetailer.detect(img, "face_yolov8n.pt", 0.3)
-    assert(det.boxes.nonEmpty, "expected at least one salient region detected")
+    // detection itself is covered by YoloV8Suite (real trained weights); here a fixed detection exercises the post-processing
+    val boxes = Vector((16.0, 16.0, 48.0, 48.0))
+    val det = Adetailer.Detection(boxes, Adetailer.boxMasks(64, 64, boxes), Vector(0.9), 64, 64)
+    assert(det.boxes.nonEmpty)
 
     val filtered = Adetailer.filterByRatio(det, 0.01, 0.95)
     assertEquals(filtered.boxes.size, det.boxes.size)
@@ -91,15 +94,20 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
       assertEquals(out.getHeight, 64)
 
     val cfg = NsfwChecker.NsfwConfig(genFilterType = "Fill color", fillColor = "#000000", saveBeforeCensor = true, saveMask = true)
-    val (censored, aux) = NsfwChecker.censorFinal(img, cfg)
-    assertEquals(censored.getWidth, 64)
-    assertEquals(aux.map(_._1), Vector("-before-censor", "-censor-mask"))
+    // the NudeNet detector has no native implementation: region detection must fail loudly instead of guessing
+    val unsupported = intercept[NativeBackendError](NsfwChecker.censorFinal(img, cfg))
+    assertEquals(unsupported.code, "unsupported")
+    assert(unsupported.getMessage.contains("nudenet") && unsupported.getMessage.contains("not implemented"))
+    // with the detector switched off the checker is a no-op
+    val (passthrough, noAux) = NsfwChecker.censorFinal(img, cfg.copy(nudenet = false))
+    assertEquals(passthrough.getWidth, 64)
+    assert(noAux.isEmpty)
 
     val tmpDir = Files.createTempDirectory("batch18-nsfw-")
     val srcFile = tmpDir.resolve("input.png")
     ImageIO.write(img, "png", srcFile.toFile)
     val backend = makeBackend()
-    val res = backend.execute(
+    val nsfwErr = intercept[Throwable](backend.execute(
       NativeRequest("1", "image_tool", Map(
         "tool" -> Str("nsfw_checker"),
         "image_path" -> Str(srcFile.toString),
@@ -108,9 +116,8 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
         "output_mask" -> Bool(true)
       ), None),
       makeWorkContext()
-    )
-    assert(Files.isRegularFile(Path.of(res("path").asInstanceOf[Str].value)))
-    assert(res("outputs").asInstanceOf[Obj].fields.contains("mask"))
+    ))
+    assert(nsfwErr.getMessage.contains("not implemented"), nsfwErr.toString)
   }
 
   test("AestheticScore and additional image tools (person_mask, remove_background, depth_mask, waifu2x) work") {
@@ -144,7 +151,17 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
     val backend = makeBackend()
     val ctx = makeWorkContext()
 
-    for toolName <- Vector("aesthetic_score", "person_mask", "remove_background", "depth_mask", "waifu2x") do
+    // person_mask needs the YOLOv8 person-seg weights and remove_background (U2-Net) has no native implementation: both fail loudly
+    val personWeights = scalatorch.models.worker.NativeAnnotatorFiles.candidates("adetailer/person_yolov8n-seg.safetensors").exists(Files.isRegularFile(_))
+    def toolReq(toolName: String) = NativeRequest(s"tool-$toolName", "image_tool", Map(
+      "tool" -> Str(toolName), "image_path" -> Str(srcFile.toString), "output_dir" -> Str(tmpDir.toString)), None)
+    val bgErr = intercept[Throwable](backend.execute(toolReq("remove_background"), ctx))
+    assert(bgErr.getMessage.contains("not implemented"), bgErr.toString)
+    if !personWeights then
+      val pmErr = intercept[Throwable](backend.execute(toolReq("person_mask"), ctx))
+      assert(pmErr.getMessage.contains("weights not found"), pmErr.toString)
+
+    for toolName <- Vector("aesthetic_score", "waifu2x") ++ (if sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") then Vector("depth_mask") else Vector.empty) ++ (if personWeights then Vector("person_mask") else Vector.empty) do
       val extra = if toolName == "waifu2x" then Map("scale" -> Number(2.0)) else Map.empty[String, NativeJson]
       val r = backend.execute(
         NativeRequest(s"tool-$toolName", "image_tool", Map(
@@ -371,9 +388,8 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
           "cfg_scale" -> Number(7.0),
           "sampler_name" -> Str("Euler"),
           "hooks" -> Obj(Map(
-            "adetailer" -> Obj(Map("enabled" -> Bool(true), "model" -> Str("face_yolov8n.pt"), "confidence" -> Number(0.1), "denoising_strength" -> Number(0.2))),
+            // adetailer (needs the YOLOv8 face weights) and nsfw_checker (NudeNet, not implemented) fail loudly and are covered separately
             "face_restore" -> Obj(Map("enabled" -> Bool(true), "visibility" -> Number(0.5))),
-            "nsfw_checker" -> Obj(Map("enabled" -> Bool(true), "gen_filter_type" -> Str("Gaussian Blur"))),
             "aesthetic_score" -> Obj(Map("enabled" -> Bool(true), "improved" -> Bool(true), "generation_fields" -> Bool(true), "hash" -> Bool(true)))
           ))
         ))
@@ -463,7 +479,9 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
     }
 
     // Extra ControlNet preprocessors & LDSR/Waifu2x upscalers
-    for pre <- Vector("depth", "depth_marigold", "normal_marigold", "openpose", "lineart", "lineart_anime", "softedge_hed", "mlsd", "normal_bae") do
+    val needsWeights = Set("depth", "depth_marigold", "openpose", "lineart", "lineart_anime", "softedge_hed", "mlsd")
+    for pre <- Vector("depth", "depth_marigold", "normal_marigold", "openpose", "lineart", "lineart_anime", "softedge_hed", "mlsd", "normal_bae")
+        if sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") || !needsWeights(pre) do
       val preRes = backend.execute(
         NativeRequest(s"pre-$pre", "preprocess", Map(
           "preprocessor" -> Str(pre),
