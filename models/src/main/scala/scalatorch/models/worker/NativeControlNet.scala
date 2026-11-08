@@ -227,7 +227,8 @@ private[worker] object NativeControlNet:
       case "tile_colorfix" => NativeControlNetImageOps.gaussian(source,math.max(1,numeric("variation",8).toInt).toDouble,cancelled)
       case "blur_gaussian" => NativeControlNetImageOps.gaussian(source,numeric("sigma",9.0),cancelled)
       case "depth" | "depth_marigold" => NativeDepthAnything.preprocess(source,cancelled)
-      case "normal_marigold" | "normal_bae" =>
+      case "normal_bae" => NativeNormalBae.preprocess(source,resolution,cancelled)
+      case "normal_marigold" =>
         val w=source.getWidth;val h=source.getHeight
         val out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB)
         def lumAt(x: Int,y: Int): Double =

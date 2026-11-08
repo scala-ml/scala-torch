@@ -513,7 +513,7 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
     }
 
     // Extra ControlNet preprocessors & LDSR/Waifu2x upscalers
-    val needsWeights = Set("depth", "depth_marigold", "openpose", "lineart", "lineart_anime", "softedge_hed", "mlsd")
+    val needsWeights = Set("depth", "depth_marigold", "openpose", "lineart", "lineart_anime", "softedge_hed", "mlsd", "normal_bae")
     for pre <- Vector("depth", "depth_marigold", "normal_marigold", "openpose", "lineart", "lineart_anime", "softedge_hed", "mlsd", "normal_bae")
         if sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") || !needsWeights(pre) do
       val preRes = backend.execute(
@@ -525,6 +525,20 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
         ctx
       )
       assert(Files.isRegularFile(Path.of(preRes("path").asInstanceOf[Str].value)))
+
+    // normal_bae is the real NormalBAE network now: without its weights it must say so instead of approximating a normal map
+    if !sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") && scala.util.Try(scalatorch.models.worker.NativeNormalBae.locate()).isFailure then
+      val missing = intercept[Exception] {
+        backend.execute(
+          NativeRequest("pre-normal_bae-missing", "preprocess", Map(
+            "preprocessor" -> Str("normal_bae"),
+            "image_path" -> Str(sampleImg.toString),
+            "output_dir" -> Str(tmpDir.toString)
+          ), None),
+          ctx
+        )
+      }
+      assert(missing.getMessage.contains("weights not found"), missing.getMessage)
 
     val w2xAvailable = scala.util.Try(scalatorch.models.worker.NativeWaifu2x.locate("art", 2)).isSuccess
     for up <- Vector("LDSR", "Waifu2x") if up != "Waifu2x" || w2xAvailable do
