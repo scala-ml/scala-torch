@@ -4,7 +4,8 @@ import java.nio.file.{Files,Path}
 import javax.imageio.ImageIO
 import NativeJson.*
 
-/** Real-weights check of the standalone R-ESRGAN upscale; set SDFX_TEST_ESRGAN (weights), SDFX_TEST_IMAGE and SDFX_TEST_OUT. */
+/** Real-weights check of the standalone R-ESRGAN upscale; set SDFX_TEST_ESRGAN (weights), SDFX_TEST_IMAGE and SDFX_TEST_OUT.
+  * The model runs on the device named by SDFX_SCALATORCH_UNET_DEVICE (cpu when unset: far too slow for large images). */
 class NativeRealEsrganStandaloneSuite extends munit.FunSuite:
   test("standalone upscale with real RealESRGAN_x4plus weights") {
     val weights=sys.env.get("SDFX_TEST_ESRGAN")
