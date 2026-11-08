@@ -94,7 +94,7 @@ object EulerConfig:
             case Null | Bool(_) => ()
             case _ => throw IllegalArgumentException(s"invalid inherited scheduler metadata: $key")
       val ddimClipSample=take("clip_sample") match
-        case Null => true
+        case Null => false
         case Bool(value) => value
         case _ => throw IllegalArgumentException("invalid clip_sample")
       val ddimClipRange=take("clip_sample_range") match
