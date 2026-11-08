@@ -25,12 +25,28 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   private val owner=Thread.currentThread()
   private var closed=false
   private var used=0L
+  // Freed device blocks are kept by exact size and reused, so steady-state inference does no cuMemAlloc/cuMemFree
+  // (cuMemFree synchronizes the whole device). Reuse is safe because every kernel and cuBLAS call runs on one stream.
+  private val pool=mutable.Map.empty[Long,mutable.ArrayDeque[Long]]
+  private var pooled=0L
+  private val poolCap=math.min(maxBytes/2,6L<<30)
+  private def trimPool(): Unit =
+    pool.foreach { (_,blocks) => blocks.foreach(address => driver.call("cuMemFree_v2",Seq(JAVA_LONG),Long.box(address))) }
+    pool.clear();pooled=0L
+  private def hostSync(): Unit = driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+  private def dtoh(host: MemorySegment,address: java.lang.Long,bytes: java.lang.Long): Unit =
+    hostSync()
+    driver.call("cuMemcpyDtoH_v2",Seq(ADDRESS,JAVA_LONG,JAVA_LONG),host,address,bytes)
+  private def syncedCopyToDevice(address: Long,host: MemorySegment,bytes: Long): Unit =
+    hostSync()
+    driver.copyHostToDevice(address,host,bytes)
   private val profileEnabled=sys.env.get("SCALATORCH_CUDA_PROFILE").contains("1")
   private val fusedDenseAttentionEnabled=sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION").contains("1")
   private val cublasAttentionEnabled= !sys.env.get("SCALATORCH_CUDA_CUBLAS_ATTENTION").contains("0")
   private val multiQueryAttentionEnabled=sys.env.get("SCALATORCH_CUDA_MULTI_QUERY_ATTENTION").contains("1")
   private val profile=mutable.Map.empty[String,(Long,Long)]
   private val uploadStaging=new CudaHostStagingBuffer
+  private val syncEveryLaunch=sys.env.get("SCALATORCH_CUDA_PROFILE").contains("1") || sys.env.get("SCALATORCH_CUDA_SYNC").contains("1")
   private def record(label: String,started: Long): Unit = if profileEnabled then
     val (count,nanos)=profile.getOrElse(label,(0L,0L))
     profile.update(label,(count+1,nanos+System.nanoTime()-started))
@@ -106,11 +122,18 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     require(shape.numel <= Int.MaxValue,"CUDA tensor exceeds Int indexing")
     val bytes=math.max(shape.numel*(if half then 2L else 4L),1L)
     require(bytes <= maxBytes-used,"CUDA session allocation budget exceeded")
-    val address=Using.resource(Arena.ofConfined()) { arena =>
+    def rawAllocate(): Long = Using.resource(Arena.ofConfined()) { arena =>
       val result=arena.allocate(JAVA_LONG)
       driver.call("cuMemAlloc_v2",Seq(ADDRESS,JAVA_LONG),result,Long.box(bytes))
       result.get(JAVA_LONG,0)
     }
+    val address=pool.get(bytes).filter(_.nonEmpty) match
+      case Some(blocks) => pooled-=bytes;blocks.removeLast()
+      case None =>
+        try rawAllocate()
+        catch case error: Throwable if pooled>0 =>
+          trimPool()
+          rawAllocate()
     val tensor=new CudaTensor(this,shape,new CudaAllocation(address,bytes),half)
     live+=tensor;used+=bytes
     tensor
@@ -130,7 +153,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       Using.resource(Arena.ofConfined()) { arena =>
         if values.nonEmpty then
           val host=arena.allocateFrom(JAVA_INT,values*)
-          driver.copyHostToDevice(buffer.address,host,values.length.toLong*4)
+          syncedCopyToDevice(buffer.address,host,values.length.toLong*4)
       }
       body(buffer.address)
     }
@@ -144,7 +167,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       val pairs=Using.resource(Arena.ofConfined()) { arena =>
         val bytes=originalShape.numel*16
         val host=arena.allocate(bytes,8)
-        if bytes>0 then driver.call("cuMemcpyDtoH_v2",Seq(ADDRESS,JAVA_LONG,JAVA_LONG),host,Long.box(buffer.address),Long.box(bytes))
+        if bytes>0 then dtoh(host,Long.box(buffer.address),Long.box(bytes))
         host.toArray(JAVA_DOUBLE)
       }
       val n=originalShape.numel.toInt
@@ -162,7 +185,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
         val pairs=new Array[Double](first.length*2)
         first.indices.foreach(i => { pairs(i*2)=first(i);pairs(i*2+1)=second(i) })
         val host=arena.allocateFrom(JAVA_DOUBLE,pairs*)
-        driver.copyHostToDevice(buffer.address,host,saved.shape.numel*16)
+        syncedCopyToDevice(buffer.address,host,saved.shape.numel*16)
       }
       new ResidentAdamState(this,buffer,saved.shape,saved.step)
     catch case error: Throwable =>
@@ -273,7 +296,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     Using.resource(allocate(Shape.from(Seq(count*2)))) { buffer =>
       Using.resource(Arena.ofConfined()) { arena =>
         val host=arena.allocateFrom(JAVA_DOUBLE,coefficients*)
-        driver.copyHostToDevice(buffer.address,host,count*8)
+        syncedCopyToDevice(buffer.address,host,count*8)
       }
       execute(value.shape,value.shape.numel/2,kernels("rope")) { (arena,result) =>
         Seq(value.address,result.address,buffer.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
@@ -656,7 +679,6 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
             driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
             record("half_attention_output",started2)
           start+=n
-        driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
       }
       result
     catch case error: Throwable =>
@@ -682,6 +704,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
           MemorySegment.copy(MemorySegment.ofArray(source.toFloatArray),0,host,0,bytes)
         record("upload host copy",copyStarted)
         record("upload host staging",stagingStarted)
+        hostSync()
         if profileEnabled then
           driver.copyHostToDeviceProfiled(result.address,host,bytes) { (label,nanos) => recordElapsed(label,nanos) }
         else driver.copyHostToDevice(result.address,host,bytes)
@@ -697,7 +720,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val values=Using.resource(Arena.ofConfined()) { arena =>
       val host=arena.allocate(tensor.shape.numel*4,4)
       if tensor.shape.numel > 0 then
-        driver.call("cuMemcpyDtoH_v2",Seq(ADDRESS,JAVA_LONG,JAVA_LONG),host,Long.box(tensor.address),Long.box(tensor.shape.numel*4))
+        dtoh(host,Long.box(tensor.address),Long.box(tensor.shape.numel*4))
       host.toArray(JAVA_FLOAT)
     }
     Tensor.fromFloats(values,tensor.shape)
@@ -955,7 +978,6 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
                 group+=1
               batch+=1
           }
-        driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
         return output
       catch case error: Throwable =>
         try output.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
@@ -1166,8 +1188,9 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
         driver.call("cuLaunchKernel",Seq(ADDRESS) ++ Seq.fill(7)(JAVA_INT) ++ Seq.fill(3)(ADDRESS),
           kernel,Int.box(blocks),Int.box(1),Int.box(1),
           Int.box(threadsPerBlock),Int.box(1),Int.box(1),Int.box(0),stream,params,MemorySegment.NULL)
-        try driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
-        catch case error: Throwable => throw IllegalStateException(s"CUDA kernel '$label' failed during synchronization",error)
+        if syncEveryLaunch then
+          try driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+          catch case error: Throwable => throw IllegalStateException(s"CUDA kernel '$label' failed during synchronization",error)
         if profileEnabled then
           val resolved=if label!="unknown" then label else kernels.collectFirst {
             case (name,function) if function.address()==kernel.address() => name
@@ -1181,8 +1204,12 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     if !tensor.released then
       validate(tensor)
       if tensor.allocation.references==1 then
-        driver.call("cuMemFree_v2",Seq(JAVA_LONG),Long.box(tensor.address))
-        used-=tensor.allocation.bytes
+        val size=tensor.allocation.bytes
+        if pooled+size<=poolCap then
+          pool.getOrElseUpdate(size,mutable.ArrayDeque.empty[Long]).append(tensor.address)
+          pooled+=size
+        else driver.call("cuMemFree_v2",Seq(JAVA_LONG),Long.box(tensor.address))
+        used-=size
       tensor.allocation.references-=1
       tensor.released=true;live-=tensor
 
@@ -1196,6 +1223,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     attempt { driver.call("cuCtxSetCurrent",Seq(ADDRESS),context) }
     attempt { driver.call("cuStreamSynchronize",Seq(ADDRESS),stream) }
     live.toVector.reverse.foreach(tensor => attempt { release(tensor) })
+    attempt { trimPool() }
     attempt { uploadStaging.close() }
     live.foreach(_.released=true)
     live.clear();used=0;closed=true

@@ -729,8 +729,8 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
 
 private[models] object CudaDiffusionRuntime:
   private val MaximumOffloadedWeightBytes=512L*1024L*1024L
-  /** Float16 U-Net (weights, activations, tensor-core GEMM); `SCALATORCH_CUDA_FP16=1` opts in. */
-  private[models] def fp16Default: Boolean = sys.env.get("SCALATORCH_CUDA_FP16").contains("1")
+  /** Float16 U-Net (weights, activations, tensor-core GEMM) unless `SCALATORCH_CUDA_FP16=0`. */
+  private[models] def fp16Default: Boolean = !sys.env.get("SCALATORCH_CUDA_FP16").contains("0")
   private[models] def offloadedWeightLimit(sessionMaxBytes: Long): Long =
     require(sessionMaxBytes>=0,"negative CUDA session budget")
     math.min(sessionMaxBytes/4,MaximumOffloadedWeightBytes)
