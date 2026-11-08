@@ -1964,3 +1964,57 @@ GE_DONE: ret;
  add.u64 d3,d1,d2; st.global.f32 [d3],f2;
 QG_DONE: ret;
 }
+
+.shared .align 4 .b8 sm_red[1024];
+.visible .entry softmax_par(.param .u64 sm_x,.param .u32 sm_rows,.param .u32 sm_width) {
+ .reg .pred p;
+ .reg .u32 rows,row,width,tid,i,index,start,half;
+ .reg .u64 px,offset,addr,sh,mine;
+ .reg .f32 x,m,other,acc,e,total;
+ ld.param.u64 px,[sm_x]; ld.param.u32 rows,[sm_rows]; ld.param.u32 width,[sm_width];
+ mov.u32 row,%ctaid.x; setp.ge.u32 p,row,rows; @p bra SM_DONE;
+ mov.u32 tid,%tid.x; mul.lo.u32 start,row,width;
+ mov.u64 sh,sm_red; mul.wide.u32 offset,tid,4; add.u64 mine,sh,offset;
+ mov.f32 acc,0fFF800000; mov.u32 i,tid;
+SM_MAX:
+ setp.ge.u32 p,i,width; @p bra SM_MAX_END;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; max.f32 acc,acc,x;
+ add.u32 i,i,256; bra SM_MAX;
+SM_MAX_END:
+ st.shared.f32 [mine],acc; bar.sync 0; mov.u32 half,128;
+SM_R1:
+ setp.eq.u32 p,half,0; @p bra SM_R1_END;
+ setp.ge.u32 p,tid,half; @p bra SM_R1_SKIP;
+ add.u32 index,tid,half; mul.wide.u32 offset,index,4; add.u64 addr,sh,offset;
+ ld.shared.f32 other,[addr]; ld.shared.f32 acc,[mine]; max.f32 acc,acc,other; st.shared.f32 [mine],acc;
+SM_R1_SKIP:
+ bar.sync 0; shr.u32 half,half,1; bra SM_R1;
+SM_R1_END:
+ ld.shared.f32 m,[sh]; bar.sync 0;
+ mov.f32 acc,0f00000000; mov.u32 i,tid;
+SM_SUM:
+ setp.ge.u32 p,i,width; @p bra SM_SUM_END;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; sub.rn.f32 x,x,m; mul.rn.f32 x,x,0f3FB8AA3B; ex2.approx.f32 e,x;
+ st.global.f32 [addr],e; add.rn.f32 acc,acc,e;
+ add.u32 i,i,256; bra SM_SUM;
+SM_SUM_END:
+ st.shared.f32 [mine],acc; bar.sync 0; mov.u32 half,128;
+SM_R2:
+ setp.eq.u32 p,half,0; @p bra SM_R2_END;
+ setp.ge.u32 p,tid,half; @p bra SM_R2_SKIP;
+ add.u32 index,tid,half; mul.wide.u32 offset,index,4; add.u64 addr,sh,offset;
+ ld.shared.f32 other,[addr]; ld.shared.f32 acc,[mine]; add.rn.f32 acc,acc,other; st.shared.f32 [mine],acc;
+SM_R2_SKIP:
+ bar.sync 0; shr.u32 half,half,1; bra SM_R2;
+SM_R2_END:
+ ld.shared.f32 total,[sh]; rcp.rn.f32 total,total;
+ mov.u32 i,tid;
+SM_OUT:
+ setp.ge.u32 p,i,width; @p bra SM_DONE;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; mul.rn.f32 x,x,total; st.global.f32 [addr],x;
+ add.u32 i,i,256; bra SM_OUT;
+SM_DONE: ret;
+}

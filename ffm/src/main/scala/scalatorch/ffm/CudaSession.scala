@@ -27,6 +27,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   private var used=0L
   private val profileEnabled=sys.env.get("SCALATORCH_CUDA_PROFILE").contains("1")
   private val fusedDenseAttentionEnabled=sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION").contains("1")
+  private val cublasAttentionEnabled= !sys.env.get("SCALATORCH_CUDA_CUBLAS_ATTENTION").contains("0")
   private val multiQueryAttentionEnabled=sys.env.get("SCALATORCH_CUDA_MULTI_QUERY_ATTENTION").contains("1")
   private val profile=mutable.Map.empty[String,(Long,Long)]
   private val uploadStaging=new CudaHostStagingBuffer
@@ -53,7 +54,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private val opsModule=driver.loadModule(opsPtx)
   driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),opsModule) }
-  private val kernels=Seq("geglu","geglu_fast","gelu_erf","quick_gelu","broadcast_add","concat_copy","resize_nearest","groupnorm","groupnorm_stats","groupnorm_stats_par","groupnorm_apply","conv2d","conv2d_fast","im2col","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","leaky_relu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_scores","attention_prepare","attention_output","attention_fused_fp32","attention_fused_multiquery_fp32","attention_scores_fp32","attention_prepare_fp32","attention_output_fp32","attention_backward","attention_gradient_cast","cache_append").map { name =>
+  private val kernels=Seq("geglu","geglu_fast","softmax_par","gelu_erf","quick_gelu","broadcast_add","concat_copy","resize_nearest","groupnorm","groupnorm_stats","groupnorm_stats_par","groupnorm_apply","conv2d","conv2d_fast","im2col","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","leaky_relu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_scores","attention_prepare","attention_output","attention_fused_fp32","attention_fused_multiquery_fp32","attention_scores_fp32","attention_prepare_fp32","attention_output_fp32","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -296,6 +297,32 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     if causal then require(scores*2<=Int.MaxValue,"attention Double workspace exceeds Int indexing")
     val q=query.shape.dims;val k=keyShape.dims;val v=valueShape.dims
     val rows=output.numel/v(3)
+    if !causal && cublasAttentionEnabled && cublas.isDefined && q(1)==k(1) && q(1)==v(1) && q(0)==k(0) && q(0)==v(0) &&
+        storageTokens==k(2) && q(3)==k(3) && scores*4<=math.min(2147483648L,maxBytes-used-output.numel*4) && scores<=Int.MaxValue then
+      val result=allocate(output)
+      try
+        Using.resource(allocate(Shape.from(Seq(scores)))) { scratch =>
+          val batch=(q(0)*q(1)).toInt
+          val qt=q(2).toInt;val kt=k(2).toInt;val d=q(3).toInt;val dv=v(3).toInt
+          val started=if profileEnabled then System.nanoTime() else 0L
+          cublas.get.sgemmStridedBatched(1,0,kt,qt,d,(1.0/math.sqrt(d.toDouble)).toFloat,
+            key.address,d,kt.toLong*d,query.address,d,qt.toLong*d,scratch.address,kt,qt.toLong*kt,batch)
+          driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+          if profileEnabled then record("cublas_attention_scores",started)
+          launch(batch.toLong*qt,kernels("softmax_par"),threadsPerBlock=256,threadsPerOutput=256,label="softmax_par") { arena =>
+            Seq(arena.allocateFrom(JAVA_LONG,scratch.address),arena.allocateFrom(JAVA_INT,(batch.toLong*qt).toInt),
+              arena.allocateFrom(JAVA_INT,kt))
+          }
+          val started2=if profileEnabled then System.nanoTime() else 0L
+          cublas.get.sgemmStridedBatched(0,0,dv,qt,kt,1f,
+            value.address,dv,kt.toLong*dv,scratch.address,kt,qt.toLong*kt,result.address,dv,qt.toLong*dv,batch)
+          driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+          if profileEnabled then record("cublas_attention_output",started2)
+        }
+        return result
+      catch case error: Throwable =>
+        try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+        throw error
     if !causal && fusedDenseAttentionEnabled && multiQueryAttentionEnabled && k(2)<=4096 && v(3)<=256 &&
         q(2)%2==0 && rows%2==0 then
       val result=allocate(output)
