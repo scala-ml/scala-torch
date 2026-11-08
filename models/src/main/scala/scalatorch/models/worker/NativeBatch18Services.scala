@@ -272,12 +272,15 @@ private[worker] object NativeBatch18Services:
         val noise = optInt(p, "noise", 2)
         val targetW = math.max(1, math.round(img.getWidth * scale).toInt)
         val targetH = math.max(1, math.round(img.getHeight * scale).toInt)
-        val up = DiffusionImageResize(img, targetW, targetH, 0)
+        if noise < 0 || noise > 3 then throw new NativeBackendError("invalid_params", "waifu2x noise must be 0..3")
+        val tile = optInt(p, "tile", 256)
+        // Real waifu2x upconv_7 (NativeWaifu2x); missing weights fail loudly, no resize fallback
+        val up = NativeWaifu2x.upscale(img, targetW, targetH, style, noise, () => context.cancelled(), if tile <= 0 then 256 else tile)
         val dst = saveImg(up, "waifu2x")
         Map(
           "path" -> Str(dst.toString),
           "outputs" -> Obj(Map.empty),
-          "info" -> Obj(Map("model" -> Str(s"waifu2x-${style.toLowerCase(Locale.ROOT)}-n$noise"), "scale" -> Number(scale)))
+          "info" -> Obj(Map("model" -> Str(s"waifu2x-upconv_7-${NativeWaifu2x.styleKey(style)}-noise$noise"), "scale" -> Number(scale)))
         )
 
       case other =>

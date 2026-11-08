@@ -184,6 +184,12 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
     if !u2Weights then
       val bgErr = intercept[Throwable](backend.execute(toolReq("remove_background"), ctx))
       assert(bgErr.getMessage.contains("weights not found"), bgErr.toString)
+    // waifu2x is the real upconv_7 network: without its weights it fails loudly, with them it runs for real (64x64 -> 128x128 here; parity and
+    // real-image checks live in NativeWaifu2xSuite)
+    val w2xWeights = scala.util.Try(scalatorch.models.worker.NativeWaifu2x.locate("art", 2)).isSuccess
+    if !w2xWeights then
+      val w2Err = intercept[Throwable](backend.execute(toolReq("waifu2x").copy(params = toolReq("waifu2x").params + ("scale" -> Number(2.0))), ctx))
+      assert(w2Err.getMessage.contains("weights not found"), w2Err.toString)
     if !personWeights then
       val pmErr = intercept[Throwable](backend.execute(toolReq("person_mask"), ctx))
       assert(pmErr.getMessage.contains("weights not found"), pmErr.toString)
@@ -192,7 +198,7 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
       val aeErr = intercept[Throwable](backend.execute(toolReq("aesthetic_score"), ctx))
       assert(aeErr.getMessage.contains("weights not found"), aeErr.toString)
 
-    for toolName <- Vector("waifu2x") ++ (if aestheticWeights then Vector("aesthetic_score") else Vector.empty) ++ (if sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") then Vector("depth_mask") else Vector.empty) ++ (if personWeights then Vector("person_mask") else Vector.empty) ++ (if u2Weights then Vector("remove_background") else Vector.empty) do
+    for toolName <- (if w2xWeights then Vector("waifu2x") else Vector.empty) ++ (if aestheticWeights then Vector("aesthetic_score") else Vector.empty) ++ (if sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") then Vector("depth_mask") else Vector.empty) ++ (if personWeights then Vector("person_mask") else Vector.empty) ++ (if u2Weights then Vector("remove_background") else Vector.empty) do
       val extra = if toolName == "waifu2x" then Map("scale" -> Number(2.0)) else Map.empty[String, NativeJson]
       val r = backend.execute(
         NativeRequest(s"tool-$toolName", "image_tool", Map(
@@ -520,7 +526,8 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
       )
       assert(Files.isRegularFile(Path.of(preRes("path").asInstanceOf[Str].value)))
 
-    for up <- Vector("LDSR", "Waifu2x") do
+    val w2xAvailable = scala.util.Try(scalatorch.models.worker.NativeWaifu2x.locate("art", 2)).isSuccess
+    for up <- Vector("LDSR", "Waifu2x") if up != "Waifu2x" || w2xAvailable do
       val upRes = backend.execute(
         NativeRequest(s"up-$up", "upscale", Map(
           "upscaler" -> Str(up),
@@ -531,4 +538,8 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
         ctx
       )
       assert(Files.isRegularFile(Path.of(upRes("path").asInstanceOf[Str].value)))
+    if !w2xAvailable then
+      val w2Err = intercept[Throwable](backend.execute(
+        NativeRequest("up-w2x", "upscale", Map("upscaler" -> Str("Waifu2x"), "scale" -> Number(1.5), "image_path" -> Str(sampleImg.toString), "output_dir" -> Str(tmpDir.toString)), None), ctx))
+      assert(w2Err.getMessage.contains("weights not found"), w2Err.toString)
   }
