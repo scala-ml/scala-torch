@@ -110,10 +110,10 @@ class YoloV8Suite extends munit.FunSuite:
     val e=intercept[IllegalStateException](NativeAnnotatorFiles.locate("adetailer/face_yolov8n.safetensors","YOLOv8 face_yolov8n",Map.empty,none))
     assert(e.getMessage.contains("weights not found"))
     val img=new BufferedImage(32,32,BufferedImage.TYPE_INT_RGB)
-    for model <- Seq("nudenet","u2net","opencv_face","face_yolov9c.pt") do
+    for model <- Seq("u2net","opencv_face","face_yolov9c.pt") do
       val u=intercept[NativeBackendError](Adetailer.detect(img,model,0.3))
       assertEquals(u.code,"unsupported");assert(u.getMessage.contains("not implemented"))
-    assert(Adetailer.isImplemented("person_yolov8n-seg.pt") && !Adetailer.isImplemented("nudenet"))
+    assert(Adetailer.isImplemented("person_yolov8n-seg.pt") && Adetailer.isImplemented("nudenet") && !Adetailer.isImplemented("u2net"))
   }
 
   private def relErr(a: Array[Float],ref: Array[Float]): (Double,Double)=

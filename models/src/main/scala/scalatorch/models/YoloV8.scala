@@ -18,6 +18,9 @@ import scalatorch.io.SafeTensorSet
   * shapes (this covers the n/s/m/l/x scales, which differ only by the depth/width multipliers), then EVERY tensor name and shape of the
   * architecture is checked against the file: missing, unknown and mis-shaped tensors are rejected. Conv+BatchNorm are folded at load.
   *
+  * Fused checkpoints (ONNX exports with Conv+BatchNorm already folded, e.g. NudeNet v3 320n, converted by scripts/convert_nudenet_onnx_to_safetensors.py)
+  * carry `conv.weight` + `conv.bias` and no `bn.*`; they load through the same strict name/shape check.
+  *
   * Weights: plain float32 safetensors written once, offline, by scripts/convert_yolov8_to_safetensors.py from the Ultralytics `.pt`
   * pickles (which the repo's PyTorch readers cannot and should not load). The scala side never needs Python.
   *
@@ -35,12 +38,12 @@ final class YoloV8 private (val spec: YoloV8.Spec,run: (Array[Float],Int,Int) =>
     run(chw,height,width)
 
   /** Letterbox + forward + threshold + class-wise NMS + (for segmentation models) masks. Boxes are in input-image pixels. */
-  def detect(image: BufferedImage,conf: Double,iou: Double=0.7,imgsz: Int=640,maxDet: Int=300,withMasks: Boolean=true,cancelled: () => Boolean=()=>false): Result=
-    val lb=letterbox(image,imgsz)
+  def detect(image: BufferedImage,conf: Double,iou: Double=0.7,imgsz: Int=640,maxDet: Int=300,withMasks: Boolean=true,cancelled: () => Boolean=()=>false,squarePad: Boolean=false,agnostic: Boolean=false): Result=
+    val lb=if squarePad then letterboxSquare(image,imgsz) else letterbox(image,imgsz)
     if cancelled() then throw new java.util.concurrent.CancellationException("yolov8 cancelled")
     val raw=forward(lb.chw,lb.height,lb.width)
     val pred=decode(raw,lb.height,lb.width)
-    val kept=nms(pred,conf.toFloat,iou.toFloat,maxDet)
+    val kept=nms(pred,conf.toFloat,iou.toFloat,maxDet,agnostic)
     val w=image.getWidth;val h=image.getHeight
     val boxes=kept.map { i =>
       def cl(v: Double,hi: Int)=math.max(0.0,math.min(hi.toDouble,v))
@@ -83,6 +86,9 @@ object YoloV8:
         used+=name
         set.readFloat(name).toFloatArray
       def convBn(name: String,ci: Int,co: Int,k: Int,s: Int): P=
+        // fused layout (ONNX exports such as NudeNet): conv weight + bias, no BatchNorm tensors
+        if !shapes.contains(name+".bn.weight") && shapes.contains(name+".conv.bias") then
+          return new P(tensor(name+".conv.weight",Seq(co,ci,k,k)),tensor(name+".conv.bias",Seq(co)),ci,co,k,s)
         val w=tensor(name+".conv.weight",Seq(co,ci,k,k));val g=tensor(name+".bn.weight",Seq(co));val be=tensor(name+".bn.bias",Seq(co))
         val mean=tensor(name+".bn.running_mean",Seq(co));val v=tensor(name+".bn.running_var",Seq(co))
         val per=ci*k*k;val fw=new Array[Float](w.length);val fb=new Array[Float](co)
@@ -280,6 +286,18 @@ object YoloV8:
       out(c*oh*ow+(y+top)*ow+x+left)=(v/255.0).toFloat
     Letterboxed(out,oh,ow,r,left,top,right,bottom)
 
+  /** Square preprocessing used by NudeNet v3 (documented behaviour): pad the image with zeros at the bottom/right to a square, resize it
+    * (bilinear, rounded to uint8 like cv2) to `size` x `size`, RGB scaled to 0..1. `gain = size / max(w,h)`; no offsets. */
+  def letterboxSquare(image: BufferedImage,size: Int): Letterboxed=
+    val w=image.getWidth;val h=image.getHeight;val s=math.max(w,h)
+    val sq=new Array[Float](3*s*s)
+    for y <- 0 until h; x <- 0 until w do
+      val c=image.getRGB(x,y);val i=y*s+x
+      sq(i)=((c>>>16)&255).toFloat;sq(s*s+i)=((c>>>8)&255).toFloat;sq(2*s*s+i)=(c&255).toFloat
+    val r=if s==size then sq else DepthAnythingV2.bilinear(sq,3,s,s,size,size,false)
+    val out=r.map(v=>(math.max(0.0,math.min(255.0,math.rint(v.toDouble)))/255.0).toFloat)
+    Letterboxed(out,size,size,size.toDouble/s,0,0,0,0)
+
   /** Decodes the raw outputs: DFL boxes (xyxy, input pixels), sigmoid class scores, mask coefficients. */
   def decode(raw: Raw,inH: Int,inW: Int): Predictions=
     val levels=raw.box.indices
@@ -315,7 +333,7 @@ object YoloV8:
     Predictions(n,box,scores,best,cls,coef,nc)
 
   /** Candidates whose best class score is `>= conf`, then greedy class-wise NMS (IoU `> iou` suppresses), best first, at most `maxDet`. Returns anchor indices. */
-  def nms(p: Predictions,conf: Float,iou: Float,maxDet: Int): Vector[Int]=
+  def nms(p: Predictions,conf: Float,iou: Float,maxDet: Int,agnostic: Boolean=false): Vector[Int]=
     val cand=(0 until p.n).filter(i=>p.score(i)>conf).sortBy(i=>(-p.score(i),i))
     val kept=scala.collection.mutable.ArrayBuffer.empty[Int]
     val it=cand.iterator
@@ -323,7 +341,7 @@ object YoloV8:
       val i=it.next()
       val ax1=p.box(4*i);val ay1=p.box(4*i+1);val ax2=p.box(4*i+2);val ay2=p.box(4*i+3);val aa=(ax2-ax1)*(ay2-ay1)
       val clash=kept.exists { j =>
-        p.cls(j)==p.cls(i) && {
+        (agnostic || p.cls(j)==p.cls(i)) && {
           val iw=math.min(ax2,p.box(4*j+2))-math.max(ax1,p.box(4*j));val ih=math.min(ay2,p.box(4*j+3))-math.max(ay1,p.box(4*j+1))
           val inter=if iw>0f && ih>0f then iw*ih else 0f
           val ba=(p.box(4*j+2)-p.box(4*j))*(p.box(4*j+3)-p.box(4*j+1))

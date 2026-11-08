@@ -56,7 +56,8 @@ object Adetailer:
       masks: Vector[Array[Int]],                      // grayscale 0..255 of size w * h
       confidences: Vector[Double],
       width: Int,
-      height: Int
+      height: Int,
+      classes: Vector[Int] = Vector.empty // detector class index per box (NudeNet: index into NsfwChecker.Labels); empty for single-class detectors
   )
 
   val HfModels: Set[String] = Set(
@@ -88,23 +89,42 @@ object Adetailer:
   private val yoloCache = new java.util.concurrent.ConcurrentHashMap[java.nio.file.Path, YoloV8]()
 
   /** Whether `model` names a detector this runtime implements (YOLOv8 face/hand/person/deepfashion2 checkpoints). */
-  def isImplemented(model: String): Boolean = YoloName.matches(model)
+  def isImplemented(model: String): Boolean = YoloName.matches(model) || model == NudeNetModel
+
+  /** NudeNet v3 (320n) detector id and its converted weights, relative to the annotator folder. NudeNet and its weights are AGPL-3.0
+    * (notAI-tech/NudeNet); this runtime re-implements the documented pre/post-processing and ships no upstream code. */
+  val NudeNetModel = "nudenet"
+  val NudeNetWeights = "nudenet/320n.safetensors"
+  val NudeNetSize = 320
+  val NudeNetNmsIou = 0.45
+
+  /** NudeNet v3: zero-pad to a square, resize to 320, YOLOv8n with 18 classes (indices = NsfwChecker.Labels), best-class score >= `confidence`,
+    * class-agnostic NMS at IoU 0.45. Boxes are box masks; `classes` carries the class index of each box. */
+  private def detectNudeNet(image: BufferedImage, confidence: Double): Detection =
+    val file = scalatorch.models.worker.NativeAnnotatorFiles.locate(NudeNetWeights, "NudeNet v3 320n")
+    val net = yoloCache.computeIfAbsent(file.toAbsolutePath.normalize, f => YoloV8.load(f))
+    require(net.spec.nc == NsfwChecker.Labels.size && !net.spec.segment, s"NudeNet weights must be an 18-class detector (got nc=${net.spec.nc})")
+    val r = net.detect(image, confidence, iou = NudeNetNmsIou, imgsz = NudeNetSize, withMasks = false, squarePad = true, agnostic = true)
+    Detection(r.boxes, boxMasks(image.getWidth, image.getHeight, r.boxes), r.scores, image.getWidth, image.getHeight, r.classes)
 
   /** Detect regions with a real YOLOv8 detector (face/hand/person; `-seg` models give instance masks, others box masks). The weights are
     * `<annotator dir>/adetailer/<name>.safetensors` (SDFX_SCALATORCH_ANNOTATOR_DIR or models/annotators); there is no heuristic fallback:
     * unavailable weights throw IllegalStateException and models without an implementation throw NativeBackendError("unsupported"). */
   def detect(image: BufferedImage, model: String, confidence: Double): Detection =
+    if model == NudeNetModel then return detectNudeNet(image, confidence)
     val stem = model match
       case YoloName(s) => s
       case other =>
         throw new scalatorch.models.worker.NativeBackendError("unsupported",
-          s"detection model '$other' is not implemented (no trained network or weights available in the native runtime); only YOLOv8 face/hand/person models are supported")
+          s"detection model '$other' is not implemented (no trained network or weights available in the native runtime); only YOLOv8 face/hand/person models and nudenet are supported")
     val file = scalatorch.models.worker.NativeAnnotatorFiles.locate(s"adetailer/$stem.safetensors", s"YOLOv8 $stem")
     val net = yoloCache.computeIfAbsent(file.toAbsolutePath.normalize, f => YoloV8.load(f))
     val r = net.detect(image, confidence, withMasks = stem.endsWith("-seg"))
     val boxes = r.boxes
     val masks = r.masks.getOrElse(boxMasks(image.getWidth, image.getHeight, boxes))
     Detection(boxes, masks, r.scores, image.getWidth, image.getHeight)
+
+  private def keepClasses(d: Detection, idx: Seq[Int]): Vector[Int] = if d.classes.isEmpty then Vector.empty else idx.map(d.classes).toVector
 
   def filterByRatio(d: Detection, lo: Double, hi: Double): Detection =
     val area = math.max(1.0, (d.width * d.height).toDouble)
@@ -113,7 +133,7 @@ object Adetailer:
       val r = (x2 - x1) * (y2 - y1) / area
       r >= lo && r <= hi
     }.toVector
-    Detection(keep.map(d.boxes), keep.map(d.masks), keep.map(d.confidences), d.width, d.height)
+    Detection(keep.map(d.boxes), keep.map(d.masks), keep.map(d.confidences), d.width, d.height, keepClasses(d, keep))
 
   def filterKLargest(d: Detection, k: Int): Detection =
     if k <= 0 || d.boxes.size <= k then d
@@ -123,11 +143,11 @@ object Adetailer:
         -((x2 - x1) * (y2 - y1))
       }
       val keep = order.take(k).sorted.toVector
-      Detection(keep.map(d.boxes), keep.map(d.masks), keep.map(d.confidences), d.width, d.height)
+      Detection(keep.map(d.boxes), keep.map(d.masks), keep.map(d.confidences), d.width, d.height, keepClasses(d, keep))
 
   def sortLeftToRight(d: Detection): Detection =
     val order = d.boxes.indices.sortBy(i => (d.boxes(i)._1, d.boxes(i)._2)).toVector
-    Detection(order.map(d.boxes), order.map(d.masks), order.map(d.confidences), d.width, d.height)
+    Detection(order.map(d.boxes), order.map(d.masks), order.map(d.confidences), d.width, d.height, keepClasses(d, order))
 
   def offsetDilate(mask: Array[Int], width: Int, height: Int, x: Int, y: Int, dilateErode: Int): Array[Int] =
     var a = mask.clone()
@@ -713,10 +733,13 @@ object NsfwChecker:
     val minActiveThreshold = cfg.thresholds.min
     if minActiveThreshold >= 1.0f then return None
     val det = Adetailer.detect(img, "nudenet", minActiveThreshold.toDouble)
-    if det.boxes.isEmpty then None
+    // a detection counts only when its own class threshold is met (thresholds of 1.0 switch a category off)
+    val active = det.boxes.indices.filter(i => det.confidences(i) >= cfg.thresholds(det.classes(i)).toDouble)
+    if active.isEmpty then None
     else
-      val expanded = det.boxes.zipWithIndex.map { case ((x1, y1, x2, y2), i) =>
-        val cIdx = i % Labels.size
+      val expanded = active.map { i =>
+        val (x1, y1, x2, y2) = det.boxes(i)
+        val cIdx = det.classes(i)
         val eh = cfg.expandHorizontal(cIdx).toDouble
         val ev = cfg.expandVertical(cIdx).toDouble
         val w = (x2 - x1) * eh
@@ -724,7 +747,7 @@ object NsfwChecker:
         val cx = (x1 + x2) / 2.0
         val cy = (y1 + y2) / 2.0
         (cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
-      }
+      }.toVector
       Some(drawMaskShape(img.getWidth, img.getHeight, expanded, cfg.maskShape, cfg.rectangleRoundRadius))
 
   /** Run final generation censoring; returns `(censoredImage, Vector[(suffix, auxiliaryImage)])`. */

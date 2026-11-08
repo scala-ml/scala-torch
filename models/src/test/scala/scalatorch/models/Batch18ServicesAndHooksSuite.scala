@@ -94,10 +94,11 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
       assertEquals(out.getHeight, 64)
 
     val cfg = NsfwChecker.NsfwConfig(genFilterType = "Fill color", fillColor = "#000000", saveBeforeCensor = true, saveMask = true)
-    // the NudeNet detector has no native implementation: region detection must fail loudly instead of guessing
-    val unsupported = intercept[NativeBackendError](NsfwChecker.censorFinal(img, cfg))
-    assertEquals(unsupported.code, "unsupported")
-    assert(unsupported.getMessage.contains("nudenet") && unsupported.getMessage.contains("not implemented"))
+    // the NudeNet detector needs its converted weights (NudeNetSuite covers real detections): without them the checker fails loudly, never guesses
+    val nudenetMissing = scalatorch.models.worker.NativeAnnotatorFiles.candidates(Adetailer.NudeNetWeights).forall(!Files.isRegularFile(_))
+    if nudenetMissing then
+      val missing = intercept[IllegalStateException](NsfwChecker.censorFinal(img, cfg))
+      assert(missing.getMessage.contains("NudeNet") && missing.getMessage.contains("weights not found"))
     // with the detector switched off the checker is a no-op
     val (passthrough, noAux) = NsfwChecker.censorFinal(img, cfg.copy(nudenet = false))
     assertEquals(passthrough.getWidth, 64)
@@ -107,7 +108,7 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
     val srcFile = tmpDir.resolve("input.png")
     ImageIO.write(img, "png", srcFile.toFile)
     val backend = makeBackend()
-    val nsfwErr = intercept[Throwable](backend.execute(
+    def runChecker() = backend.execute(
       NativeRequest("1", "image_tool", Map(
         "tool" -> Str("nsfw_checker"),
         "image_path" -> Str(srcFile.toString),
@@ -116,8 +117,9 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
         "output_mask" -> Bool(true)
       ), None),
       makeWorkContext()
-    ))
-    assert(nsfwErr.getMessage.contains("not implemented"), nsfwErr.toString)
+    )
+    if nudenetMissing then assert(intercept[Throwable](runChecker()).getMessage.contains("weights not found"))
+    else runChecker()
   }
 
   test("AestheticScore and additional image tools (person_mask, remove_background, depth_mask, waifu2x) work") {
