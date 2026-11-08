@@ -233,7 +233,7 @@ object DepthAnythingV2:
   private[models] def parallel(n: Int)(f: Int => Unit): Unit=
     java.util.stream.IntStream.range(0,n).parallel().forEach(i=>f(i))
 
-  private def gelu(v: Float): Float=(0.5*v*(1.0+erf(v/math.sqrt(2.0)))).toFloat
+  private[models] def gelu(v: Float): Float=(0.5*v*(1.0+erf(v/math.sqrt(2.0)))).toFloat
 
   /** erf to ~1e-12 (Taylor series for small, continued fraction for large arguments). */
   private def erf(x: Double): Double=

@@ -821,12 +821,19 @@ object AestheticScore:
   final case class NumericScore(value: Double) extends ScoreValue
   final case class DistributionScore(probs: Vector[(String, Double)]) extends ScoreValue
 
-  /** The previous implementation derived "scores" from contrast / saturation / edge statistics, which is not any of
-    * the real scorers (improved aesthetic predictor on CLIP ViT-L/14, simulacra aesthetic models, cafe ViT classifiers).
-    * Until those networks are implemented the scorers fail loudly instead of returning invented numbers. */
+  /** Runs the real scorers (see [[AestheticModels]]): `improved` = LAION improved aesthetic predictor (CLIP ViT-L/14 + MLP, rounded to 0.1),
+    * `simulacra_l14` / `simulacra_b16` = Simulacra aesthetic models (rounded to 0.01), `cafe_*` = cafeai BEiT classifiers (probabilities rounded
+    * to 4 places). Missing weights throw IllegalStateException ("weights not found"); nothing is invented. */
   def scoreImage(image: BufferedImage, cfg: AestheticScoreConfig): Vector[(String, ScoreValue)] =
-    throw new scalatorch.models.worker.NativeBackendError("unsupported",
-      s"aesthetic scorers ${cfg.scorers.mkString(", ")} are not implemented (the CLIP ViT-L/14 predictor and the cafe classifiers are missing in the native runtime)")
+    cfg.scorers.map {
+      case "improved" =>
+        "improved" -> NumericScore(math.rint(AestheticModels.improved(image) * 10.0) / 10.0)
+      case name if name.startsWith("simulacra_") =>
+        name -> NumericScore(math.rint(AestheticModels.simulacra(image, name.stripPrefix("simulacra_")) * 100.0) / 100.0)
+      case name =>
+        val probs = AestheticModels.cafe(image, name, CafeLabels(name))
+        name -> DistributionScore(probs.map((l, p) => l -> math.rint(p * 10000.0) / 10000.0))
+    }
 
   def infotextFields(scores: Vector[(String, ScoreValue)]): Vector[(String, String)] =
     scores.map {

@@ -10,6 +10,7 @@ import scalatorch.models.worker.NativeBackendError
 import scalatorch.models.worker.NativeJson.*
 
 final class Batch18ServicesAndHooksSuite extends FunSuite:
+  override val munitTimeout: scala.concurrent.duration.Duration = scala.concurrent.duration.Duration(3, "minutes") // real aesthetic scorers run CPU transformers when their weights are present
 
   private def tinyModelRoot: Path =
     Seq(
@@ -134,8 +135,24 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
       generationFields = true,
       hash = true
     )
-    // The scorers are not implemented (no invented numbers): they must fail loudly; formatting is checked on literal scores.
-    assert(intercept[scalatorch.models.worker.NativeBackendError](AestheticScore.scoreImage(img, aCfg)).getMessage.contains("not implemented"))
+    // Real scorers: with the weights present they run (value ranges are checked here, parity lives in AestheticModelsSuite); without them they
+    // fail loudly with "weights not found" (no invented numbers). Formatting is checked on literal scores below.
+    val aestheticFiles = Vector(AestheticModels.ClipLargeFile, AestheticModels.ImprovedFile, AestheticModels.simulacraFile("l14"),
+      AestheticModels.cafeFile("cafe_aesthetic"), AestheticModels.cafeFile("cafe_style"), AestheticModels.cafeFile("cafe_waifu"))
+    val aestheticWeights = aestheticFiles.forall(f => scalatorch.models.worker.NativeAnnotatorFiles.candidates(f).exists(Files.isRegularFile(_)))
+    if aestheticWeights then
+      val real = AestheticScore.scoreImage(img, aCfg)
+      assertEquals(real.map(_._1), aCfg.scorers)
+      real.foreach {
+        case ("improved", AestheticScore.NumericScore(v)) => assert(v > -5.0 && v < 15.0, s"improved $v")
+        case (n, AestheticScore.NumericScore(v)) => assert(n.startsWith("simulacra_") && v > -5.0 && v < 15.0, s"$n $v")
+        case (n, AestheticScore.DistributionScore(ps)) =>
+          assertEquals(ps.map(_._1), AestheticScore.CafeLabels(n))
+          assertEqualsDouble(ps.map(_._2).sum, 1.0, 1e-3)
+      }
+    else
+      val err = intercept[IllegalStateException](AestheticScore.scoreImage(img, aCfg))
+      assert(err.getMessage.contains("weights not found"), err.toString)
     val scores = Vector[(String, AestheticScore.ScoreValue)](
       "improved" -> AestheticScore.NumericScore(5.0), "simulacra_l14" -> AestheticScore.NumericScore(5.1),
       "cafe_aesthetic" -> AestheticScore.DistributionScore(Vector("not_aesthetic" -> 0.4, "aesthetic" -> 0.6)),
@@ -171,7 +188,11 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
       val pmErr = intercept[Throwable](backend.execute(toolReq("person_mask"), ctx))
       assert(pmErr.getMessage.contains("weights not found"), pmErr.toString)
 
-    for toolName <- Vector("waifu2x") ++ (if sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") then Vector("depth_mask") else Vector.empty) ++ (if personWeights then Vector("person_mask") else Vector.empty) ++ (if u2Weights then Vector("remove_background") else Vector.empty) do
+    if !aestheticWeights then
+      val aeErr = intercept[Throwable](backend.execute(toolReq("aesthetic_score"), ctx))
+      assert(aeErr.getMessage.contains("weights not found"), aeErr.toString)
+
+    for toolName <- Vector("waifu2x") ++ (if aestheticWeights then Vector("aesthetic_score") else Vector.empty) ++ (if sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") then Vector("depth_mask") else Vector.empty) ++ (if personWeights then Vector("person_mask") else Vector.empty) ++ (if u2Weights then Vector("remove_background") else Vector.empty) do
       val extra = if toolName == "waifu2x" then Map("scale" -> Number(2.0)) else Map.empty[String, NativeJson]
       val r = backend.execute(
         NativeRequest(s"tool-$toolName", "image_tool", Map(
@@ -399,7 +420,7 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
           "sampler_name" -> Str("Euler"),
           "hooks" -> Obj(Map(
             // adetailer (needs the YOLOv8 face weights) and nsfw_checker (NudeNet, not implemented) fail loudly and are covered separately
-            // aesthetic_score is not implemented either (no invented numbers) and fails loudly
+            // aesthetic_score needs the real CLIP ViT-L/14 weights (about 1.2 GB, tens of seconds on the CPU): covered by the image-tool test, left out of this 30 s test
             "face_restore" -> Obj(Map("enabled" -> Bool(true), "visibility" -> Number(0.5)))
           ))
         ))
