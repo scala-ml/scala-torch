@@ -12,7 +12,7 @@ private[ffm] final class CudaAllocation(val address: Long,val bytes: Long):
 
 /** Independently releasable packed Float32 handle; reshape may share an allocation. */
 final class CudaTensor private[ffm] (private[ffm] val session: CudaSession,
-    val shape: Shape, private[ffm] val allocation: CudaAllocation) extends AutoCloseable:
+    val shape: Shape, private[ffm] val allocation: CudaAllocation,val half: Boolean=false) extends AutoCloseable:
   private[ffm] def address: Long = allocation.address
   private[ffm] var released=false
   def toCpu: Tensor[Float] = session.download(this)
@@ -57,6 +57,18 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   private val kernels=Seq("geglu","geglu_fast","f32_to_f16","broadcast_add5","transpose5","softmax_par","gelu_erf","quick_gelu","broadcast_add","concat_copy","resize_nearest","groupnorm","groupnorm_stats","groupnorm_stats_par","groupnorm_apply","conv2d","conv2d_fast","im2col","adamw_update","finite_status","cross_entropy_stats","cross_entropy_output","cross_entropy_gradient","binary","scale","fill","sum","expand_scalar","silu","leaky_relu","rmsnorm","rms_input_backward","rms_inverse","rms_weight_backward","transpose","embedding","embedding_backward","rope","attention","attention_scores","attention_prepare","attention_output","attention_fused_fp32","attention_fused_multiquery_fp32","attention_scores_fp32","attention_prepare_fp32","attention_output_fp32","attention_backward","attention_gradient_cast","cache_append").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),opsModule,driver.arena.allocateFrom(name))
   }.toMap
+  private lazy val halfModule=
+    val halfPtx=Using.resource(getClass.getResourceAsStream("/scalatorch/half.ptx")) { input =>
+      require(input != null,"half PTX resource missing")
+      new String(input.readAllBytes(),UTF_8)
+    }
+    val loaded=driver.loadModule(halfPtx)
+    driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),loaded) }
+    loaded
+  private lazy val halfKernels=Seq("h_f32_to_f16","h_f16_to_f32","h_fill","h_add","h_add5","h_scale","h_silu","h_geglu","h_transpose5",
+      "h_concat","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_im2col","h_softmax").map { name =>
+    name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),halfModule,driver.arena.allocateFrom(name))
+  }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
   driver.cleanup { driver.call("cuStreamDestroy_v2",Seq(ADDRESS),stream) }
   private val cublas: Option[Cublas]=Cublas.open(driver.arena,stream,action => driver.cleanup(action()))
@@ -89,24 +101,24 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   def allocatedBytes: Long = { check();used }
   def shape(value: CudaTensor): Shape = { validate(value);value.shape }
 
-  private def allocate(shape: Shape): CudaTensor =
+  private def allocate(shape: Shape,half: Boolean=false): CudaTensor =
     check()
     require(shape.numel <= Int.MaxValue,"CUDA tensor exceeds Int indexing")
-    val bytes=math.max(shape.numel*4,1L)
+    val bytes=math.max(shape.numel*(if half then 2L else 4L),1L)
     require(bytes <= maxBytes-used,"CUDA session allocation budget exceeded")
     val address=Using.resource(Arena.ofConfined()) { arena =>
       val result=arena.allocate(JAVA_LONG)
       driver.call("cuMemAlloc_v2",Seq(ADDRESS,JAVA_LONG),result,Long.box(bytes))
       result.get(JAVA_LONG,0)
     }
-    val tensor=new CudaTensor(this,shape,new CudaAllocation(address,bytes))
+    val tensor=new CudaTensor(this,shape,new CudaAllocation(address,bytes),half)
     live+=tensor;used+=bytes
     tensor
 
   def reshape(value: CudaTensor,shape: Shape): CudaTensor =
     validate(value)
     require(value.shape.numel==shape.numel,"reshape changes element count")
-    val view=new CudaTensor(this,shape,value.allocation)
+    val view=new CudaTensor(this,shape,value.allocation,value.half)
     value.allocation.references+=1
     live+=view
     view
@@ -293,7 +305,8 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val keyShape=Shape.from(key.shape.dims.updated(2,tokens))
     val valueShape=Shape.from(value.shape.dims.updated(2,tokens))
     val (output,scores)=AttentionLayout.validate(query.shape,keyShape,valueShape,queryStart,maxScores)
-    if output.numel==0 then return allocate(output)
+    if output.numel==0 then return allocate(output,query.half)
+    if query.half then return attentionHalf(query,key,value,output,causal)
     if causal then require(scores*2<=Int.MaxValue,"attention Double workspace exceeds Int indexing")
     val q=query.shape.dims;val k=keyShape.dims;val v=valueShape.dims
     val rows=output.numel/v(3)
@@ -472,7 +485,9 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val values=inputs.toVector
     values.foreach(validate)
     val output=ConcatLayout.outputShape(values.map(_.shape),dim)
-    val result=allocate(output)
+    val half=values.nonEmpty && values.head.half
+    require(values.forall(_.half==half),"cat needs one element type")
+    val result=allocate(output,half)
     try
       if output.numel>0 then
         val suffix=Shape.from(output.dims.drop(dim+1)).numel
@@ -481,7 +496,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
         values.foreach { value =>
           val chunk=value.shape.dims(dim)*suffix
           if value.shape.numel>0 then
-            launch(value.shape.numel,kernels("concat_copy")) { arena =>
+            launch(value.shape.numel,if half then halfKernels("h_concat") else kernels("concat_copy"),label=if half then "h_concat" else "concat_copy") { arena =>
               Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
                 Seq(value.shape.numel.toInt,chunk.toInt,rowWidth.toInt,offset.toInt)
                   .map(v => arena.allocateFrom(JAVA_INT,v))
@@ -497,6 +512,12 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   def resizeNearest2d(input: CudaTensor,height: Int,width: Int,mode: NearestMode=NearestMode.Floor): CudaTensor =
     validate(input)
     val output=Resize2d.outputShape(input.shape,height,width)
+    if input.half then
+      require(mode==NearestMode.Floor,"Float16 resize supports floor mode only")
+      return hexecute(output,output.numel,"h_resize_nearest") { (arena,result) =>
+        Seq(input.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+          Seq(output.numel.toInt,input.shape.dims(2).toInt,input.shape.dims(3).toInt,height,width).map(v => arena.allocateFrom(JAVA_INT,v))
+      }
     execute(output,output.numel,kernels("resize_nearest")) { (arena,result) =>
       Seq(input.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
         Seq(output.numel.toInt,input.shape.dims(2).toInt,input.shape.dims(3).toInt,height,width,
@@ -510,16 +531,17 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     if dim0==dim1 then return reshape(value,value.shape)
     def swap[A](v: Vector[A]) = v.updated(dim0,v(dim1)).updated(dim1,v(dim0))
     val output=Shape.from(swap(dims))
-    if output.numel==0 then return allocate(output)
+    if output.numel==0 then return allocate(output,value.half)
     // Nonempty allocated tensors have Int-bounded dimensions and contiguous strides. Swapping axes lo<hi of
     // [outer,X,mid,Y,inner] gives [outer,Y,mid,X,inner]; only the sizes are passed, so no device metadata is needed.
     val lo=math.min(dim0,dim1);val hi=math.max(dim0,dim1)
     val x=dims(lo);val y=dims(hi)
     val mid=dims.slice(lo+1,hi).product;val inner=dims.drop(hi+1).product
-    execute(output,output.numel,kernels("transpose5"),threadsPerBlock=256) { (arena,result) =>
+    val transposeArgs=(arena: Arena,result: CudaTensor) =>
       Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
         Seq(output.numel,x,mid,y,inner).map(v => arena.allocateFrom(JAVA_INT,v.toInt))
-    }
+    if value.half then hexecute(output,output.numel,"h_transpose5")(transposeArgs)
+    else execute(output,output.numel,kernels("transpose5"),threadsPerBlock=256)(transposeArgs)
 
   def embedding(table: CudaTensor,indices: Tensor[Long]): CudaTensor =
     validate(table)
@@ -557,6 +579,90 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       }
     }
 
+  // ---- Float16 activations: storage __half, Float32 arithmetic (kernels in half.cu) ----
+  private def hexecute(output: Shape,count: Long,name: String,threadsPerBlock: Int=256)
+      (arguments: (Arena,CudaTensor) => Seq[MemorySegment]): CudaTensor =
+    val result=allocate(output,half=true)
+    try
+      launch(count,halfKernels(name),threadsPerBlock,1,name)(arena => arguments(arena,result))
+      result
+    catch case error: Throwable =>
+      try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
+  /** Float32 to Float16 copy of the same shape. */
+  def castToHalf(value: CudaTensor): CudaTensor =
+    validate(value)
+    require(!value.half,"tensor is already Float16")
+    hexecute(value.shape,value.shape.numel,"h_f32_to_f16") { (arena,result) =>
+      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) :+ arena.allocateFrom(JAVA_INT,value.shape.numel.toInt)
+    }
+
+  /** Float16 to Float32 copy of the same shape. */
+  def castToFloat(value: CudaTensor): CudaTensor =
+    validate(value)
+    require(value.half,"tensor is not Float16")
+    val result=allocate(value.shape)
+    try
+      launch(value.shape.numel,halfKernels("h_f16_to_f32"),256,1,"h_f16_to_f32") { arena =>
+        Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) :+ arena.allocateFrom(JAVA_INT,value.shape.numel.toInt)
+      }
+      result
+    catch case error: Throwable =>
+      try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
+  /** Uploads Float32 host data and stores it on the device as Float16. */
+  def uploadHalf(source: Tensor[Float]): CudaTensor = Using.resource(upload(source))(castToHalf)
+
+  def fillHalf(shape: Shape,value: Float): CudaTensor =
+    hexecute(shape,shape.numel,"h_fill") { (arena,result) =>
+      Seq(arena.allocateFrom(JAVA_LONG,result.address),arena.allocateFrom(JAVA_INT,shape.numel.toInt),arena.allocateFrom(JAVA_FLOAT,value))
+    }
+
+  /** Non-causal attention over [batch, heads, tokens, width] Float16 tensors via cuBLAS and a block softmax. */
+  private def attentionHalf(query: CudaTensor,key: CudaTensor,value: CudaTensor,output: Shape,causal: Boolean): CudaTensor =
+    require(!causal,"Float16 attention is non-causal only")
+    require(cublas.isDefined,"Float16 attention requires cuBLAS")
+    require(key.half && value.half,"Float16 attention needs Float16 key and value")
+    val q=query.shape.dims;val k=key.shape.dims;val v=value.shape.dims
+    require(q(1)==k(1) && q(1)==v(1) && q(0)==k(0) && q(0)==v(0) && q(3)==k(3),"Float16 attention needs equal head counts")
+    val batch=(q(0)*q(1)).toInt;val qt=q(2).toInt;val kt=k(2).toInt;val d=q(3).toInt;val dv=v(3).toInt
+    val result=allocate(output,half=true)
+    try
+      val perBatch=qt.toLong*kt*2
+      val budget=math.min(2147483648L,maxBytes-used)
+      val chunk=math.max(1L,math.min(batch.toLong,budget/perBatch)).toInt
+      val scale=(1.0/math.sqrt(d.toDouble)).toFloat
+      Using.resource(allocate(Shape.from(Seq(chunk.toLong*qt*kt)),half=true)) { scratch =>
+        var start=0
+        while start<batch do
+          val n=math.min(chunk,batch-start)
+          val qa=query.address+start.toLong*qt*d*2
+          val ka=key.address+start.toLong*kt*d*2
+          val va=value.address+start.toLong*kt*dv*2
+          val ra=result.address+start.toLong*qt*dv*2
+          val started=if profileEnabled then System.nanoTime() else 0L
+          cublas.get.gemmHalfStridedBatched(1,0,kt,qt,d,scale,ka,d,kt.toLong*d,qa,d,qt.toLong*d,scratch.address,kt,qt.toLong*kt,n)
+          if profileEnabled then
+            driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+            record("half_attention_scores",started)
+          launch(n.toLong*qt,halfKernels("h_softmax"),256,256,"h_softmax") { arena =>
+            Seq(arena.allocateFrom(JAVA_LONG,scratch.address),arena.allocateFrom(JAVA_INT,(n.toLong*qt).toInt),arena.allocateFrom(JAVA_INT,kt))
+          }
+          val started2=if profileEnabled then System.nanoTime() else 0L
+          cublas.get.gemmHalfStridedBatched(0,0,dv,qt,kt,1f,va,dv,kt.toLong*dv,scratch.address,kt,qt.toLong*kt,ra,dv,qt.toLong*dv,n)
+          if profileEnabled then
+            driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+            record("half_attention_output",started2)
+          start+=n
+        driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+      }
+      result
+    catch case error: Throwable =>
+      try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
   def upload(source: Tensor[Float]): CudaTensor =
     val started=if profileEnabled then System.nanoTime() else 0L
     val allocationStarted=if profileEnabled then System.nanoTime() else 0L
@@ -587,6 +693,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
 
   def download(tensor: CudaTensor): Tensor[Float] =
     validate(tensor)
+    if tensor.half then return Using.resource(castToFloat(tensor))(download)
     val values=Using.resource(Arena.ofConfined()) { arena =>
       val host=arena.allocate(tensor.shape.numel*4,4)
       if tensor.shape.numel > 0 then
@@ -623,6 +730,20 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     require(cublas.isDefined,"matmulTransposedB requires cuBLAS")
     require(x.shape.rank==2 && w.shape.rank==2 && x.shape.dims(1)==w.shape.dims(1),"CUDA GEMM shape mismatch")
     val m=x.shape.dims(0).toInt;val k=x.shape.dims(1).toInt;val n=w.shape.dims(0).toInt
+    if x.half then
+      require(w.half,"Float16 GEMM needs a Float16 weight")
+      val half=allocate(Shape.from(Seq(m.toLong,n.toLong)),half=true)
+      try
+        if m>0 && n>0 && k>0 then
+          val started=if profileEnabled then System.nanoTime() else 0L
+          cublas.get.gemmHalfRowMajorBT(m,n,k,x.address,w.address,half.address)
+          if profileEnabled then
+            driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+            record(s"half_gemm_bt[$m,$n,$k]",started)
+        return half
+      catch case error: Throwable =>
+        try half.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+        throw error
     val result=allocate(Shape.from(Seq(m.toLong,n.toLong)))
     try
       if m>0 && n>0 && k>0 then
@@ -688,6 +809,12 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   private def binary(a: CudaTensor,b: CudaTensor,op: Int): CudaTensor =
     validate(a);validate(b)
     require(a.shape==b.shape,"backend arithmetic requires equal shapes")
+    require(a.half==b.half,"arithmetic needs one element type")
+    if a.half then
+      require(op==0,"Float16 supports addition only")
+      return hexecute(a.shape,a.shape.numel,"h_add") { (arena,result) =>
+        Seq(a.address,b.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) :+ arena.allocateFrom(JAVA_INT,a.shape.numel.toInt)
+      }
     execute(a.shape,a.shape.numel,kernels("binary")) { (arena,result) =>
       Seq(a.address,b.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
         Seq(a.shape.numel.toInt,op).map(v => arena.allocateFrom(JAVA_INT,v))
@@ -696,6 +823,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   /** NumPy-style trailing-axis broadcasting, without materializing expanded operands. */
   def addBroadcast(a: CudaTensor,b: CudaTensor): CudaTensor =
     validate(a);validate(b)
+    require(a.half==b.half,"broadcast add needs one element type")
     if a.shape==b.shape then return add(a,b)
     val rank=math.max(a.shape.rank,b.shape.rank)
     def padded(s: Shape)=Vector.fill(rank-s.rank)(1L)++s.dims
@@ -705,15 +833,17 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       if x==1 then y else x
     })
     require(output.numel<=Int.MaxValue,"broadcast output exceeds Int indexing")
-    if output.numel==0 then return allocate(output)
+    if output.numel==0 then return allocate(output,a.half)
     def strides(ds: Vector[Long])=ds.scanRight(1L)(_ * _).tail.zip(ds).map((s,d) => if d==1 then 0L else s)
     if rank<=5 then
       def lead(v: Vector[Long],fill: Long)=Vector.fill(5-rank)(fill)++v
       val dimsP=lead(output.dims,1L);val aS=lead(strides(ad),0L);val bS=lead(strides(bd),0L)
-      return execute(output,output.numel,kernels("broadcast_add5"),threadsPerBlock=256) { (arena,result) =>
+      val broadcastArgs=(arena: Arena,result: CudaTensor) =>
         Seq(a.address,b.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
           (Vector(output.numel)++dimsP++aS++bS).map(v => arena.allocateFrom(JAVA_INT,v.toInt))
-      }
+      return if a.half then hexecute(output,output.numel,"h_add5")(broadcastArgs)
+        else execute(output,output.numel,kernels("broadcast_add5"),threadsPerBlock=256)(broadcastArgs)
+    require(!a.half,"Float16 broadcast supports up to five axes")
     withInts((output.dims++strides(ad)++strides(bd)).map(_.toInt).toArray) { metadata =>
       execute(output,output.numel,kernels("broadcast_add")) { (arena,result) =>
         Seq(a.address,b.address,result.address,metadata).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
@@ -727,6 +857,10 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       input.shape.dims.last<=Int.MaxValue,"GEGLU requires a positive even final width")
     val width=input.shape.dims.last/2
     val output=Shape.from(input.shape.dims.updated(input.shape.rank-1,width))
+    if input.half then return hexecute(output,output.numel,"h_geglu") { (arena,result) =>
+      Seq(input.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+        Seq(output.numel.toInt,width.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
+    }
     execute(output,output.numel,kernels(if fast then "geglu_fast" else "geglu")) { (arena,result) =>
       Seq(input.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
         Seq(output.numel.toInt,width.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
@@ -751,6 +885,10 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     }
   def scale(value: CudaTensor,scalar: Float): CudaTensor =
     validate(value)
+    if value.half then return hexecute(value.shape,value.shape.numel,"h_scale") { (arena,result) =>
+      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+        Seq(arena.allocateFrom(JAVA_INT,value.shape.numel.toInt),arena.allocateFrom(JAVA_FLOAT,scalar))
+    }
     execute(value.shape,value.shape.numel,kernels("scale")) { (arena,result) =>
       Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
         Seq(arena.allocateFrom(JAVA_INT,value.shape.numel.toInt),arena.allocateFrom(JAVA_FLOAT,scalar))
@@ -769,6 +907,59 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val dimensions=Array(g.ci,g.h,g.w,g.co,g.cg,g.kh,g.kw,g.oh,g.ow,
       config.stride._1,config.stride._2,config.padding._1,config.padding._2,
       config.dilation._1,config.dilation._2,config.groups,g.n)
+    if fast && input.half then
+      require(weight.half && cublas.isDefined,"Float16 convolution needs a Float16 weight and cuBLAS")
+      val spatial=g.oh.toLong*g.ow
+      val k=g.cg.toLong*g.kh*g.kw
+      val outputChannelsPerGroup=g.co/config.groups
+      val direct=g.kh==1 && g.kw==1 && config.stride==((1,1)) && config.padding==((0,0)) && config.dilation==((1,1))
+      val output=allocate(g.shape,half=true)
+      try
+        def gemm(batch: Int,group: Int,inputAddress: Long,ldb: Int,positions: Int,positionStart: Long): Unit =
+          val weightOffset=group.toLong*outputChannelsPerGroup*k*2
+          val outputOffset=((batch.toLong*g.co+group.toLong*outputChannelsPerGroup)*spatial+positionStart)*2
+          val started=if profileEnabled then System.nanoTime() else 0L
+          cublas.get.gemmHalfRowMajor(outputChannelsPerGroup,positions,k.toInt,weight.address+weightOffset,k.toInt,
+            inputAddress,ldb,output.address+outputOffset,spatial.toInt)
+          if profileEnabled then
+            driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+            record(s"half_conv_gemm[$outputChannelsPerGroup,$positions,$k]",started)
+        if direct then
+          var batch=0
+          while batch<g.n do
+            var group=0
+            while group<config.groups do
+              gemm(batch,group,input.address+(batch.toLong*g.ci+group.toLong*g.cg)*spatial*2,spatial.toInt,spatial.toInt,0L)
+              group+=1
+            batch+=1
+        else
+          val positionsPerChunk=math.min(spatial,math.min(134217728L,(maxBytes-used)/2)/k)
+          require(positionsPerChunk>0,"CUDA session budget cannot hold one im2col position")
+          Using.resource(allocate(Shape.from(Seq(k,positionsPerChunk)),half=true)) { columns =>
+            var batch=0
+            while batch<g.n do
+              var group=0
+              while group<config.groups do
+                var positionStart=0L
+                while positionStart<spatial do
+                  val positions=math.min(positionsPerChunk,spatial-positionStart)
+                  val count=k*positions
+                  launch(count,halfKernels("h_im2col"),label="h_im2col",threadsPerBlock=256) { arena =>
+                    Seq(input.address,columns.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+                      Seq(count.toInt,g.ci,g.h,g.w,g.cg,g.kh,g.kw,g.oh,g.ow,config.stride._1,config.stride._2,
+                        config.padding._1,config.padding._2,config.dilation._1,config.dilation._2,
+                        batch,group,positionStart.toInt,positions.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
+                  }
+                  gemm(batch,group,columns.address,positions.toInt,positions.toInt,positionStart)
+                  positionStart+=positions
+                group+=1
+              batch+=1
+          }
+        driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+        return output
+      catch case error: Throwable =>
+        try output.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+        throw error
     if fast then
       val spatial=g.oh.toLong*g.ow
       val k=g.cg.toLong*g.kh*g.kw
@@ -830,6 +1021,19 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       require(value.shape==Shape.from(Seq(channels)),"GroupNorm affine shape mismatch")
     }
     val rows=input.shape.numel/width
+    if input.half then
+      Seq(weight,bias).flatten.foreach(p => require(p.half,"Float16 GroupNorm needs Float16 affine parameters"))
+      return Using.resource(allocate(Shape.from(Seq(rows*2)))) { stats =>
+        launch(rows,halfKernels("h_groupnorm_stats"),threadsPerBlock=256,threadsPerOutput=256,label="h_groupnorm_stats") { arena =>
+          Seq(input.address,stats.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+            Seq(rows.toInt,width).map(v => arena.allocateFrom(JAVA_INT,v)) :+ arena.allocateFrom(JAVA_FLOAT,epsilon.toFloat)
+        }
+        hexecute(input.shape,input.shape.numel,"h_groupnorm_apply") { (arena,result) =>
+          Seq(input.address,weight.fold(0L)(_.address),bias.fold(0L)(_.address),result.address,stats.address)
+            .map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+            Seq(input.shape.numel.toInt,width,channels.toInt,spatial.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
+        }
+      }
     if width>=4096 && rows*16<=maxBytes-used-input.shape.numel*4 then
       Using.resource(allocate(Shape.from(Seq(rows*4)))) { stats =>
         launch(rows,kernels("groupnorm_stats_par"),threadsPerBlock=256,threadsPerOutput=256,label="groupnorm_stats_par") { arena =>
@@ -862,6 +1066,9 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
 
   def silu(value: CudaTensor): CudaTensor =
     validate(value)
+    if value.half then return hexecute(value.shape,value.shape.numel,"h_silu") { (arena,result) =>
+      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) :+ arena.allocateFrom(JAVA_INT,value.shape.numel.toInt)
+    }
     execute(value.shape,value.shape.numel,kernels("silu")) { (arena,result) =>
       Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
         Seq(arena.allocateFrom(JAVA_INT,value.shape.numel.toInt),arena.allocateFrom(JAVA_LONG,0L),arena.allocateFrom(JAVA_INT,0))

@@ -27,4 +27,4 @@ object CudaUNet:
     * operation. Activations stay resident; transfers trade throughput for VRAM.
     */
   def upload(session: CudaSession,model: ConditionalUNet2d,cancelled: () => Boolean=() => false,offloadWeights: Boolean=false): CudaUNet =
-    new CudaUNet(session,CudaDiffusionRuntime.upload(session,model,cancelled,offloadWeights),model)
+    new CudaUNet(session,CudaDiffusionRuntime.upload(session,model,cancelled,offloadWeights,half=CudaDiffusionRuntime.fp16Default),model)

@@ -8,7 +8,7 @@ import java.nio.file.{Files, Path, Paths}
 /** Optional cuBLAS SGEMM, loaded at run time from the CUDA Toolkit. Absent or unusable libraries return None
   * so callers keep the built-in kernels. TF32 tensor-core math is opt-in (`SCALATORCH_CUDA_TF32=1`).
   */
-private[ffm] final class Cublas private (handle: MemorySegment,sgemmHandle: MethodHandle,batchedHandle: MethodHandle,gemmExHandle: MethodHandle,arena: Arena):
+private[ffm] final class Cublas private (handle: MemorySegment,sgemmHandle: MethodHandle,batchedHandle: MethodHandle,gemmExHandle: MethodHandle,gemmExBatchedHandle: MethodHandle,arena: Arena):
   private val alpha=arena.allocate(JAVA_FLOAT); alpha.set(JAVA_FLOAT,0,1f)
   private val beta=arena.allocate(JAVA_FLOAT); beta.set(JAVA_FLOAT,0,0f)
   /** Row-major C[m,n] = A[m,k] * B[k,n] with leading dimensions lda, ldb, ldc (column-major trick). */
@@ -40,6 +40,33 @@ private[ffm] final class Cublas private (handle: MemorySegment,sgemmHandle: Meth
       MemorySegment.ofAddress(c),Int.box(0),Int.box(n),Int.box(68),Int.box(99)).asInstanceOf[Integer].intValue()
     if status!=0 then throw IllegalStateException(s"cublasGemmEx failed with status $status")
 
+  /** Row-major C[m,n] = A[m,k] * B[k,n], all Float16, Float32 accumulation (tensor cores). */
+  def gemmHalfRowMajor(m: Int,n: Int,k: Int,a: Long,lda: Int,b: Long,ldb: Int,c: Long,ldc: Int): Unit =
+    val status=gemmExHandle.invokeWithArguments(handle,Int.box(0),Int.box(0),Int.box(n),Int.box(m),Int.box(k),alpha,
+      MemorySegment.ofAddress(b),Int.box(2),Int.box(ldb),MemorySegment.ofAddress(a),Int.box(2),Int.box(lda),beta,
+      MemorySegment.ofAddress(c),Int.box(2),Int.box(ldc),Int.box(68),Int.box(99)).asInstanceOf[Integer].intValue()
+    if status!=0 then throw IllegalStateException(s"cublasGemmEx (half) failed with status $status")
+
+  /** Row-major C[m,n] = A[m,k] * W[n,k]^T, all Float16, Float32 accumulation. */
+  def gemmHalfRowMajorBT(m: Int,n: Int,k: Int,a: Long,w: Long,c: Long): Unit =
+    val status=gemmExHandle.invokeWithArguments(handle,Int.box(1),Int.box(0),Int.box(n),Int.box(m),Int.box(k),alpha,
+      MemorySegment.ofAddress(w),Int.box(2),Int.box(k),MemorySegment.ofAddress(a),Int.box(2),Int.box(k),beta,
+      MemorySegment.ofAddress(c),Int.box(2),Int.box(n),Int.box(68),Int.box(99)).asInstanceOf[Integer].intValue()
+    if status!=0 then throw IllegalStateException(s"cublasGemmEx (half, transposed) failed with status $status")
+
+  /** Column-major strided-batched GEMM, all Float16 with Float32 accumulation. Transpose codes 0 (N) / 1 (T). */
+  def gemmHalfStridedBatched(transA: Int,transB: Int,m: Int,n: Int,k: Int,alphaValue: Float,
+      a: Long,lda: Int,strideA: Long,b: Long,ldb: Int,strideB: Long,c: Long,ldc: Int,strideC: Long,batch: Int): Unit =
+    alpha.set(JAVA_FLOAT,0,alphaValue)
+    try
+      val status=gemmExBatchedHandle.invokeWithArguments(handle,Int.box(transA),Int.box(transB),Int.box(m),Int.box(n),Int.box(k),alpha,
+        MemorySegment.ofAddress(a),Int.box(2),Int.box(lda),Long.box(strideA),
+        MemorySegment.ofAddress(b),Int.box(2),Int.box(ldb),Long.box(strideB),beta,
+        MemorySegment.ofAddress(c),Int.box(2),Int.box(ldc),Long.box(strideC),Int.box(batch),Int.box(68),Int.box(99))
+        .asInstanceOf[Integer].intValue()
+      if status!=0 then throw IllegalStateException(s"cublasGemmStridedBatchedEx failed with status $status")
+    finally alpha.set(JAVA_FLOAT,0,1f)
+
 private[ffm] object Cublas:
   private def candidates: Seq[String] =
     val os=System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT)
@@ -69,6 +96,9 @@ private[ffm] object Cublas:
           ADDRESS,ADDRESS,JAVA_INT,JAVA_LONG,ADDRESS,JAVA_INT,JAVA_LONG,ADDRESS,ADDRESS,JAVA_INT,JAVA_LONG,JAVA_INT))
         val gemmEx=down("cublasGemmEx",FunctionDescriptor.of(JAVA_INT,ADDRESS,JAVA_INT,JAVA_INT,JAVA_INT,JAVA_INT,JAVA_INT,
           ADDRESS,ADDRESS,JAVA_INT,JAVA_INT,ADDRESS,JAVA_INT,JAVA_INT,ADDRESS,ADDRESS,JAVA_INT,JAVA_INT,JAVA_INT,JAVA_INT))
+        val gemmExBatched=down("cublasGemmStridedBatchedEx",FunctionDescriptor.of(JAVA_INT,ADDRESS,JAVA_INT,JAVA_INT,JAVA_INT,JAVA_INT,JAVA_INT,
+          ADDRESS,ADDRESS,JAVA_INT,JAVA_INT,JAVA_LONG,ADDRESS,JAVA_INT,JAVA_INT,JAVA_LONG,ADDRESS,ADDRESS,JAVA_INT,JAVA_INT,JAVA_LONG,
+          JAVA_INT,JAVA_INT,JAVA_INT))
         val out=arena.allocate(ADDRESS)
         require(create.invokeWithArguments(out).asInstanceOf[Integer].intValue()==0,"cublasCreate_v2 failed")
         val handle=out.get(ADDRESS,0)
@@ -76,6 +106,6 @@ private[ffm] object Cublas:
         require(setStream.invokeWithArguments(handle,stream).asInstanceOf[Integer].intValue()==0,"cublasSetStream_v2 failed")
         if sys.env.get("SCALATORCH_CUDA_TF32").contains("1") then
           setMath.invokeWithArguments(handle,Int.box(3)) // CUBLAS_TF32_TENSOR_OP_MATH
-        Some(new Cublas(handle,sgemm,batched,gemmEx,arena))
+        Some(new Cublas(handle,sgemm,batched,gemmEx,gemmExBatched,arena))
       catch case _: Throwable => None
     }.collectFirst { case Some(value) => value }

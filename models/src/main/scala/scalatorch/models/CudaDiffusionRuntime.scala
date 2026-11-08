@@ -7,8 +7,10 @@ import scala.util.Using
 
 /** Shared inference executor for a snapshot of a diffusion parameter tree. */
 private[models] final class CudaDiffusionRuntime private (session: CudaSession,
-    weights: Map[Parameter,CudaTensor],private var host: Map[Parameter,Tensor[Float]],cancelled: () => Boolean) extends AutoCloseable:
+    weights: Map[Parameter,CudaTensor],private var host: Map[Parameter,Tensor[Float]],cancelled: () => Boolean,val half: Boolean=false) extends AutoCloseable:
   private var closed=false
+  private def up(t: Tensor[Float]): CudaTensor = if half then session.uploadHalf(t) else session.upload(t)
+  private def fillZero(shape: Shape,value: Float): CudaTensor = if half then session.fillHalf(shape,value) else session.fill(shape,value)
   private val offloadedWeights=scala.collection.mutable.LinkedHashMap.empty[Parameter,CudaTensor]
   private var offloadedWeightBytes=0L
   private val offloadedWeightLimit=CudaDiffusionRuntime.offloadedWeightLimit(session.maxBytes)
@@ -49,7 +51,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
   private def weight(p: Parameter,use: Using.Manager): CudaTensor =
     check()
     host.get(p) match
-      case None => weights.get(p).fold(use(session.upload(p.data)))(identity)
+      case None => weights.get(p).fold(use(up(p.data)))(identity)
       case Some(snapshot) =>
         offloadedWeights.get(p) match
           case Some(cached) =>
@@ -66,7 +68,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
               offloadedWeightEvictions+=1
               tensor.close()
             while offloadedWeights.nonEmpty && bytes>session.maxBytes-session.allocatedBytes do evictNewest()
-            val uploaded=session.upload(snapshot)
+            val uploaded=up(snapshot)
             offloadedWeightUploads+=1
             offloadedWeightUploadBytes+=bytes
             if retain then
@@ -86,7 +88,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
   def conv(x: CudaTensor,c: Conv2d): CudaTensor = scope { use =>
     val (effX,effConfig)=CircularConvPadding.current match
       case Some(tiling) if c.config.padding._1>0 || c.config.padding._2>0 =>
-        (use(session.upload(CircularConvPadding.pad(x.toCpu,c.config.padding._1,c.config.padding._2,tiling.tileX,tiling.tileY))),
+        (use(up(CircularConvPadding.pad(x.toCpu,c.config.padding._1,c.config.padding._2,tiling.tileX,tiling.tileY))),
           c.config.copy(padding=(0,0)))
       case _ => (x,c.config)
     val base=use(session.conv2dFast(effX,weight(c.weight,use),effConfig))
@@ -108,17 +110,9 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     }
   }
 
-  private val halfEnabled=sys.env.get("SCALATORCH_CUDA_FP16").contains("1")
-  private val halfWeights=scala.collection.mutable.Map.empty[Parameter,CudaTensor]
-
   private def project(x: CudaTensor,p: Parameter): CudaTensor =
     if session.hasCublas && weightShape(p).rank==2 && session.shape(x).rank==2 then scope { use =>
-      val w=weight(p,use)
-      val shape=session.shape(w)
-      if halfEnabled && host.get(p).isEmpty then
-        val packed=halfWeights.getOrElseUpdate(p,session.toHalf(w))
-        use(session.matmulTransposedBHalf(x,packed,shape.dims(0).toInt,shape.dims(1).toInt))
-      else use(session.matmulTransposedB(x,w))
+      use(session.matmulTransposedB(x,weight(p,use)))
     } else projectGeneric(x,p)
 
   private def projectGeneric(x: CudaTensor,p: Parameter): CudaTensor = scope { use =>
@@ -222,14 +216,14 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         if Sag.currentStore.isDefined then Sag.recordFromQK(qRaw.toCpu,k.toCpu)
         Incantations.currentSeg match
           case Some((sigma,ih,iw)) =>
-            val blurred=use(session.upload(Incantations.segBlurQuery(qRaw.toCpu,sigma,ih,iw)))
+            val blurred=use(up(Incantations.segBlurQuery(qRaw.toCpu,sigma,ih,iw)))
             qRaw.close();blurred
           case None => qRaw
       else qRaw
       val vRaw=heads(source,model.toV,keys)
       val v=if context.isDefined then NegPip.currentSigns match
         case Some(signs) =>
-          val signed=use(session.upload(NegPip.applySigns(vRaw.toCpu,signs)))
+          val signed=use(up(NegPip.applySigns(vRaw.toCpu,signs)))
           vRaw.close();signed
         case None => vRaw
       else vRaw
@@ -294,16 +288,16 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       val attn1=HyperTile.currentUnscoped.flatMap(_.split(shape.dims(1).toInt)) match
         case Some((nh,nw,h,w)) =>
           val b=shape.dims(0).toInt
-          val tiled=use(session.upload(HyperTile.tileTokens(norm1.toCpu,nh,nw,h,w)))
+          val tiled=use(up(HyperTile.tileTokens(norm1.toCpu,nh,nw,h,w)))
           val tiledOut=use(attention(tiled,model.attn1,None))
-          use(session.upload(HyperTile.untileTokens(tiledOut.toCpu,b,nh,nw,h,w)))
+          use(up(HyperTile.untileTokens(tiledOut.toCpu,b,nh,nw,h,w)))
         case None =>
           val tdCtx=for
             td <- TokenDownsampling.current
             (sh,sw) <- TokenDownsampling.currentSpatialShape
             factor = td.factorForSection(Pag.currentSection)
             if factor > 1.0 && sh.toLong * sw == shape.dims(1)
-          yield use(session.upload(TokenDownsampling.resampleTokens(norm1.toCpu,sh,sw,factor)))
+          yield use(up(TokenDownsampling.resampleTokens(norm1.toCpu,sh,sw,factor)))
           val aaOut=if tdCtx.isEmpty then
             for
               aa <- AgentAttention.current
@@ -322,13 +316,13 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
                 case Some(ag) if ag.shape.dims(1)*2 < features.shape.dims(1) =>
                   AgentAttention.applyAgentAttention(model.attn1,features,ag)
                 case _ =>
-                  val fGpu=use(session.upload(features))
+                  val fGpu=use(up(features))
                   val mGpu=use(attention(fGpu,model.attn1,None))
                   mGpu.toCpu
-              use(session.upload(AgentAttention.unmerge(plan,mergedOut)))
+              use(up(AgentAttention.unmerge(plan,mergedOut)))
           else None
           val refOrLlliteOut=if aaOut.isEmpty && tdCtx.isEmpty && (ReferenceOnly.current.isDefined || ControlLLLite.current.isDefined) then
-            Some(use(session.upload(model.attn1(scalatorch.autograd.Variable(norm1.toCpu,requiresGrad=false),None).data)))
+            Some(use(up(model.attn1(scalatorch.autograd.Variable(norm1.toCpu,requiresGrad=false),None).data)))
           else None
           val out=aaOut.orElse(refOrLlliteOut).getOrElse(use(attention(norm1,model.attn1,tdCtx)))
           tdCtx.foreach(_.close())
@@ -339,7 +333,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       val attn2=if IpAdapter.current.isDefined || ControlLLLite.current.isDefined then
         val res=model.attn2(scalatorch.autograd.Variable(norm2.toCpu,requiresGrad=false),Some(scalatorch.autograd.Variable(context.toCpu,requiresGrad=false))).data
         norm2.close()
-        use(session.upload(res))
+        use(up(res))
       else
         val res=use(attention(norm2,model.attn2,Some(context)));norm2.close();res
       val cross=use(session.add(self,attn2));self.close();attn2.close()
@@ -377,9 +371,9 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     if model.conv.config.padding==(1,1) then conv(input,model.conv)
     else scope { use =>
       val shape=session.shape(input)
-      val column=use(session.fill(Shape.from(shape.dims.updated(3,1L)),0f))
+      val column=use(fillZero(Shape.from(shape.dims.updated(3,1L)),0f))
       val wider=use(session.cat(Seq(input,column),3));column.close()
-      val row=use(session.fill(Shape.from(wider.shape.dims.updated(2,1L)),0f))
+      val row=use(fillZero(Shape.from(wider.shape.dims.updated(2,1L)),0f))
       val padded=use(session.cat(Seq(wider,row),2));wider.close();row.close()
       val result=use(conv(padded,model.conv));padded.close()
       result
@@ -409,7 +403,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     var outputMiddle: Option[CudaTensor]=None
     try
       val result=Using.Manager { use =>
-        val embedded=use(session.upload(features))
+        val embedded=use(up(features))
         val projected=use(linear(embedded,model.timeEmbedding.linear1));embedded.close()
         val activated=use(session.silu(projected));projected.close()
         val time=use(linear(activated,model.timeEmbedding.linear2));activated.close()
@@ -461,8 +455,19 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         outputMiddle.foreach(t=>try t.close() catch case cleanup: Throwable=>error.addSuppressed(cleanup))
         throw error
 
+  /** Float32 in, Float32 out; runs in Float16 inside when this runtime was uploaded with half=true. */
   def unet(input: CudaTensor,model: ConditionalUNet2d,timesteps: Tensor[Float],context: CudaTensor,
       added: Option[CudaTensor]=None,control: Option[CudaControlNetResiduals]=None): CudaTensor =
+    if !half then unetCore(input,model,timesteps,context,added,control)
+    else scope { use =>
+      def h(t: CudaTensor): CudaTensor = if t.half then t else use(session.castToHalf(t))
+      val residuals=control.map(c => CudaControlNetResiduals(c.down.map(h),h(c.middle)))
+      val out=use(unetCore(h(input),model,timesteps,h(context),added.map(h),residuals))
+      use(session.castToFloat(out))
+    }
+
+  private def unetCore(input: CudaTensor,model: ConditionalUNet2d,timesteps: Tensor[Float],context: CudaTensor,
+      added: Option[CudaTensor],control: Option[CudaControlNetResiduals]): CudaTensor =
     check()
     require(added.isDefined==model.additionEmbedding.isDefined,"U-Net additional conditioning presence mismatch")
     val features=model.timestepFeatures(session.shape(input),timesteps,session.shape(context))
@@ -473,7 +478,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     // Small deterministic sinusoidal conditioning constants are prepared on CPU.
     // Learned timestep projections and every image/context operation run on CUDA.
     scope { use =>
-      val f=use(session.upload(features))
+      val f=use(up(features))
       val first=use(linear(f,model.timeEmbedding.linear1));f.close()
       val activated=use(session.silu(first));first.close()
       val baseTime=use(linear(activated,model.timeEmbedding.linear2));activated.close()
@@ -486,7 +491,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       }
       var hidden=use(conv(input,model.convIn))
       FooocusInpaint.current.foreach { fi =>
-        val updated=use(session.upload(FooocusInpaint.applyConvInResidual(input.toCpu,hidden.toCpu,fi)))
+        val updated=use(up(FooocusInpaint.applyConvInResidual(input.toCpu,hidden.toCpu,fi)))
         hidden.close();hidden=updated
       }
       val skips=scala.collection.mutable.ArrayBuffer.empty[CudaTensor]
@@ -515,7 +520,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       def shrinkHiddenIfActive(): Unit =
         val (cfg,t)=kohya.get
         if KohyaHrFix.isActive(cfg,t) && cfg.downscaleFactor!=1.0 then
-          next(session.upload(KohyaHrFix.shrinkIfActive(hidden.toCpu,cfg,t)))
+          next(up(KohyaHrFix.shrinkIfActive(hidden.toCpu,cfg,t)))
       model.downBlocks.zipWithIndex.foreach { (block,blockIdx) => Pag.withSection(s"down.$blockIdx") {
         block.layers.zipWithIndex.foreach { (l,layerIdx) =>
           layer(l)
@@ -558,11 +563,11 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
             val d=skips(k).shape.dims
             if d(2).toInt!=maxH || d(3).toInt!=maxW then
               val old=skips(k)
-              skips(k)=use(session.upload(KohyaHrFix.interpolate2d(old.toCpu,maxH,maxW,cfg.upscaleMethod)))
+              skips(k)=use(up(KohyaHrFix.interpolate2d(old.toCpu,maxH,maxW,cfg.upscaleMethod)))
               old.close()
           val hd=hidden.shape.dims
           if hd(2).toInt!=maxH || hd(3).toInt!=maxW then
-            next(session.upload(KohyaHrFix.interpolate2d(hidden.toCpu,maxH,maxW,cfg.upscaleMethod)))
+            next(up(KohyaHrFix.interpolate2d(hidden.toCpu,maxH,maxW,cfg.upscaleMethod)))
         }
         block.layers.foreach { l =>
           val skip=skips.remove(skips.size-1)
@@ -570,8 +575,8 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
             case Some(cfg) if stageIndex==0 || stageIndex==1 =>
               val (scaledHidden,filteredSkip)=FreeU(cfg,stageIndex,hidden.toCpu,skip.toCpu)
               skip.close()
-              val devHidden=use(session.upload(scaledHidden))
-              val devSkip=use(session.upload(filteredSkip))
+              val devHidden=use(up(scaledHidden))
+              val devSkip=use(up(filteredSkip))
               next(session.cat(Seq(devHidden,devSkip),1))
               devHidden.close();devSkip.close()
             case _ =>
@@ -591,11 +596,11 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       next(session.silu(hidden))
       next(conv(hidden,model.convOut))
       preOutCpu.foreach { case (ctx,part) =>
-        val pGpu=use(session.upload(part))
+        val pGpu=use(up(part))
         val pNorm=use(norm(pGpu,model.normOut))
         val pAct=use(session.silu(pNorm))
         val pConv=use(conv(pAct,model.convOut))
-        next(session.upload(Llul.mixRegion(hidden.toCpu,pConv.toCpu,ctx.cfg,ctx.fx,ctx.fy)))
+        next(up(Llul.mixRegion(hidden.toCpu,pConv.toCpu,ctx.cfg,ctx.fx,ctx.fy)))
       }
       hidden
     }
@@ -606,7 +611,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     scope { use =>
       var hidden=use(conv(input,model.convIn))
       FooocusInpaint.current.foreach { fi =>
-        val updated=use(session.upload(FooocusInpaint.applyConvInResidual(input.toCpu,hidden.toCpu,fi)))
+        val updated=use(up(FooocusInpaint.applyConvInResidual(input.toCpu,hidden.toCpu,fi)))
         hidden.close();hidden=updated
       }
       def next(value: CudaTensor): Unit =
@@ -717,8 +722,6 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
           f"hit=${offloadedWeightCacheHitBytes/1048576.0}%.1f MiB uploads=$offloadedWeightUploads " +
           f"uploaded=${offloadedWeightUploadBytes/1048576.0}%.1f MiB retained=${offloadedWeightBytes/1048576.0}%.1f MiB " +
           f"transient=$offloadedWeightTransientUploads evictions=$offloadedWeightEvictions")
-      halfWeights.values.foreach(_.close())
-      halfWeights.clear()
       weights.values.foreach(_.close())
       clearOffloadedWeights()
       host=Map.empty
@@ -726,22 +729,24 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
 
 private[models] object CudaDiffusionRuntime:
   private val MaximumOffloadedWeightBytes=512L*1024L*1024L
+  /** Float16 U-Net (weights, activations, tensor-core GEMM); `SCALATORCH_CUDA_FP16=1` opts in. */
+  private[models] def fp16Default: Boolean = sys.env.get("SCALATORCH_CUDA_FP16").contains("1")
   private[models] def offloadedWeightLimit(sessionMaxBytes: Long): Long =
     require(sessionMaxBytes>=0,"negative CUDA session budget")
     math.min(sessionMaxBytes/4,MaximumOffloadedWeightBytes)
 
   def upload[A: Module](session: CudaSession,model: A,cancelled: () => Boolean=() => false,offloadWeights: Boolean=false,
-      includeAdapters: Boolean=true): CudaDiffusionRuntime =
+      includeAdapters: Boolean=true,half: Boolean=false): CudaDiffusionRuntime =
     session.allocatedBytes
     val host=scala.collection.mutable.LinkedHashMap.empty[Parameter,Tensor[Float]]
     val uploaded=scala.collection.mutable.LinkedHashMap.empty[Parameter,CudaTensor]
     try
       (Module.parameters(model) ++ (if includeAdapters then LinearAdapterScope.parameters else Vector.empty)).distinct.foreach { p =>
         VaeExecution.checkCancelled(cancelled)
-        if offloadWeights then host(p)=p.data else uploaded(p)=session.upload(p.data)
+        if offloadWeights then host(p)=p.data else uploaded(p)=(if half then session.uploadHalf(p.data) else session.upload(p.data))
       }
       VaeExecution.checkCancelled(cancelled)
-      new CudaDiffusionRuntime(session,uploaded.toMap,host.toMap,cancelled)
+      new CudaDiffusionRuntime(session,uploaded.toMap,host.toMap,cancelled,half)
     catch case error: Throwable =>
       uploaded.values.toVector.reverse.foreach { t =>
         try t.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
