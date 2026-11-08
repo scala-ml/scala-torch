@@ -249,7 +249,12 @@ private[worker] object NativeControlNet:
             val b=math.max(0,math.min(255,math.round(nz).toInt))
             out.setRGB(x,y,0xff000000.toInt|(r<<16)|(g<<8)|b)
         out
-      case "lineart" | "lineart_anime" | "softedge_hed" | "mlsd" =>
+      case "softedge_hed" =>
+        val safe=args.get("safe") match { case Some(Bool(true)) => true; case _ => false }
+        NativeHed.preprocess(source,resolution,safe,cancelled)
+      case "lineart" => NativeLineart.preprocess(source,resolution,cancelled)
+      case "lineart_anime" => NativeLineartAnime.preprocess(source,cancelled)
+      case "mlsd" =>
         val w=source.getWidth;val h=source.getHeight
         val out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB)
         def lumAt(x: Int,y: Int): Double =
@@ -262,7 +267,7 @@ private[worker] object NativeControlNet:
             val gx=lumAt(x+1,y)-lumAt(x-1,y)
             val gy=lumAt(x,y+1)-lumAt(x,y-1)
             val mag=math.min(255,math.round(math.hypot(gx,gy)*1.5).toInt)
-            val v=if name=="mlsd" && mag<32 then 0 else mag
+            val v=if mag<32 then 0 else mag
             out.setRGB(x,y,0xff000000.toInt|(v<<16)|(v<<8)|v)
         out
       case "openpose" => NativeOpenPose.preprocess(source,resolution,cancelled)

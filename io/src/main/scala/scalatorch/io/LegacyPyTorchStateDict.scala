@@ -112,6 +112,9 @@ object LegacyPyTorchStateDict:
             case 101 =>
               val items=popMark();stack(stack.size-1)=stack.last.asInstanceOf[Vector[Any]]++items
             case 97 => val v=pop();stack(stack.size-1)=stack.last.asInstanceOf[Vector[Any]]:+v
+            case 98 => // BUILD: state_dict()._metadata is stored as the OrderedDict's attribute state; it carries no tensors
+              val state=pop()
+              if !stack.last.isInstanceOf[mutable.LinkedHashMap[?,?]] || !state.isInstanceOf[mutable.LinkedHashMap[?,?]] then fail("BUILD on a non-dict object")
             case 46 => result=Some(pop())
             case other => fail(s"pickle opcode 0x${other.toHexString}")
         result.get
