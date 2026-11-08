@@ -42,4 +42,6 @@ class NativeRealEsrganStandaloneSuite extends munit.FunSuite:
     run("cas_upscale","scale"->Number(BigDecimal("2")),"sharpness"->Number(BigDecimal("0.8")))
     run("color_enhance","strength"->Number(BigDecimal("1")))
     run("pixel_art","pixel_size"->Number(BigDecimal("8")),"colors"->Number(BigDecimal("16")))
+    // needs the Depth Anything weights (SDFX_SCALATORCH_ANNOTATOR_DIR)
+    if sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") then run("depth_mask","near"->Number(BigDecimal("0.6")),"far"->Number(BigDecimal("1.0")))
   }

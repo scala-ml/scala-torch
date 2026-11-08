@@ -232,10 +232,12 @@ private[worker] object NativeBatch18Services:
         val w = img.getWidth; val h = img.getHeight
         val depthVals = new Array[Double](w * h)
         var dMin = Double.PositiveInfinity; var dMax = Double.NegativeInfinity
+        // Real Depth Anything V2 depth (near = bright); fails clearly when the annotator weights are missing.
+        val rawDepth = NativeDepthAnything.preprocess(img, () => context.cancelled())
+        val depthImage = if rawDepth.getWidth == w && rawDepth.getHeight == h then rawDepth else DiffusionImageResize(rawDepth, w, h, 0)
         var i = 0
         while i < w * h do
-          val c = img.getRGB(i % w, i / w)
-          val lum = (0.299 * ((c >> 16) & 0xff) + 0.587 * ((c >> 8) & 0xff) + 0.114 * (c & 0xff)) / 255.0
+          val lum = ((depthImage.getRGB(i % w, i / w) >> 8) & 0xff) / 255.0
           depthVals(i) = lum
           if lum < dMin then dMin = lum
           if lum > dMax then dMax = lum
