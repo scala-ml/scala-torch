@@ -26,3 +26,20 @@ class NativeRealEsrganStandaloneSuite extends munit.FunSuite:
     assertEquals((upscaled.getWidth,upscaled.getHeight),(source.getWidth*2,source.getHeight*2))
     println(s"[real-esrgan] ${result("path").asInstanceOf[Str].value}")
   }
+
+  test("model-free image_tool tools on a real image (gated on SDFX_TEST_IMAGE / SDFX_TEST_OUT)") {
+    val image=sys.env.get("SDFX_TEST_IMAGE");val out=sys.env.get("SDFX_TEST_OUT")
+    assume(image.isDefined && out.isDefined,"real-image gate disabled")
+    val root=Files.createTempDirectory("native-tools-real")
+    val scheduler=root.resolve("scheduler.json"); Files.writeString(scheduler,"{}")
+    val output=Path.of(out.get).resolve("tools"); Files.createDirectories(output)
+    val backend=new NativeDiffusionBackend(root,scheduler)
+    val context=new NativeWorkContext(()=>false,()=>true,(_,_)=>())
+    def run(tool: String,extra: (String,NativeJson)*): Unit =
+      val params=Map[String,NativeJson]("tool"->Str(tool),"image_path"->Str(image.get),"output_dir"->Str(output.toString))++extra
+      val result=backend.execute(NativeRequest(tool,"image_tool",params,None),context)
+      println(s"[tool:$tool] $result")
+    run("cas_upscale","scale"->Number(BigDecimal("2")),"sharpness"->Number(BigDecimal("0.8")))
+    run("color_enhance","strength"->Number(BigDecimal("1")))
+    run("pixel_art","pixel_size"->Number(BigDecimal("8")),"colors"->Number(BigDecimal("16")))
+  }
