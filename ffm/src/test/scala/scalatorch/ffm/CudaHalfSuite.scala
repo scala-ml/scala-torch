@@ -110,3 +110,35 @@ class CudaHalfSuite extends FunSuite:
     for i <- whole.indices do worst=math.max(worst,math.abs(whole(i)-chunked(i)))
     assert(worst<1e-3,s"max abs difference $worst")
   }
+
+  test("uploadHalfBits matches uploadHalf") {
+    gpu()
+    val x=data(3*7*5,41,3.0)
+    CudaSession.withDevice(maxBytes=1L<<30) { s =>
+      val arena=java.lang.foreign.Arena.ofConfined()
+      try
+        val seg=arena.allocate(x.length*2L,2)
+        val sb=seg.asByteBuffer().order(java.nio.ByteOrder.nativeOrder()).asShortBuffer()
+        x.indices.foreach(i => sb.put(i,java.lang.Float.floatToFloat16(x(i))))
+        val a=s.uploadHalf(tensor(x,3,7,5));val b=s.uploadHalfBits(Shape.from(Seq(3L,7L,5L)),seg)
+        try
+          assert(a.half && b.half)
+          assertEquals(a.toCpu.toFloatArray.toSeq,b.toCpu.toFloatArray.toSeq)
+        finally { a.close();b.close() }
+      finally arena.close()
+    }
+  }
+
+  test("AutoBudget uses the free device memory instead of a fixed number; 'auto' parses") {
+    gpu()
+    assertEquals(CudaSession.parseBudget("auto"),CudaSession.AutoBudget)
+    assertEquals(CudaSession.parseBudget(" 1048576 "),1048576L)
+    CudaSession.withDevice(maxBytes=CudaSession.AutoBudget) { s =>
+      assert(s.maxBytes>=268435456L && s.maxBytes<Long.MaxValue,s"effective budget ${s.maxBytes}")
+      val big=s.fillHalf(Shape.from(Seq(64L,1024L,1024L)),1f) // 128 MiB, beyond a tiny fixed budget but fine here
+      big.close()
+    }
+    CudaSession.withDevice(maxBytes=1024L) { s =>
+      intercept[IllegalArgumentException](s.fillHalf(Shape.from(Seq(1024L,1024L)),1f))
+    }
+  }

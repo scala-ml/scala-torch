@@ -68,7 +68,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
               offloadedWeightEvictions+=1
               tensor.close()
             while offloadedWeights.nonEmpty && bytes>session.maxBytes-session.allocatedBytes do evictNewest()
-            val uploaded=up(snapshot)
+            val uploaded=if half then session.uploadHalfBits(snapshot.shape,HalfWeightCache.bits(p,snapshot)) else up(snapshot)
             offloadedWeightUploads+=1
             offloadedWeightUploadBytes+=bytes
             if retain then
@@ -847,3 +847,26 @@ private[models] object CudaDiffusionRuntime:
         try t.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       }
       throw error
+
+/** Float16 copies of offloaded weights in native memory, converted once per parameter and reused by every later upload (a low-VRAM run uploads
+  * the weights on every use). Entries disappear with their parameter; the memory is GC-managed (`Arena.ofAuto`). */
+private[models] object HalfWeightCache:
+  private val cache=new java.util.WeakHashMap[Parameter,java.lang.foreign.MemorySegment]()
+  private val arena=java.lang.foreign.Arena.ofAuto()
+  def bits(p: Parameter,source: Tensor[Float]): java.lang.foreign.MemorySegment=
+    cache.synchronized(cache.get(p)) match
+      case null =>
+        val values=source.toFloatArray
+        val segment=arena.allocate(math.max(values.length.toLong*2,2L),2)
+        val shorts=segment.asByteBuffer().order(java.nio.ByteOrder.nativeOrder()).asShortBuffer()
+        if values.length<65536 then
+          var i=0;while i<values.length do { shorts.put(i,java.lang.Float.floatToFloat16(values(i)));i+=1 }
+        else
+          val block=32768
+          java.util.stream.IntStream.range(0,(values.length+block-1)/block).parallel().forEach { (b: Int) =>
+            val start=b*block;val end=math.min(values.length,start+block)
+            var i=start;while i<end do { shorts.put(i,java.lang.Float.floatToFloat16(values(i)));i+=1 }
+          }
+        cache.synchronized { cache.put(p,segment) }
+        segment
+      case found => found

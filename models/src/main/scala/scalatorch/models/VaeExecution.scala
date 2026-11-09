@@ -113,7 +113,7 @@ object VaeExecution:
 
   def fromEnvironment(environment: Map[String,String]): VaeExecution =
     val device=environment.getOrElse("SDFX_SCALATORCH_VAE_DEVICE","cpu")
-    def cuda(index: Int)=Cuda(index,environment.get("SDFX_SCALATORCH_VAE_MAX_BYTES").fold(1073741824L)(_.toLong),
+    def cuda(index: Int)=Cuda(index,environment.get("SDFX_SCALATORCH_VAE_MAX_BYTES").fold(1073741824L)(scalatorch.ffm.CudaSession.parseBudget),
       VaeExecution.offloadFromEnvironment(environment,"SDFX_SCALATORCH_VAE_OFFLOAD_WEIGHTS"))
     device match
       case "cpu" => Cpu

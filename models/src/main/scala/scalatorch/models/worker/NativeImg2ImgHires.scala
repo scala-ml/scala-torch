@@ -105,7 +105,7 @@ private[worker] object NativeImg2ImgHires:
           case value if value.matches("cuda:[0-9]+") => Some(value.drop(5).toInt)
           case "cpu" => None
           case _ => invalidUp("R-ESRGAN model upscaling requires a valid CPU or CUDA U-Net device")
-        val maxBytes=environment.get("SDFX_SCALATORCH_UNET_MAX_BYTES").fold(1073741824L)(_.toLong)
+        val maxBytes=environment.get("SDFX_SCALATORCH_UNET_MAX_BYTES").fold(1073741824L)(scalatorch.ffm.CudaSession.parseBudget)
         val upscaled=deviceOpt match
           case Some(device) => CudaRealEsrganX4Plus.upscale(source,path,cancelled,device,maxBytes)
           case None => CudaRealEsrganX4Plus.upscaleCpu(source,path,cancelled)

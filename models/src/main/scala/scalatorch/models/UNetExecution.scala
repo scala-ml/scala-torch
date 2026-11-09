@@ -463,7 +463,7 @@ object UNetExecution:
 
   def fromEnvironment(environment: Map[String,String]): UNetExecution =
     val device=environment.getOrElse("SDFX_SCALATORCH_UNET_DEVICE","cpu")
-    def cuda(index: Int)=Cuda(index,environment.get("SDFX_SCALATORCH_UNET_MAX_BYTES").fold(1073741824L)(_.toLong),
+    def cuda(index: Int)=Cuda(index,environment.get("SDFX_SCALATORCH_UNET_MAX_BYTES").fold(1073741824L)(scalatorch.ffm.CudaSession.parseBudget),
       VaeExecution.offloadFromEnvironment(environment,"SDFX_SCALATORCH_UNET_OFFLOAD_WEIGHTS"))
     device match
       case "cpu" => Cpu

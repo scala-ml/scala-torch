@@ -726,6 +726,20 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
 
+  /** Uploads Float16 data that already sits in native memory as IEEE half bits (2 bytes per element, `bits` must be a native segment).
+    * Used for offloaded weights: half the bytes of a Float32 upload and no device-side conversion. */
+  def uploadHalfBits(shape: Shape,bits: MemorySegment): CudaTensor =
+    val result=allocate(shape,half=true)
+    try
+      if shape.numel>0 then
+        require(bits.byteSize()>=shape.numel*2,"Float16 host buffer is too small")
+        hostSync()
+        driver.copyHostToDevice(result.address,bits,shape.numel*2)
+      result
+    catch case error: Throwable =>
+      try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
   def download(tensor: CudaTensor): Tensor[Float] =
     validate(tensor)
     if tensor.half then return Using.resource(castToFloat(tensor))(download)
@@ -1254,11 +1268,20 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     if failure != null then throw failure
 
 object CudaSession:
+  /** `maxBytes` value meaning "92 % of the device memory that is free when the session opens". */
+  val AutoBudget: Long = Long.MaxValue
+  /** Parses a byte budget from configuration: a number of bytes or `auto`. */
+  def parseBudget(value: String): Long =
+    val v = value.trim
+    if v.equalsIgnoreCase("auto") then AutoBudget else v.toLong
   /** Scratch for half-precision attention scores (bytes); smaller = less VRAM, more (still tiny) GEMM launches. */
   @volatile private[ffm] var attentionScratchBytes: Long =
     sys.env.get("SCALATORCH_CUDA_ATTENTION_SCRATCH_MB").flatMap(_.trim.toLongOption).filter(_ > 0).getOrElse(256L)*1024L*1024L
   def withDevice[A](deviceIndex: Int = 0, maxBytes: Long = 1073741824L)(body: CudaSession => A): A =
     require(maxBytes >= 0,"negative CUDA allocation budget")
     CudaDriver.withDevice(deviceIndex) { (driver,version,name) =>
-      body(new CudaSession(driver,deviceIndex,name,version,maxBytes))
+      // AutoBudget: use what the device has free right now (a fixed number made big jobs fail with "allocation budget exceeded"
+      // although the GPU had room, for example SDXL with a LoRA needs the weights twice).
+      val effective=if maxBytes==AutoBudget then math.max(268435456L,(driver.memoryInfo()._1*0.92).toLong) else maxBytes
+      body(new CudaSession(driver,deviceIndex,name,version,effective))
     }
