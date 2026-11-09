@@ -139,6 +139,17 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
     val info=if path.isEmpty then Map("vae_name"->Null,"vae_hash"->Null) else
       Map("vae_name"->Str(selected.getFileName.toString),"vae_hash"->Str(java.util.HexFormat.of().formatHex(digest.digest())))
     (vae,info)
+  /** `load_model` dtype: fp16 (default) or fp32 selects the CUDA execution precision of U-Net, VAE and CLIP; CPU execution is Float32
+    * whatever is asked. `vram_mode` is accepted and ignored (U-Net/VAE placement comes from the SDFX_SCALATORCH_* settings). */
+  private def applyPrecision(p: Map[String,NativeJson]): String=
+    val requested=str(p,"dtype","fp16").trim.toLowerCase(java.util.Locale.ROOT)
+    val half=requested match
+      case "fp16" | "float16" | "half" | "auto" => true
+      case "fp32" | "float32" | "full" => false
+      case other => unsupported(s"native engine supports dtype fp16 and fp32, not $other")
+    CudaDiffusionRuntime.setHalfPrecision(Some(half))
+    if half then "fp16" else "fp32"
+
   private def unsupported(message: String): Nothing=throw new NativeBackendError("unsupported",message)
   private def controlNetStamp(directory: Path,context: NativeWorkContext): Vector[ControlNetFileStamp] =
     if Files.isRegularFile(directory) then
@@ -847,8 +858,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
       case "load_model" if Files.isRegularFile(root) =>
         keys(p,Set("path","dtype","vram_mode","vae_path","vae_tiling"))
         require(Path.of(str(p,"path",root.toString)).toRealPath()==root,"model path differs from configured checkpoint")
-        if str(p,"dtype","fp32")!="fp32" || str(p,"vram_mode","cpu")!="cpu" then
-          unsupported("native parameter loading requires fp32 and cpu; execution placement is configured separately")
+        val precision=applyPrecision(p)
         val selectedVae=vaeChoice(p,"vae_path")
         val tokenizerDir=sys.env.get("SDFX_SCALATORCH_TOKENIZER").map(Path.of(_)).getOrElse(root.getParent.resolve("tokenizer"))
         val tokenizer=ClipFastTokenizer.load(tokenizerDir.resolve("vocab.json"),tokenizerDir.resolve("merges.txt")).withNuiFallbackNormalization
@@ -895,15 +905,14 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         loadedEmbeddingInfo=Vector.empty
         linearTargets=components.linearTargets
         singleFileFamily=components.family
-        modelSummary=Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),"kind"->Str(singleFileKind),
+        modelSummary=Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),"kind"->Str(singleFileKind),"dtype"->Str(precision),
           "hash"->Str(java.util.HexFormat.of().formatHex(digest.digest())),"family"->Str(if components.family=="sdxl" then "sdxl" else if components.family=="sd2" then "sd2" else "sd"),
           "model_token"->Str(UUID.randomUUID().toString))++vaeInfo
         modelSummary
       case "load_model" =>
         keys(p,Set("path","dtype","vram_mode","vae_path","vae_tiling"))
         require(Path.of(str(p,"path",root.toString)).toRealPath()==root,"model path differs from configured checkpoint")
-        if str(p,"dtype","fp32")!="fp32" || str(p,"vram_mode","cpu")!="cpu" then
-          unsupported("native parameter loading requires fp32 and cpu; U-Net/VAE execution placement is configured separately")
+        val precision=applyPrecision(p)
         val vaeTiling=bool(p,"vae_tiling",false)
         val selectedVae=vaeChoice(p,"vae_path")
         val sdxl=sdxlProfile()
@@ -935,7 +944,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         loadedEmbeddingTokens=Set.empty
         loadedEmbeddingInfo=Vector.empty
         linearTargets=nextLinearTargets
-        modelSummary=Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),"kind"->Str("diffusers"),
+        modelSummary=Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),"kind"->Str("diffusers"),"dtype"->Str(precision),
           "hash"->Str(hash),"family"->Str(if sdxl then "sdxl" else "sd"),"model_token"->Str(UUID.randomUUID().toString))++vaeInfo
         if usesCuda then
           val deviceIndex=Seq(vaeExecution.device,unetExecution.device).collectFirst {

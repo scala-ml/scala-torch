@@ -816,8 +816,13 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
 
 private[models] object CudaDiffusionRuntime:
   private val MaximumOffloadedWeightBytes=512L*1024L*1024L
-  /** Float16 U-Net (weights, activations, tensor-core GEMM) unless `SCALATORCH_CUDA_FP16=0`. */
-  private[models] def fp16Default: Boolean = !sys.env.get("SCALATORCH_CUDA_FP16").contains("0")
+  /** Precision chosen for the loaded model (`load_model` dtype). None = follow the environment default. */
+  @volatile private var precisionOverride: Option[Boolean]=None
+  private[models] def environmentFp16: Boolean = !sys.env.get("SCALATORCH_CUDA_FP16").contains("0")
+  private[models] def setHalfPrecision(value: Option[Boolean]): Unit = precisionOverride=value
+  /** Float16 U-Net / VAE / CLIP (weights, activations, tensor-core GEMM): the dtype of the loaded model (`load_model`), else
+    * Float16 unless `SCALATORCH_CUDA_FP16=0`. CPU execution is always Float32. */
+  private[models] def fp16Default: Boolean = precisionOverride.getOrElse(environmentFp16)
   private[models] def offloadedWeightLimit(sessionMaxBytes: Long): Long =
     require(sessionMaxBytes>=0,"negative CUDA session budget")
     math.min(sessionMaxBytes/4,MaximumOffloadedWeightBytes)
