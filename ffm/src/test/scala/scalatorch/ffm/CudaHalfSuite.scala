@@ -1,6 +1,7 @@
 package scalatorch.ffm
 
 import munit.FunSuite
+import scala.util.Using
 import scalatorch.*
 
 /** Float16 activation kernels compared with the Float32 CUDA path (same inputs, half-precision tolerance). */
@@ -141,4 +142,24 @@ class CudaHalfSuite extends FunSuite:
     CudaSession.withDevice(maxBytes=1024L) { s =>
       intercept[IllegalArgumentException](s.fillHalf(Shape.from(Seq(1024L,1024L)),1f))
     }
+  }
+
+  test("shared weights are uploaded once, seen by later sessions and by other threads, and freed on release") {
+    gpu()
+    val x=data(7*9,51,2.0)
+    val source=tensor(x,7,9)
+    val key=new Object
+    val expected=CudaSession.withDevice(maxBytes=1L<<30) { s => Using.resource(s.uploadHalf(source))(_.toCpu.toFloatArray.toSeq) }
+    def readShared(half: Boolean): Seq[Float] = CudaSession.withDevice(maxBytes=1L<<30) { s =>
+      Using.resource(s.sharedUpload(key,source,half))(t => (if t.half then Using.resource(s.castToFloat(t))(_.toCpu.toFloatArray) else t.toCpu.toFloatArray).toSeq)
+    }
+    assertEquals(readShared(true),expected)           // first session uploads
+    assertEquals(readShared(true),expected)           // second session reuses the device memory
+    val fromThread=new java.util.concurrent.atomic.AtomicReference[Seq[Float]]()
+    val t=new Thread(() => fromThread.set(readShared(true)));t.start();t.join()
+    assertEquals(fromThread.get(),expected)           // another thread uses the same weights
+    assertEquals(readShared(false),x.toSeq)           // the Float32 copy is a separate entry
+    CudaSession.releaseSharedWeights(0)
+    assertEquals(readShared(true),expected)           // after release it is uploaded again
+    CudaSession.releaseSharedWeights(0)
   }

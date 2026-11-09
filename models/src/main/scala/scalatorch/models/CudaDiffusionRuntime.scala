@@ -834,7 +834,14 @@ private[models] object CudaDiffusionRuntime:
     val host=scala.collection.mutable.LinkedHashMap.empty[Parameter,Tensor[Float]]
     val uploaded=scala.collection.mutable.LinkedHashMap.empty[Parameter,CudaTensor]
     try
-      (Module.parameters(model) ++ (if includeAdapters then LinearAdapterScope.parameters else Vector.empty)).distinct.foreach { p =>
+      val base=Module.parameters(model).distinct
+      val baseSet=base.toSet
+      // Model weights stay on the device between sessions (shared); LoRA adapters differ per request and are uploaded privately.
+      base.foreach { p =>
+        VaeExecution.checkCancelled(cancelled)
+        if offloadWeights then host(p)=p.data else uploaded(p)=session.sharedUpload(p,p.data,half)
+      }
+      (if includeAdapters then LinearAdapterScope.parameters.filterNot(baseSet.contains) else Vector.empty).distinct.foreach { p =>
         VaeExecution.checkCancelled(cancelled)
         if offloadWeights then host(p)=p.data else uploaded(p)=(if half then session.uploadHalf(p.data) else session.upload(p.data))
       }

@@ -9,6 +9,8 @@ import scala.util.Using
 
 private[ffm] final class CudaAllocation(val address: Long,val bytes: Long):
   var references=1L
+  /** Owned by [[CudaWeightPool]]: shared between sessions and threads, never freed or counted by a session. */
+  @volatile var pooled=false
 
 /** Independently releasable packed Float32 handle; reshape may share an allocation. */
 final class CudaTensor private[ffm] (private[ffm] val session: CudaSession,
@@ -142,7 +144,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     validate(value)
     require(value.shape.numel==shape.numel,"reshape changes element count")
     val view=new CudaTensor(this,shape,value.allocation,value.half)
-    value.allocation.references+=1
+    if !value.allocation.pooled then value.allocation.references+=1
     live+=view
     view
 
@@ -726,6 +728,30 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
 
+  /** Weights that stay on the device between sessions and are shared by the sessions of all threads (see [[CudaWeightPool]]): the first call
+    * uploads `source`, later calls return a view of the same device memory. `key` identifies the parameter (by identity), `source` is checked by
+    * identity as well, so replaced data is uploaded again. The memory is freed after the context keeper's idle time or by `releaseSharedWeights`.
+    * Falls back to a private upload when keeping is disabled. */
+  def sharedUpload(key: AnyRef,source: Tensor[Float],half: Boolean): CudaTensor =
+    check()
+    if !CudaContextKeeper.enabled then return (if half then uploadHalf(source) else upload(source))
+    def view(entry: CudaWeightPool.Entry): CudaTensor =
+      val v=new CudaTensor(this,entry.shape,entry.allocation,half)
+      live+=v
+      v
+    val hit=CudaWeightPool.get(deviceIndex,key,half,source)
+    if hit!=null then return view(hit)
+    CudaWeightPool.lock.synchronized {
+      val again=CudaWeightPool.get(deviceIndex,key,half,source)
+      if again!=null then view(again)
+      else
+        val tensor=if half then uploadHalf(source) else upload(source)
+        tensor.allocation.pooled=true
+        used-=tensor.allocation.bytes
+        CudaWeightPool.put(deviceIndex,key,new CudaWeightPool.Entry(tensor.allocation,tensor.shape,half,source))
+        tensor
+    }
+
   /** Uploads Float16 data that already sits in native memory as IEEE half bits (2 bytes per element, `bits` must be a native segment).
     * Used for offloaded weights: half the bytes of a Float32 upload and no device-side conversion. */
   def uploadHalfBits(shape: Shape,bits: MemorySegment): CudaTensor =
@@ -1231,7 +1257,10 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   def release(tensor: CudaTensor): Unit =
     threadCheck()
     require(tensor.session eq this,"tensor belongs to another CUDA session")
-    if !tensor.released then
+    if !tensor.released && tensor.allocation.pooled then
+      validate(tensor)
+      tensor.released=true;live-=tensor
+    else if !tensor.released then
       validate(tensor)
       if tensor.allocation.references==1 then
         val size=tensor.allocation.bytes
@@ -1268,6 +1297,8 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     if failure != null then throw failure
 
 object CudaSession:
+  /** Frees the weights kept for sessions on `deviceIndex` (no-op while a session is open there; they go on idle then). */
+  def releaseSharedWeights(deviceIndex: Int): Unit = CudaContextKeeper.clearDevice(deviceIndex)
   /** `maxBytes` value meaning "92 % of the device memory that is free when the session opens". */
   val AutoBudget: Long = Long.MaxValue
   /** Parses a byte budget from configuration: a number of bytes or `auto`. */

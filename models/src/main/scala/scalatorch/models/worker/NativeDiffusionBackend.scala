@@ -150,6 +150,12 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
     CudaDiffusionRuntime.setHalfPrecision(Some(half))
     if half then "fp16" else "fp32"
 
+  /** Device weights kept for later sessions belong to the model that was loaded; free them when the model changes or is unloaded. */
+  private def releaseCudaWeights(): Unit =
+    Seq(vaeExecution.device,unetExecution.device).distinct.foreach { d =>
+      if d.startsWith("cuda:") then scalatorch.ffm.CudaSession.releaseSharedWeights(d.drop(5).toInt)
+    }
+
   private def unsupported(message: String): Nothing=throw new NativeBackendError("unsupported",message)
   private def controlNetStamp(directory: Path,context: NativeWorkContext): Vector[ControlNetFileStamp] =
     if Files.isRegularFile(directory) then
@@ -391,7 +397,15 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
       NativeTokenizerInspection.execute(request.params,tokenizers,context)
     else if Set("txt2img","img2img")(request.kind) && request.params.contains("embedding_editor_preview") then
       executeEditorPreview(request,context)
-    else executeNativeRequest(request,context)
+    else NativeParallelCount.run(request,context,usesCuda,keywordInert)((r,c) => executeNativeRequest(r,c)).getOrElse(executeNativeRequest(request,context))
+
+  /** True when the model keyword hook would not change any prompt or the keyword state for this request (so the request may be split). */
+  private def keywordInert(hooks: Option[NativeJson],prompt: String,count: Int): Boolean =
+    try
+      val hash=modelSummary.get("hash").collect { case Str(h) => h }.getOrElse("")
+      NativeKeywordHook.plan(hooks,prompt,hash,modelSummary.get("name").collect { case Str(n) => n }.getOrElse(""),count,0L,keywordState,() => (),Set.empty)
+        .forall(plan => plan.prompts.forall(_==prompt) && plan.nextState==keywordState)
+    catch case _: Throwable => false
 
   private def executeEditorPreview(request: NativeRequest,context: NativeWorkContext): Map[String,NativeJson] =
     val draft=request.params("embedding_editor_preview") match
@@ -900,6 +914,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         context.beginPublication()
         NativeBatch18Services.clearPreparedBatchInterrogates()
         loaded=Some(pipeline)
+        releaseCudaWeights()
         vaeTilingEnabled=tiling
         loadedEmbeddingTokens=Set.empty
         loadedEmbeddingInfo=Vector.empty
@@ -940,6 +955,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         context.beginPublication()
         NativeBatch18Services.clearPreparedBatchInterrogates()
         loaded=Some(pipeline)
+        releaseCudaWeights()
         vaeTilingEnabled=vaeTiling
         loadedEmbeddingTokens=Set.empty
         loadedEmbeddingInfo=Vector.empty
@@ -971,6 +987,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         context.beginPublication()
         NativeBatch18Services.clearPreparedBatchInterrogates()
         loaded=None
+        releaseCudaWeights()
         loadedControlNet=None
         vaeTilingEnabled=false
         loadedEmbeddingTokens=Set.empty

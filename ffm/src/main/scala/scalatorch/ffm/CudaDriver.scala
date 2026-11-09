@@ -114,24 +114,31 @@ private[ffm] object CudaDriver:
     }.get
 /** Keeps the CUDA primary context (and the cuBLAS handles created on it) alive between back-to-back sessions. A generation opens several
   * sessions (text encoder, U-Net, VAE); creating and destroying the context costs about 90 ms and the cuBLAS handle about 150 ms each time.
-  * Once no session has been open for `SCALATORCH_CUDA_KEEP_CONTEXT_SECONDS` (default 20, 0 = never keep) the handles and the extra context
+  * Once no session has been open for `SCALATORCH_CUDA_KEEP_CONTEXT_SECONDS` (default 60, 0 = never keep) the handles and the extra context
   * reference are dropped, so the device memory of the context is returned when no generation is running. */
 private[ffm] object CudaContextKeeper:
-  val seconds: Long = sys.env.get("SCALATORCH_CUDA_KEEP_CONTEXT_SECONDS").flatMap(_.trim.toLongOption).getOrElse(20L)
+  val seconds: Long = sys.env.get("SCALATORCH_CUDA_KEEP_CONTEXT_SECONDS").flatMap(_.trim.toLongOption).getOrElse(60L)
   def enabled: Boolean = seconds > 0
   private final class State(var context: MemorySegment, var active: Int, var lastExit: Long, val closers: java.util.ArrayList[() => Unit])
   private val states = new java.util.HashMap[Int, State]()
   private val scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r =>
     val t = new Thread(r, "scala-torch-cuda-context-keeper"); t.setDaemon(true); t
   }
-  private lazy val handles: (java.lang.invoke.MethodHandle, java.lang.invoke.MethodHandle, java.lang.invoke.MethodHandle) =
+  private lazy val handles: (java.lang.invoke.MethodHandle, java.lang.invoke.MethodHandle, java.lang.invoke.MethodHandle, java.lang.invoke.MethodHandle) =
     val os = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT)
     val lookup = SymbolLookup.libraryLookup(if os.startsWith("windows") then "nvcuda.dll" else "libcuda.so.1", Arena.global())
     val linker = Linker.nativeLinker()
     def find(symbol: String, d: FunctionDescriptor) = linker.downcallHandle(lookup.find(symbol).orElseThrow(), d)
     (find("cuDevicePrimaryCtxRetain", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT)),
       find("cuDevicePrimaryCtxRelease_v2", FunctionDescriptor.of(JAVA_INT, JAVA_INT)),
-      find("cuCtxSetCurrent", FunctionDescriptor.of(JAVA_INT, ADDRESS)))
+      find("cuCtxSetCurrent", FunctionDescriptor.of(JAVA_INT, ADDRESS)),
+      find("cuMemFree_v2", FunctionDescriptor.of(JAVA_INT, JAVA_LONG)))
+
+  /** Frees device memory; only valid from a closer registered with [[onRelease]] (the context is current there). */
+  def freeMemory(address: Long): Unit = try handles._4.invokeWithArguments(Long.box(address)) catch case _: Throwable => ()
+
+  /** Releases everything kept for `device` (shared weights, cuBLAS handles, the extra context reference) unless a session is open on it. */
+  def clearDevice(device: Int): Unit = release(device,force=true)
 
   /** A session starts on `device` (its own context reference is already taken): make sure our extra reference exists. */
   def enter(device: Int): Unit =
@@ -164,11 +171,11 @@ private[ffm] object CudaContextKeeper:
   def onRelease(device: Int, closer: () => Unit): Unit =
     states.synchronized { val st = states.get(device); if st != null then st.closers.add(closer) else closer() }
 
-  private def release(device: Int): Unit =
+  private def release(device: Int, force: Boolean = false): Unit =
     states.synchronized {
       val st = states.get(device)
       if st != null && st.active == 0 && st.context != MemorySegment.NULL &&
-          System.nanoTime() - st.lastExit >= seconds * 1_000_000_000L - 100_000_000L then
+          (force || System.nanoTime() - st.lastExit >= seconds * 1_000_000_000L - 100_000_000L) then
         try
           handles._3.invokeWithArguments(st.context)
           st.closers.forEach(c => try c() catch case _: Throwable => ())
