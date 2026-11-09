@@ -106,7 +106,75 @@ private[ffm] object CudaDriver:
       val previous = pointerResult("cuCtxGetCurrent", Seq.empty)
       val context = pointerResult("cuDevicePrimaryCtxRetain", Seq(JAVA_INT), Int.box(dev))
       cleanup { call("cuDevicePrimaryCtxRelease_v2", Seq(JAVA_INT), Int.box(dev)) }
+      CudaContextKeeper.enter(dev)
+      cleanup { CudaContextKeeper.exit(dev) }
       call("cuCtxSetCurrent", Seq(ADDRESS), context)
       cleanup { call("cuCtxSetCurrent", Seq(ADDRESS), previous) }
       body(driver, version.get(JAVA_INT, 0L), name.getString(0L))
     }.get
+/** Keeps the CUDA primary context (and the cuBLAS handles created on it) alive between back-to-back sessions. A generation opens several
+  * sessions (text encoder, U-Net, VAE); creating and destroying the context costs about 90 ms and the cuBLAS handle about 150 ms each time.
+  * Once no session has been open for `SCALATORCH_CUDA_KEEP_CONTEXT_SECONDS` (default 20, 0 = never keep) the handles and the extra context
+  * reference are dropped, so the device memory of the context is returned when no generation is running. */
+private[ffm] object CudaContextKeeper:
+  val seconds: Long = sys.env.get("SCALATORCH_CUDA_KEEP_CONTEXT_SECONDS").flatMap(_.trim.toLongOption).getOrElse(20L)
+  def enabled: Boolean = seconds > 0
+  private final class State(var context: MemorySegment, var active: Int, var lastExit: Long, val closers: java.util.ArrayList[() => Unit])
+  private val states = new java.util.HashMap[Int, State]()
+  private val scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r =>
+    val t = new Thread(r, "scala-torch-cuda-context-keeper"); t.setDaemon(true); t
+  }
+  private lazy val handles: (java.lang.invoke.MethodHandle, java.lang.invoke.MethodHandle, java.lang.invoke.MethodHandle) =
+    val os = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT)
+    val lookup = SymbolLookup.libraryLookup(if os.startsWith("windows") then "nvcuda.dll" else "libcuda.so.1", Arena.global())
+    val linker = Linker.nativeLinker()
+    def find(symbol: String, d: FunctionDescriptor) = linker.downcallHandle(lookup.find(symbol).orElseThrow(), d)
+    (find("cuDevicePrimaryCtxRetain", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT)),
+      find("cuDevicePrimaryCtxRelease_v2", FunctionDescriptor.of(JAVA_INT, JAVA_INT)),
+      find("cuCtxSetCurrent", FunctionDescriptor.of(JAVA_INT, ADDRESS)))
+
+  /** A session starts on `device` (its own context reference is already taken): make sure our extra reference exists. */
+  def enter(device: Int): Unit =
+    if !enabled then return
+    try states.synchronized {
+      val st = states.get(device) match
+        case null =>
+          val created = new State(MemorySegment.NULL, 0, System.nanoTime(), new java.util.ArrayList[() => Unit]())
+          states.put(device, created); created
+        case existing => existing
+      if st.context == MemorySegment.NULL then
+        Using.resource(Arena.ofConfined()) { arena =>
+          val out = arena.allocate(ADDRESS)
+          if handles._1.invokeWithArguments(out, Int.box(device)).asInstanceOf[Integer].intValue() == 0 then st.context = out.get(ADDRESS, 0L)
+        }
+      st.active += 1
+    } catch case _: Throwable => ()
+
+  def exit(device: Int): Unit =
+    if !enabled then return
+    try states.synchronized {
+      val st = states.get(device)
+      if st != null then
+        st.active = math.max(0, st.active - 1)
+        st.lastExit = System.nanoTime()
+        scheduler.schedule(new Runnable { def run(): Unit = release(device) }, seconds, java.util.concurrent.TimeUnit.SECONDS)
+    } catch case _: Throwable => ()
+
+  /** Registers a resource that lives on the kept context (for example a cuBLAS handle); closed before the context is released. */
+  def onRelease(device: Int, closer: () => Unit): Unit =
+    states.synchronized { val st = states.get(device); if st != null then st.closers.add(closer) else closer() }
+
+  private def release(device: Int): Unit =
+    states.synchronized {
+      val st = states.get(device)
+      if st != null && st.active == 0 && st.context != MemorySegment.NULL &&
+          System.nanoTime() - st.lastExit >= seconds * 1_000_000_000L - 100_000_000L then
+        try
+          handles._3.invokeWithArguments(st.context)
+          st.closers.forEach(c => try c() catch case _: Throwable => ())
+          st.closers.clear()
+          handles._3.invokeWithArguments(MemorySegment.NULL)
+        catch case _: Throwable => ()
+        try handles._2.invokeWithArguments(Int.box(device)) catch case _: Throwable => ()
+        st.context = MemorySegment.NULL
+    }

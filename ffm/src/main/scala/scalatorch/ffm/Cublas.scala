@@ -8,7 +8,10 @@ import java.nio.file.{Files, Path, Paths}
 /** Optional cuBLAS SGEMM, loaded at run time from the CUDA Toolkit. Absent or unusable libraries return None
   * so callers keep the built-in kernels. TF32 tensor-core math is opt-in (`SCALATORCH_CUDA_TF32=1`).
   */
-private[ffm] final class Cublas private (handle: MemorySegment,sgemmHandle: MethodHandle,batchedHandle: MethodHandle,gemmExHandle: MethodHandle,gemmExBatchedHandle: MethodHandle,arena: Arena):
+private[ffm] final class Cublas private (handle: MemorySegment,sgemmHandle: MethodHandle,batchedHandle: MethodHandle,gemmExHandle: MethodHandle,gemmExBatchedHandle: MethodHandle,arena: Arena,setStreamHandle: MethodHandle):
+  /** Points the (shared) handle at the stream of the session that is about to use it. */
+  def bindStream(stream: MemorySegment): Unit =
+    require(setStreamHandle.invokeWithArguments(handle,stream).asInstanceOf[Integer].intValue()==0,"cublasSetStream_v2 failed")
   private val alpha=arena.allocate(JAVA_FLOAT); alpha.set(JAVA_FLOAT,0,1f)
   private val beta=arena.allocate(JAVA_FLOAT); beta.set(JAVA_FLOAT,0,0f)
   /** Row-major C[m,n] = A[m,k] * B[k,n] with leading dimensions lda, ldb, ldc (column-major trick). */
@@ -77,6 +80,19 @@ private[ffm] object Cublas:
     val full=for dir <- dirs; name <- names; p=dir.resolve(name) if Files.exists(p) yield p.toString
     names ++ full
 
+  private val shared=new java.util.concurrent.ConcurrentHashMap[(Int,Thread),Cublas]()
+
+  /** Per (device, thread) cuBLAS handle that outlives the session (see [[CudaContextKeeper]]); creating one costs about 150 ms.
+    * None when keeping is disabled, so the caller opens a private handle as before. */
+  def openShared(device: Int,stream: MemorySegment): Option[Cublas] =
+    if !CudaContextKeeper.enabled then return None
+    val key=(device,Thread.currentThread())
+    val existing=shared.get(key)
+    if existing!=null then { existing.bindStream(stream); return Some(existing) }
+    val created=open(Arena.global(),stream,destroy => CudaContextKeeper.onRelease(device,() => { shared.remove(key);destroy() }))
+    created.foreach(shared.put(key,_))
+    created
+
   /** Opens cuBLAS bound to `stream`; None when disabled or unavailable. `register` frees the handle. */
   def open(arena: Arena,stream: MemorySegment,register: (() => Unit) => Unit): Option[Cublas] =
     if sys.env.get("SCALATORCH_CUDA_CUBLAS").contains("0") then return None
@@ -106,6 +122,6 @@ private[ffm] object Cublas:
         require(setStream.invokeWithArguments(handle,stream).asInstanceOf[Integer].intValue()==0,"cublasSetStream_v2 failed")
         if sys.env.get("SCALATORCH_CUDA_TF32").contains("1") then
           setMath.invokeWithArguments(handle,Int.box(3)) // CUBLAS_TF32_TENSOR_OP_MATH
-        Some(new Cublas(handle,sgemm,batched,gemmEx,gemmExBatched,arena))
+        Some(new Cublas(handle,sgemm,batched,gemmEx,gemmExBatched,arena,setStream))
       catch case _: Throwable => None
     }.collectFirst { case Some(value) => value }

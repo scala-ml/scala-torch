@@ -86,3 +86,27 @@ class CudaHalfSuite extends FunSuite:
         tensor(data(b*h*t*d,29),b.toLong,h.toLong,t.toLong,d.toLong),tensor(data(b*h*t*d,30),b.toLong,h.toLong,t.toLong,d.toLong)),1e-2)(
       (s,v) => s.causalAttention(v(0),v(1),v(2)))
   }
+
+  test("half attention with a tiny scratch budget (heads and queries chunked) equals the unchunked result") {
+    gpu()
+    val (b,h,t,kt,d)=(2,3,53,77,16)
+    val q=tensor(data(b*h*t*d,31),b.toLong,h.toLong,t.toLong,d.toLong)
+    val k=tensor(data(b*h*kt*d,32),b.toLong,h.toLong,kt.toLong,d.toLong)
+    val v=tensor(data(b*h*kt*d,33),b.toLong,h.toLong,kt.toLong,d.toLong)
+    def run(scratchBytes: Long): Array[Float] =
+      val previous=CudaSession.attentionScratchBytes
+      CudaSession.attentionScratchBytes=scratchBytes
+      try CudaSession.withDevice(maxBytes=1L<<30) { s =>
+        assume(s.hasCublas,"cuBLAS unavailable")
+        val (qa,ka,va)=(s.uploadHalf(q),s.uploadHalf(k),s.uploadHalf(v))
+        val out=s.scaledDotProductAttention(qa,ka,va,maxScoreElements=1L)
+        try out.toCpu.toFloatArray finally { out.close();qa.close();ka.close();va.close() }
+      } finally CudaSession.attentionScratchBytes=previous
+    val whole=run(1L<<30)
+    // 77 keys x 2 bytes = 154 B per query row: 1 KiB holds 6 rows, so a head (53 queries) needs 9 query blocks
+    val chunked=run(1024L)
+    assertEquals(chunked.length,whole.length)
+    var worst=0.0
+    for i <- whole.indices do worst=math.max(worst,math.abs(whole(i)-chunked(i)))
+    assert(worst<1e-3,s"max abs difference $worst")
+  }

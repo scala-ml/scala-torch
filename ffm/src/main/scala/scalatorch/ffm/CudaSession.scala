@@ -87,7 +87,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
   driver.cleanup { driver.call("cuStreamDestroy_v2",Seq(ADDRESS),stream) }
-  private val cublas: Option[Cublas]=Cublas.open(driver.arena,stream,action => driver.cleanup(action()))
+  private val cublas: Option[Cublas]=Cublas.openShared(deviceIndex,stream).orElse(Cublas.open(driver.arena,stream,action => driver.cleanup(action())))
   private def cublasGemm(m: Int,n: Int,k: Int,a: Long,lda: Int,b: Long,ldb: Int,c: Long,ldc: Int): Boolean =
     cublas match
       case Some(lib) if m>0 && n>0 && k>0 =>
@@ -652,37 +652,44 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val batch=(q(0)*q(1)).toInt;val qt=q(2).toInt;val kt=k(2).toInt;val d=q(3).toInt;val dv=v(3).toInt
     val result=allocate(output,half=true)
     try
+      // The score matrix never exists as a whole: heads are processed in groups and, when even one head does not fit the scratch
+      // budget (very large images), the queries in blocks. `SCALATORCH_CUDA_ATTENTION_SCRATCH_MB` (default 256) trades VRAM for speed.
+      val budget=math.min(CudaSession.attentionScratchBytes,math.max(1L,maxBytes-used))
       val perBatch=qt.toLong*kt*2
-      val budget=math.min(2147483648L,maxBytes-used)
       val chunk=math.max(1L,math.min(batch.toLong,budget/perBatch)).toInt
+      val queryBlock=if perBatch<=budget || causal then qt else math.max(1,math.min(qt.toLong,budget/(kt.toLong*2)).toInt)
       val scale=(1.0/math.sqrt(d.toDouble)).toFloat
-      Using.resource(allocate(Shape.from(Seq(chunk.toLong*qt*kt)),half=true)) { scratch =>
+      Using.resource(allocate(Shape.from(Seq(chunk.toLong*queryBlock*kt)),half=true)) { scratch =>
         var start=0
         while start<batch do
           val n=math.min(chunk,batch-start)
-          val qa=query.address+start.toLong*qt*d*2
-          val ka=key.address+start.toLong*kt*d*2
-          val va=value.address+start.toLong*kt*dv*2
-          val ra=result.address+start.toLong*qt*dv*2
-          val started=if profileEnabled then System.nanoTime() else 0L
-          cublas.get.gemmHalfStridedBatched(1,0,kt,qt,d,scale,ka,d,kt.toLong*d,qa,d,qt.toLong*d,scratch.address,kt,qt.toLong*kt,n)
-          if profileEnabled then
-            driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
-            record("half_attention_scores",started)
-          if causal then
-            launch(n.toLong*qt,halfKernels("h_softmax_causal"),256,256,"h_softmax_causal") { arena =>
-              Seq(arena.allocateFrom(JAVA_LONG,scratch.address),arena.allocateFrom(JAVA_INT,(n.toLong*qt).toInt),
-                arena.allocateFrom(JAVA_INT,kt),arena.allocateFrom(JAVA_INT,qt),arena.allocateFrom(JAVA_INT,queryStart))
-            }
-          else
-            launch(n.toLong*qt,halfKernels("h_softmax"),256,256,"h_softmax") { arena =>
-              Seq(arena.allocateFrom(JAVA_LONG,scratch.address),arena.allocateFrom(JAVA_INT,(n.toLong*qt).toInt),arena.allocateFrom(JAVA_INT,kt))
-            }
-          val started2=if profileEnabled then System.nanoTime() else 0L
-          cublas.get.gemmHalfStridedBatched(0,0,dv,qt,kt,1f,va,dv,kt.toLong*dv,scratch.address,kt,qt.toLong*kt,ra,dv,qt.toLong*dv,n)
-          if profileEnabled then
-            driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
-            record("half_attention_output",started2)
+          var qs=0
+          while qs<qt do
+            val qb=math.min(queryBlock,qt-qs)
+            val qa=query.address+start.toLong*qt*d*2+qs.toLong*d*2
+            val ka=key.address+start.toLong*kt*d*2
+            val va=value.address+start.toLong*kt*dv*2
+            val ra=result.address+start.toLong*qt*dv*2+qs.toLong*dv*2
+            val started=if profileEnabled then System.nanoTime() else 0L
+            cublas.get.gemmHalfStridedBatched(1,0,kt,qb,d,scale,ka,d,kt.toLong*d,qa,d,qt.toLong*d,scratch.address,kt,qb.toLong*kt,n)
+            if profileEnabled then
+              driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+              record("half_attention_scores",started)
+            if causal then
+              launch(n.toLong*qb,halfKernels("h_softmax_causal"),256,256,"h_softmax_causal") { arena =>
+                Seq(arena.allocateFrom(JAVA_LONG,scratch.address),arena.allocateFrom(JAVA_INT,(n.toLong*qb).toInt),
+                  arena.allocateFrom(JAVA_INT,kt),arena.allocateFrom(JAVA_INT,qb),arena.allocateFrom(JAVA_INT,queryStart))
+              }
+            else
+              launch(n.toLong*qb,halfKernels("h_softmax"),256,256,"h_softmax") { arena =>
+                Seq(arena.allocateFrom(JAVA_LONG,scratch.address),arena.allocateFrom(JAVA_INT,(n.toLong*qb).toInt),arena.allocateFrom(JAVA_INT,kt))
+              }
+            val started2=if profileEnabled then System.nanoTime() else 0L
+            cublas.get.gemmHalfStridedBatched(0,0,dv,qb,kt,1f,va,dv,kt.toLong*dv,scratch.address,kt,qb.toLong*kt,ra,dv,qt.toLong*dv,n)
+            if profileEnabled then
+              driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+              record("half_attention_output",started2)
+            qs+=qb
           start+=n
       }
       result
@@ -1247,6 +1254,9 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     if failure != null then throw failure
 
 object CudaSession:
+  /** Scratch for half-precision attention scores (bytes); smaller = less VRAM, more (still tiny) GEMM launches. */
+  @volatile private[ffm] var attentionScratchBytes: Long =
+    sys.env.get("SCALATORCH_CUDA_ATTENTION_SCRATCH_MB").flatMap(_.trim.toLongOption).filter(_ > 0).getOrElse(256L)*1024L*1024L
   def withDevice[A](deviceIndex: Int = 0, maxBytes: Long = 1073741824L)(body: CudaSession => A): A =
     require(maxBytes >= 0,"negative CUDA allocation budget")
     CudaDriver.withDevice(deviceIndex) { (driver,version,name) =>

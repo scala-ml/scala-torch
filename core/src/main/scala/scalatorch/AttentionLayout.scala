@@ -12,7 +12,8 @@ private[scalatorch] object AttentionLayout:
     if q.numel==0 then return (output,0L)
     require(k.dims(2)>0,"nonempty queries require keys")
     val scores=Shape.from(Seq(q.dims(0),q.dims(1),q.dims(2),k.dims(2))).numel
-    require(scores<=maxScores && (!int32Scores || scores<=Int.MaxValue),"attention score workspace limit exceeded")
+    // The Float16 CUDA path (int32Scores=false) never materializes the whole score matrix: it chunks heads and queries inside a scratch budget.
+    require(!int32Scores || (scores<=maxScores && scores<=Int.MaxValue),"attention score workspace limit exceeded")
     (output,scores)
 
 private[scalatorch] object RotaryCoefficients:
