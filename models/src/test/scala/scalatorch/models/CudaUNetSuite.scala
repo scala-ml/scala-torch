@@ -89,3 +89,15 @@ class CudaUNetSuite extends munit.FunSuite:
       assertEquals(s.allocatedBytes,0L)
     }
   }
+  test("classifier-free guidance as one batch of two matches the CPU predictor") {
+    val cpu=loaded()
+    val positive=context(1);val negative=Tensor.fromFloats(Array.tabulate(3*32)(i => math.sin(i*.31).toFloat),Shape.from(Seq(1L,3L,32L)))
+    for guidance <- Seq(1.5f,7.5f); t <- Seq(7.5f,123f) do
+      val sample=input(1,4,6)
+      val expected=UNetExecution.Cpu.withPredictor(cpu,positive,Some(negative),() => false)(_.apply(sample,times(t),guidance))
+      val actual=UNetExecution.Cuda().withPredictor(cpu,positive,Some(negative),() => false)(_.apply(sample,times(t),guidance))
+      assertEquals(actual.shape,expected.shape)
+      val error=actual.toFloatArray.zip(expected.toFloatArray).map((a,e) => math.abs(a.toDouble-e)).max
+      println(s"CUDA batched guidance g=$guidance t=$t maxAbsError=$error")
+      assert(error<1e-4)
+  }

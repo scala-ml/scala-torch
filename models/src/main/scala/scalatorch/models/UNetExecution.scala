@@ -270,6 +270,37 @@ object UNetExecution:
                 refStep: Option[(ReferenceOnly.BankState,Tensor[Float])]): Tensor[Float] =
               VaeExecution.checkCancelled(cancelled)
               require(guidance.isFinite && guidance>=0,"invalid guidance scale")
+              // Plain classifier-free guidance: both passes go through the U-Net as one batch of two.
+              def batchedPlain(): Option[Tensor[Float]] =
+                val eligible=sample.shape.rank==4 && sample.shape.dims.head==1 && negativeContext.isDefined && guidance>1f && controls.isEmpty &&
+                  detail.isEmpty && cads.isEmpty && refStep.isEmpty && chgState.isEmpty && multiDiffusion.isEmpty && pag.isEmpty && sagStep.isEmpty &&
+                  neutralPlan.isEmpty && segUncond.isEmpty && positiveSigns.isEmpty && negativeSigns.isEmpty && conditionalOverride.isEmpty &&
+                  unconditionalOverride.isEmpty && positiveAddedOverride.isEmpty && negativeAddedOverride.isEmpty && kohyaHrFix.isEmpty &&
+                  tokenDownsampling.isEmpty && guidanceHook.isEmpty && dynamicThresholding.isEmpty && scheduled.isEmpty && rescale==0f &&
+                  positiveAddition.isDefined==negativeAddition.isDefined && CudaUNet.batchedGuidance
+                if !eligible then None
+                else
+                  try
+                    Using.Manager { temporary =>
+                      val input=temporary(session.upload(sample))
+                      val stacked=temporary(session.cat(Seq(input,input),0))
+                      val context=temporary(session.cat(Seq(negativeContext.get,positiveContext),0))
+                      val addition=positiveAddition.map(p => temporary(session.cat(Seq(negativeAddition.get,p),0)))
+                      val output=temporary(unet.applyPrepared(stacked,timesteps,context,addition,None))
+                      VaeExecution.checkCancelled(cancelled)
+                      val both=output.toCpu
+                      val values=both.toFloatArray
+                      val half=values.length/2
+                      // same operation order as the two-pass path: negative+(positive+(-negative))*guidance
+                      val guided=Array.tabulate(half) { i =>
+                        val n=values(i);val p=values(half+i)
+                        n+(p+(-n))*guidance
+                      }
+                      Some(Tensor.fromFloats(guided,Shape.from(Seq(1L)++both.shape.dims.drop(1))))
+                    }.get
+                  catch
+                    case error: Throwable if CudaUNet.memoryFailure(error) => None
+              batchedPlain().getOrElse(
               KohyaHrFix.withStep(kohyaHrFix,timesteps.toFloatArray(0)) {
               val tdStep=tokenDownsampling.getOrElse((TokenDownsamplingConfig(),false,0,1))
               TokenDownsampling.withStep(tokenDownsampling.map(_._1),tdStep._2,tdStep._3,tdStep._4,model.downBlocks.size) {
@@ -456,7 +487,7 @@ object UNetExecution:
                 val result=predicted.toCpu
                 VaeExecution.checkCancelled(cancelled)
                 addPagAndSag(scheduledResult.getOrElse(positiveCpu.fold(result)(positive=>GuidanceRescale(result,positive,rescale))))
-              }.get } }
+              }.get } })
           )
         }.get
       }

@@ -32,6 +32,36 @@ class NativeWorkerSuite extends munit.FunSuite:
       assert(next().contains("\"done\":true"))
     finally worker.close()
   }
+  test("threads of one job may begin publication at the same moment") {
+    val lines=new LinkedBlockingQueue[String]()
+    val output=new java.io.OutputStream:
+      def write(b: Int): Unit=throw UnsupportedOperationException()
+      override def write(b: Array[Byte],off: Int,len: Int): Unit=
+        lines.add(new String(b,off,len,java.nio.charset.StandardCharsets.UTF_8).trim)
+    val backend=new NativeWorkerBackend:
+      def supported=Set("generate")
+      def execute(request: NativeRequest,context: NativeWorkContext): Map[String,NativeJson]=
+        val start=new CountDownLatch(1)
+        val failures=new java.util.concurrent.ConcurrentLinkedQueue[Throwable]()
+        val threads=(0 until 8).map { _ =>
+          val t=new Thread(new Runnable:
+            def run(): Unit=
+              start.await()
+              try context.beginPublication() catch case e: Throwable => { failures.add(e);() })
+          t.start();t }
+        start.countDown()
+        threads.foreach(_.join())
+        Map("failures"->NativeJson.Number(failures.size))
+    val worker=new NativeWorker(output,backend)
+    def next()=Option(lines.poll(5,TimeUnit.SECONDS)).getOrElse(fail("missing response"))
+    try
+      assert(next().contains("hello"))
+      for round <- 0 until 20 do
+        worker.handle(s"""{"id":"r$round","type":"generate"}""")
+        val reply=next()
+        assert(reply.contains("\"failures\":0"),reply)
+    finally worker.close()
+  }
   test("stream dispatch recovers malformed input and handles protection and shutdown") {
     val out=new java.io.ByteArrayOutputStream()
     val backend=new NativeWorkerBackend:

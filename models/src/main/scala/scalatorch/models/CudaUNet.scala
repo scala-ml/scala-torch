@@ -23,6 +23,12 @@ final class CudaUNet private (session: CudaSession,runtime: CudaDiffusionRuntime
   def close(): Unit=runtime.close()
 
 object CudaUNet:
+  /** Runs cond and uncond as one batch of two; `SCALATORCH_CUDA_BATCH_GUIDANCE=0` switches it off. */
+  val batchedGuidance: Boolean=sys.env.get("SCALATORCH_CUDA_BATCH_GUIDANCE").forall(v => v.trim!="0")
+  private[models] def memoryFailure(error: Throwable): Boolean=
+    val text=Iterator.iterate[Throwable](error)(_.getCause).takeWhile(_!=null).take(5).map(e => Option(e.getMessage).getOrElse("")).mkString(" ")
+    text.contains("allocation budget exceeded") || text.toLowerCase(java.util.Locale.ROOT).contains("out of memory") || text.contains("CUDA_ERROR_OUT_OF_MEMORY")
+
   /** With offloadWeights, retain immutable CPU tensors and upload weights per
     * operation. Activations stay resident; transfers trade throughput for VRAM.
     */

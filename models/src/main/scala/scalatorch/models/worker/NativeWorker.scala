@@ -52,7 +52,9 @@ final class NativeWorker(out: OutputStream,backend: NativeWorkerBackend) extends
         case None => running=false
         case Some((job,request)) =>
           var publishing=false
-          val context=new NativeWorkContext(() => job.cancelled,() => {
+          val publishLock=new Object
+          // Parallel count groups publish from several threads at once, so check-and-set must be atomic.
+          val context=new NativeWorkContext(() => job.cancelled,() => publishLock.synchronized {
             if publishing then true
             else { publishing=control.beginPublication(job);publishing }
           },(name,fields) => emitter.event(job.id,name,fields))
