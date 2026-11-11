@@ -839,13 +839,15 @@ private[models] object CudaDiffusionRuntime:
       // Model weights stay on the device between sessions (shared); LoRA adapters differ per request and are uploaded privately.
       base.foreach { p =>
         VaeExecution.checkCancelled(cancelled)
-        if offloadWeights then host(p)=p.data else uploaded(p)=session.sharedUpload(p,p.data,half)
+        if offloadWeights then host(p)=p.data else uploaded(p)=session.sharedUpload(p,p.data,half,if half then Some(() => HalfWeightCache.bits(p,p.data)) else None)
       }
       (if includeAdapters then LinearAdapterScope.parameters.filterNot(baseSet.contains) else Vector.empty).distinct.foreach { p =>
         VaeExecution.checkCancelled(cancelled)
         if offloadWeights then host(p)=p.data else uploaded(p)=(if half then session.uploadHalf(p.data) else session.upload(p.data))
       }
       VaeExecution.checkCancelled(cancelled)
+      // A Float16 upload stages every tensor as Float32 on the device first; those blocks are of no use to the sampling that follows.
+      if !offloadWeights then session.trimFreed()
       if sys.env.get("SCALATORCH_LOAD_PROFILE").contains("1") then
         System.err.println(f"[scala-torch load] CUDA weight upload (${model.getClass.getSimpleName}, half=$half): ${(System.nanoTime()-uploadStart)/1e9}%.2f s, ${uploaded.size} tensors")
       new CudaDiffusionRuntime(session,uploaded.toMap,host.toMap,cancelled,half)

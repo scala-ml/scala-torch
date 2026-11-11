@@ -10,10 +10,31 @@ private[ffm] final class CudaDriver private (
 ):
   private val lookup = SymbolLookup.libraryLookup(CudaDriver.libraryName, arena)
   private val linker = Linker.nativeLinker()
+  // Downcall handles are built once per (symbol, signature). Building one per call cost more than the kernel launch it wrapped:
+  // a U-Net pass makes about a thousand driver calls.
+  private val handles = new java.util.concurrent.ConcurrentHashMap[(String, Seq[MemoryLayout]), java.lang.invoke.MethodHandle]()
+  private def handleFor(name: String, layouts: Seq[MemoryLayout]): java.lang.invoke.MethodHandle =
+    val key = (name, layouts)
+    val known = handles.get(key)
+    if known != null then known
+    else
+      val symbol = lookup.find(name).orElseThrow(() => UnsatisfiedLinkError(s"CUDA symbol missing: $name"))
+      val created = linker.downcallHandle(symbol, FunctionDescriptor.of(JAVA_INT, layouts*))
+      handles.put(key, created)
+      created
   private def result(name: String, layouts: Seq[MemoryLayout], args: AnyRef*): Int =
-    val symbol = lookup.find(name).orElseThrow(() => UnsatisfiedLinkError(s"CUDA symbol missing: $name"))
-    val handle = linker.downcallHandle(symbol, FunctionDescriptor.of(JAVA_INT, layouts*))
-    handle.invokeWithArguments(args*).asInstanceOf[Integer].intValue()
+    handleFor(name, layouts).invokeWithArguments(args*).asInstanceOf[Integer].intValue()
+  private val launchLayouts: Seq[MemoryLayout] = Seq(ADDRESS) ++ Seq.fill(7)(JAVA_INT) ++ Seq.fill(3)(ADDRESS)
+  private lazy val launchHandle = handleFor("cuLaunchKernel", launchLayouts)
+  private val syncLayouts: Seq[MemoryLayout] = Seq(ADDRESS)
+  private lazy val syncHandle = handleFor("cuStreamSynchronize", syncLayouts)
+  /** One-dimensional kernel launch on `stream`, without boxing or a signature lookup. */
+  def launchKernel(kernel: MemorySegment, blocks: Int, threadsPerBlock: Int, stream: MemorySegment, params: MemorySegment): Unit =
+    val code: Int = launchHandle.invokeExact(kernel, blocks, 1, 1, threadsPerBlock, 1, 1, 0, stream, params, MemorySegment.NULL)
+    if code != 0 then throw IllegalStateException(s"cuLaunchKernel failed with CUDA status $code")
+  def synchronize(stream: MemorySegment): Unit =
+    val code: Int = syncHandle.invokeExact(stream)
+    if code != 0 then throw IllegalStateException(s"cuStreamSynchronize failed with CUDA status $code")
   def call(name: String, layouts: Seq[MemoryLayout], args: AnyRef*): Unit =
     val code=result(name,layouts,args*)
     if code != 0 then throw IllegalStateException(s"$name failed with CUDA status $code")
@@ -46,6 +67,14 @@ private[ffm] final class CudaDriver private (
     val address = pointer.get(JAVA_LONG, 0L)
     cleanup { call("cuMemFree_v2", Seq(JAVA_LONG), Long.box(address)) }
     address
+  private lazy val infoCells=(arena.allocate(JAVA_LONG),arena.allocate(JAVA_LONG))
+  private val infoLayouts: Seq[MemoryLayout] = Seq(ADDRESS, ADDRESS)
+  private lazy val infoHandle = handleFor("cuMemGetInfo_v2", infoLayouts)
+  /** Free device memory in bytes as the driver reports it now. */
+  def freeBytes(): Long =
+    val code: Int = infoHandle.invokeExact(infoCells._1, infoCells._2)
+    if code != 0 then throw IllegalStateException(s"cuMemGetInfo_v2 failed with CUDA status $code")
+    infoCells._1.get(JAVA_LONG, 0L)
   def memoryInfo(): (Long,Long) =
     val free=arena.allocate(JAVA_LONG)
     val total=arena.allocate(JAVA_LONG)

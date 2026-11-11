@@ -7,10 +7,12 @@ import java.nio.charset.StandardCharsets.UTF_8
 import scala.collection.mutable
 import scala.util.Using
 
-private[ffm] final class CudaAllocation(val address: Long,val bytes: Long):
+private[ffm] final class CudaAllocation(val address: Long,val bytes: Long,val arena: CudaArena):
   var references=1L
   /** Owned by [[CudaWeightPool]]: shared between sessions and threads, never freed or counted by a session. */
   @volatile var pooled=false
+  /** Open sessions that use this pooled allocation; guarded by the pool's lock. */
+  var users=0
 
 /** Independently releasable packed Float32 handle; reshape may share an allocation. */
 final class CudaTensor private[ffm] (private[ffm] val session: CudaSession,
@@ -27,15 +29,64 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   private val owner=Thread.currentThread()
   private var closed=false
   private var used=0L
-  // Freed device blocks are kept by exact size and reused, so steady-state inference does no cuMemAlloc/cuMemFree
+  // Device memory comes from an arena of large chunks (see [[CudaArena]]): steady-state inference does no cuMemAlloc/cuMemFree
   // (cuMemFree synchronizes the whole device). Reuse is safe because every kernel and cuBLAS call runs on one stream.
-  private val pool=mutable.Map.empty[Long,mutable.ArrayDeque[Long]]
-  private var pooled=0L
-  private val poolCap=math.min(maxBytes/2,6L<<30)
-  private def trimPool(): Unit =
-    pool.foreach { (_,blocks) => blocks.foreach(address => driver.call("cuMemFree_v2",Seq(JAVA_LONG),Long.box(address))) }
-    pool.clear();pooled=0L
-  private def hostSync(): Unit = driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+  private val arena=new CudaArena(CudaSession.chunkBytes)
+  private val weightArena=CudaWeightPool.arena(deviceIndex)
+  private var peakUsed=0L
+  private var peakOwned=0L
+  /** Set while a kept weight is uploaded: its blocks come from the arena of the kept weights, which outlives the session. */
+  private var sharedAllocation=false
+  private val memoryLog=sys.env.get("SCALATORCH_CUDA_MEMORY_LOG").contains("1")
+  private val held=CudaWeightPool.heldCounter(deviceIndex)
+  private val touchedShared: java.util.Set[CudaAllocation]=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[CudaAllocation,java.lang.Boolean]())
+  private val rawFree: (Long,Long) => Unit = (address,bytes) =>
+    hostSync() // kernels that still use the chunk may be queued on this session's stream
+    driver.call("cuMemFree_v2",Seq(JAVA_LONG),Long.box(address))
+    held.addAndGet(-bytes)
+  private val rawAllocate: Long => Long = bytes => Using.resource(Arena.ofConfined()) { scope =>
+    val result=scope.allocate(JAVA_LONG)
+    driver.call("cuMemAlloc_v2",Seq(ADDRESS,JAVA_LONG),result,Long.box(bytes))
+    held.addAndGet(bytes)
+    result.get(JAVA_LONG,0)
+  }
+  private def trimPool(): Long = arena.trim(rawFree)
+  /** Returns the chunks that hold no tensor to the device (for example after the Float32 staging blocks of a weight upload). */
+  def trimFreed(): Unit = { check();hostSync();trimPool();weightArena.trim(rawFree) }
+  private def deviceFree(): Long = CudaWeightPool.governedFree(deviceIndex,driver.freeBytes())
+  private val stamp=CudaWeightPool.clock.incrementAndGet()
+  /** Evicts unused kept weights, oldest first, until the device has `needed` bytes free or nothing is left to evict. */
+  private def evictSharedWeights(needed: Long): Boolean =
+    var any=false
+    var more=true
+    while more do
+      val short=needed-deviceFree()
+      if short<=0 then more=false
+      else
+        // A chunk only returns to the device when all its blocks are gone, so ask for a chunk more than is missing.
+        val evicted=CudaWeightPool.evictUnused(deviceIndex,(if short>(Long.MaxValue>>2) then Long.MaxValue else short+67108864L))
+        if evicted.isEmpty then more=false
+        else
+          any=true
+          evicted.foreach(e => weightArena.release(e.allocation.address))
+          weightArena.trim(rawFree)
+    any
+  /** Before a new chunk: when the device is short of `bytes`, give back this session's empty chunks, then the kept weights that no open
+    * session uses. On Windows an over-full device does not fail, it silently spills into system memory and becomes very slow. */
+  private val makeRoom: Long => Unit = bytes =>
+    val needed=bytes+67108864L
+    if deviceFree()<needed then
+      hostSync()
+      trimPool();weightArena.trim(rawFree)
+      if deviceFree()<needed then evictSharedWeights(needed)
+  private val rawAllocateOrEvict: Long => Long = bytes =>
+    try rawAllocate(bytes)
+    catch case error: Throwable =>
+      hostSync()
+      val freed=trimPool()+weightArena.trim(rawFree)
+      if !evictSharedWeights(Long.MaxValue>>1) && freed==0L then throw error
+      rawAllocate(bytes)
+  private def hostSync(): Unit = driver.synchronize(stream)
   private def dtoh(host: MemorySegment,address: java.lang.Long,bytes: java.lang.Long): Unit =
     hostSync()
     driver.call("cuMemcpyDtoH_v2",Seq(ADDRESS,JAVA_LONG,JAVA_LONG),host,address,bytes)
@@ -95,7 +146,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       case Some(lib) if m>0 && n>0 && k>0 =>
         val started=if profileEnabled then System.nanoTime() else 0L
         lib.sgemmRowMajor(m,n,k,a,lda,b,ldb,c,ldc)
-        driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+        driver.synchronize(stream)
         if profileEnabled then record(s"cublas_sgemm[$m,$n,$k]",started)
         true
       case _ => false
@@ -124,20 +175,12 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     require(shape.numel <= Int.MaxValue,"CUDA tensor exceeds Int indexing")
     val bytes=math.max(shape.numel*(if half then 2L else 4L),1L)
     require(bytes <= maxBytes-used,"CUDA session allocation budget exceeded")
-    def rawAllocate(): Long = Using.resource(Arena.ofConfined()) { arena =>
-      val result=arena.allocate(JAVA_LONG)
-      driver.call("cuMemAlloc_v2",Seq(ADDRESS,JAVA_LONG),result,Long.box(bytes))
-      result.get(JAVA_LONG,0)
-    }
-    val address=pool.get(bytes).filter(_.nonEmpty) match
-      case Some(blocks) => pooled-=bytes;blocks.removeLast()
-      case None =>
-        try rawAllocate()
-        catch case error: Throwable if pooled>0 =>
-          trimPool()
-          rawAllocate()
-    val tensor=new CudaTensor(this,shape,new CudaAllocation(address,bytes),half)
+    val from=if sharedAllocation then weightArena else arena
+    val address=from.allocate(bytes,makeRoom,rawAllocateOrEvict,rawFree)
+    val tensor=new CudaTensor(this,shape,new CudaAllocation(address,bytes,from),half)
     live+=tensor;used+=bytes
+    if used>peakUsed then peakUsed=used
+    if arena.ownedBytes>peakOwned then peakOwned=arena.ownedBytes
     tensor
 
   def reshape(value: CudaTensor,shape: Shape): CudaTensor =
@@ -345,7 +388,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
           val started=if profileEnabled then System.nanoTime() else 0L
           cublas.get.sgemmStridedBatched(1,0,kt,qt,d,(1.0/math.sqrt(d.toDouble)).toFloat,
             key.address,d,kt.toLong*d,query.address,d,qt.toLong*d,scratch.address,kt,qt.toLong*kt,batch)
-          driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+          driver.synchronize(stream)
           if profileEnabled then record("cublas_attention_scores",started)
           launch(batch.toLong*qt,kernels("softmax_par"),threadsPerBlock=256,threadsPerOutput=256,label="softmax_par") { arena =>
             Seq(arena.allocateFrom(JAVA_LONG,scratch.address),arena.allocateFrom(JAVA_INT,(batch.toLong*qt).toInt),
@@ -354,7 +397,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
           val started2=if profileEnabled then System.nanoTime() else 0L
           cublas.get.sgemmStridedBatched(0,0,dv,qt,kt,1f,
             value.address,dv,kt.toLong*dv,scratch.address,kt,qt.toLong*kt,result.address,dv,qt.toLong*dv,batch)
-          driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+          driver.synchronize(stream)
           if profileEnabled then record("cublas_attention_output",started2)
         }
         return result
@@ -675,7 +718,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
             val started=if profileEnabled then System.nanoTime() else 0L
             cublas.get.gemmHalfStridedBatched(1,0,kt,qb,d,scale,ka,d,kt.toLong*d,qa,d,qt.toLong*d,scratch.address,kt,qb.toLong*kt,n)
             if profileEnabled then
-              driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+              driver.synchronize(stream)
               record("half_attention_scores",started)
             if causal then
               launch(n.toLong*qb,halfKernels("h_softmax_causal"),256,256,"h_softmax_causal") { arena =>
@@ -689,7 +732,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
             val started2=if profileEnabled then System.nanoTime() else 0L
             cublas.get.gemmHalfStridedBatched(0,0,dv,qb,kt,1f,va,dv,kt.toLong*dv,scratch.address,kt,qb.toLong*kt,ra,dv,qt.toLong*dv,n)
             if profileEnabled then
-              driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+              driver.synchronize(stream)
               record("half_attention_output",started2)
             qs+=qb
           start+=n
@@ -732,23 +775,30 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     * uploads `source`, later calls return a view of the same device memory. `key` identifies the parameter (by identity), `source` is checked by
     * identity as well, so replaced data is uploaded again. The memory is freed after the context keeper's idle time or by `releaseSharedWeights`.
     * Falls back to a private upload when keeping is disabled. */
-  def sharedUpload(key: AnyRef,source: Tensor[Float],half: Boolean): CudaTensor =
+  def sharedUpload(key: AnyRef,source: Tensor[Float],half: Boolean,halfBits: Option[() => MemorySegment]=None): CudaTensor =
     check()
     if !CudaContextKeeper.enabled then return (if half then uploadHalf(source) else upload(source))
     def view(entry: CudaWeightPool.Entry): CudaTensor =
       val v=new CudaTensor(this,entry.shape,entry.allocation,half)
       live+=v
       v
-    val hit=CudaWeightPool.get(deviceIndex,key,half,source)
+    val hit=CudaWeightPool.acquire(deviceIndex,key,half,source,touchedShared,stamp)
     if hit!=null then return view(hit)
     CudaWeightPool.lock.synchronized {
-      val again=CudaWeightPool.get(deviceIndex,key,half,source)
+      val again=CudaWeightPool.acquire(deviceIndex,key,half,source,touchedShared,stamp)
       if again!=null then view(again)
       else
-        val tensor=if half then uploadHalf(source) else upload(source)
+        // Only the kept tensor comes from the shared arena. The Float32 staging block of a half upload stays in this session's arena:
+        // a block freed there is reused on this stream only, so the queued conversion cannot race with another session.
+        def kept(body: => CudaTensor): CudaTensor = { sharedAllocation=true;try body finally sharedAllocation=false }
+        // Where weights get evicted they are uploaded again and again: send the cached Float16 host copy (half the bytes, no staging).
+        val tensor=
+          if half && halfBits.nonEmpty && CudaWeightPool.evictedOnce then kept(uploadHalfBits(source.shape,halfBits.get()))
+          else if half then Using.resource(upload(source))(staged => kept(castToHalf(staged)))
+          else kept(upload(source))
         tensor.allocation.pooled=true
         used-=tensor.allocation.bytes
-        CudaWeightPool.put(deviceIndex,key,new CudaWeightPool.Entry(tensor.allocation,tensor.shape,half,source))
+        CudaWeightPool.put(deviceIndex,key,new CudaWeightPool.Entry(tensor.allocation,tensor.shape,half,source),touchedShared,stamp)
         tensor
     }
 
@@ -813,7 +863,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
           val started=if profileEnabled then System.nanoTime() else 0L
           cublas.get.gemmHalfRowMajorBT(m,n,k,x.address,w.address,half.address)
           if profileEnabled then
-            driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+            driver.synchronize(stream)
             record(s"half_gemm_bt[$m,$n,$k]",started)
         return half
       catch case error: Throwable =>
@@ -824,7 +874,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       if m>0 && n>0 && k>0 then
         val started=if profileEnabled then System.nanoTime() else 0L
         cublas.get.sgemmRowMajorBT(m,n,k,x.address,w.address,result.address)
-        driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+        driver.synchronize(stream)
         if profileEnabled then record(s"cublas_sgemm_bt[$m,$n,$k]",started)
       result
     catch case error: Throwable =>
@@ -857,7 +907,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
         if m>0 && n>0 && k>0 then
           val started=if profileEnabled then System.nanoTime() else 0L
           cublas.get.gemmExHalfBT(m,n,k,xHalf.address,wHalf.address,result.address)
-          driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+          driver.synchronize(stream)
           if profileEnabled then record(s"cublas_gemm_fp16[$m,$n,$k]",started)
         result
       catch case error: Throwable =>
@@ -997,7 +1047,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
           cublas.get.gemmHalfRowMajor(outputChannelsPerGroup,positions,k.toInt,weight.address+weightOffset,k.toInt,
             inputAddress,ldb,output.address+outputOffset,spatial.toInt)
           if profileEnabled then
-            driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+            driver.synchronize(stream)
             record(s"half_conv_gemm[$outputChannelsPerGroup,$positions,$k]",started)
         if direct then
           var batch=0
@@ -1241,11 +1291,9 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
         val params=arena.allocate(ADDRESS,args.size.toLong)
         args.zipWithIndex.foreach((arg,i) => params.setAtIndex(ADDRESS,i.toLong,arg))
         val blocks=((count+outputsPerBlock-1)/outputsPerBlock).toInt
-        driver.call("cuLaunchKernel",Seq(ADDRESS) ++ Seq.fill(7)(JAVA_INT) ++ Seq.fill(3)(ADDRESS),
-          kernel,Int.box(blocks),Int.box(1),Int.box(1),
-          Int.box(threadsPerBlock),Int.box(1),Int.box(1),Int.box(0),stream,params,MemorySegment.NULL)
+        driver.launchKernel(kernel,blocks,threadsPerBlock,stream,params)
         if syncEveryLaunch then
-          try driver.call("cuStreamSynchronize",Seq(ADDRESS),stream)
+          try driver.synchronize(stream)
           catch case error: Throwable => throw IllegalStateException(s"CUDA kernel '$label' failed during synchronization",error)
         if profileEnabled then
           val resolved=if label!="unknown" then label else kernels.collectFirst {
@@ -1264,10 +1312,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       validate(tensor)
       if tensor.allocation.references==1 then
         val size=tensor.allocation.bytes
-        if pooled+size<=poolCap then
-          pool.getOrElseUpdate(size,mutable.ArrayDeque.empty[Long]).append(tensor.address)
-          pooled+=size
-        else driver.call("cuMemFree_v2",Seq(JAVA_LONG),Long.box(tensor.address))
+        tensor.allocation.arena.release(tensor.address)
         used-=size
       tensor.allocation.references-=1
       tensor.released=true;live-=tensor
@@ -1280,15 +1325,19 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     // External native code may have changed the current context. Rebind for all
     // reverse-order cleanup; CudaDriver subsequently restores the caller's context.
     attempt { driver.call("cuCtxSetCurrent",Seq(ADDRESS),context) }
-    attempt { driver.call("cuStreamSynchronize",Seq(ADDRESS),stream) }
+    attempt { driver.synchronize(stream) }
     live.toVector.reverse.foreach(tensor => attempt { release(tensor) })
     attempt { trimPool() }
-    attempt { uploadStaging.close() }
-    live.foreach(_.released=true)
-    live.clear();used=0;closed=true
+    attempt { weightArena.trim(rawFree) }
+    var shared=0L;touchedShared.forEach(a => shared+=a.bytes)
+    attempt { CudaWeightPool.releaseUsers(touchedShared) }
+    if memoryLog then
+      def mb(v: Long)=v/1048576
+      System.err.println(s"[scala-torch CUDA memory] session closed: peak live ${mb(peakUsed)} MiB, peak chunks ${mb(peakOwned)} MiB, kept weights used ${mb(shared)} MiB; " +
+        s"process holds ${mb(held.get())} MiB (kept weights ${mb(weightArena.liveBytes)} MiB in ${mb(weightArena.ownedBytes)} MiB of chunks, unused ${mb(CudaWeightPool.unusedBytes(deviceIndex))} MiB), driver free ${mb(driver.freeBytes())} MiB")
     if profileEnabled then
       val entries=profile.toVector
-      val selected=(entries.sortBy(-_._2._2).take(12) ++ entries.filter { case (label,_) =>
+      val selected=(entries.sortBy(-_._2._2).take(400) ++ entries.filter { case (label,_) =>
         label.contains("upload") || label.startsWith("HtoD")
       }).distinctBy(_._1)
       selected.foreach { case (label,(count,nanos)) =>
@@ -1299,6 +1348,9 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
 object CudaSession:
   /** Frees the weights kept for sessions on `deviceIndex` (no-op while a session is open there; they go on idle then). */
   def releaseSharedWeights(deviceIndex: Int): Unit = CudaContextKeeper.clearDevice(deviceIndex)
+  /** Chunk size of a session's arena (`SCALATORCH_CUDA_CHUNK_MB`, default 128). */
+  private[ffm] val chunkBytes: Long =
+    sys.env.get("SCALATORCH_CUDA_CHUNK_MB").flatMap(_.trim.toLongOption).filter(_ > 0).getOrElse(128L)*1024L*1024L
   /** `maxBytes` value meaning "92 % of the device memory that is free when the session opens". */
   val AutoBudget: Long = Long.MaxValue
   /** Parses a byte budget from configuration: a number of bytes or `auto`. */
@@ -1313,6 +1365,9 @@ object CudaSession:
     CudaDriver.withDevice(deviceIndex) { (driver,version,name) =>
       // AutoBudget: use what the device has free right now (a fixed number made big jobs fail with "allocation budget exceeded"
       // although the GPU had room, for example SDXL with a LoRA needs the weights twice).
-      val effective=if maxBytes==AutoBudget then math.max(268435456L,(driver.memoryInfo()._1*0.92).toLong) else maxBytes
+      // Kept weights that no open session uses count as free: they are evicted when the room is needed.
+      val effective=if maxBytes==AutoBudget then
+        math.max(268435456L,((CudaWeightPool.governedFree(deviceIndex,driver.memoryInfo()._1)+CudaWeightPool.unusedBytes(deviceIndex))*0.92).toLong)
+      else maxBytes
       body(new CudaSession(driver,deviceIndex,name,version,effective))
     }
