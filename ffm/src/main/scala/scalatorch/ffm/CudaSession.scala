@@ -150,7 +150,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),loaded) }
     loaded
   private lazy val halfKernels=Seq("h_f32_to_f16","h_f16_to_f32","h_fill","h_add","h_add5","h_scale","h_silu","h_geglu","h_transpose5",
-      "h_concat","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_im2col","h_softmax","h_gelu_erf","h_quick_gelu","h_softmax_causal").map { name =>
+      "h_concat","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_im2col","h_im2col_batch","h_softmax","h_gelu_erf","h_quick_gelu","h_softmax_causal").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),halfModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -1065,7 +1065,42 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
           if profileEnabled then
             driver.synchronize(stream)
             record(s"half_conv_gemm[$outputChannelsPerGroup,$positions,$k]",started)
-        if direct then
+        // Several samples as ONE GEMM: columns [k, S*P], product [co, S*P], then the sample and channel axes are swapped into the
+        // output. cuBLAS is far more efficient on the larger matrix (SD1.5 shapes: 27-30 TFLOPS per sample, about 50 on big ones)
+        // and the call count drops from one per sample to one per chunk.
+        val perSample=k*spatial
+        val mergedCap=math.min(134217728L,(maxBytes-used)/4)
+        val samplesPerChunk=if perSample>0 then math.min(g.n.toLong,mergedCap/math.max(1L,perSample+g.co.toLong*spatial)) else 0L
+        if !direct && CudaSession.mergedConvolution && config.groups==1 && g.n>1 && samplesPerChunk>=2 &&
+            perSample*samplesPerChunk<=Int.MaxValue && g.co.toLong*spatial*samplesPerChunk<=Int.MaxValue then
+          Using.resource(allocate(Shape.from(Seq(k,samplesPerChunk*spatial)),half=true)) { columns =>
+            Using.resource(allocate(Shape.from(Seq(g.co.toLong,samplesPerChunk*spatial)),half=true)) { product =>
+              var start=0
+              while start<g.n do
+                val samples=math.min(samplesPerChunk,g.n.toLong-start).toInt
+                val row=samples.toLong*spatial
+                val count=k*row
+                launch(count,halfKernels("h_im2col_batch"),label="h_im2col_batch",threadsPerBlock=256) { arena =>
+                  Seq(input.address,columns.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+                    Seq(count.toInt,g.ci,g.h,g.w,g.kh,g.kw,g.oh,g.ow,config.stride._1,config.stride._2,
+                      config.padding._1,config.padding._2,config.dilation._1,config.dilation._2,start,samples)
+                      .map(v => arena.allocateFrom(JAVA_INT,v))
+                }
+                val started=if profileEnabled then System.nanoTime() else 0L
+                cublas.get.gemmHalfRowMajor(g.co,row.toInt,k.toInt,weight.address,k.toInt,columns.address,row.toInt,product.address,row.toInt)
+                if profileEnabled then
+                  driver.synchronize(stream)
+                  record(s"half_conv_gemm_merged[${g.co},$row,$k]",started)
+                // [co, samples, P] -> [samples, co, P], written straight into the output
+                val elements=g.co.toLong*row
+                launch(elements,halfKernels("h_transpose5"),label="h_transpose5",threadsPerBlock=256) { arena =>
+                  Seq(product.address,output.address+start.toLong*g.co*spatial*2).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+                    Seq(elements.toInt,g.co,1,samples,spatial.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
+                }
+                start+=samples
+            }
+          }
+        else if direct then
           var batch=0
           while batch<g.n do
             var group=0
@@ -1379,6 +1414,8 @@ object CudaSession:
   /** Chunk size of a session's arena (`SCALATORCH_CUDA_CHUNK_MB`, default 128). */
   private[ffm] val chunkBytes: Long =
     sys.env.get("SCALATORCH_CUDA_CHUNK_MB").flatMap(_.trim.toLongOption).filter(_ > 0).getOrElse(128L)*1024L*1024L
+  /** Float16 convolution of a batch as one GEMM (`SCALATORCH_CUDA_MERGED_CONV=0` keeps one GEMM per sample). */
+  private[ffm] val mergedConvolution: Boolean = !sys.env.get("SCALATORCH_CUDA_MERGED_CONV").contains("0")
   /** True while device memory is known to be short (see `CudaWeightPool.tight`). */
   def memoryTight: Boolean = CudaWeightPool.tight
   /** Records that a model did not fit the device. */

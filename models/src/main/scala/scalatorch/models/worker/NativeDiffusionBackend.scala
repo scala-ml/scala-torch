@@ -2164,6 +2164,14 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
 
         */
         var tinyPreviewFailed=false
+        // Batched sampling: the `batch_size` images of one group share every U-Net pass (one batch of 2N with guidance) instead of
+        // being sampled one after another. Only for the plain requests parallel count may split, with nothing per image but the seed.
+        val batchedGroups=batchSize>1 && CudaUNet.batchedSampling && generationPipeline.unetExecution.isInstanceOf[UNetExecution.Cuda] &&
+          NativeParallelCount.plainTxt2img(request,keywordInert) && !img2img && source.isEmpty && hires.isEmpty && hiresFix.isEmpty &&
+          keywordPlan.forall(_.prompts.forall(_==imageRequest.prompt)) && requestedLoras.isEmpty && manualLoras.isEmpty && controlNet.isEmpty &&
+          intermediateSession.isEmpty && variationStrength==0 && freeU.isEmpty && deepCache.isEmpty && temperatureGuard.isEmpty &&
+          hardware.isEmpty && !altActive && sonarHook.isEmpty && adetailerUnits.isEmpty && EulerImagePipeline.batchable(imageRequest)
+        val batchedLatents=scala.collection.mutable.HashMap.empty[Int,scalatorch.Tensor[Float]]
         try
           val images=Vector.tabulate(iterations) { index =>
             context.checkCancelled()
@@ -2292,25 +2300,50 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
                       lat => DiffusionImageIO.toBufferedImage(generationPipeline.decodeLatents(lat,context.cancelled)),
                       lat => NativePreview.jpegBase64(lat,sdxl=generationPipeline.sdxlConditioning.nonEmpty))
                 }
-              def basePass(): scalatorch.Tensor[Float]={
+              /** The decoded image of this index when its batch is sampled together. The first image of a batch runs the sampling
+                * for all of them; a memory failure (or a step only the single-image path implements) leaves the batch to the
+                * ordinary pass below, image by image. */
+              def batchedBase(): Option[scalatorch.Tensor[Float]]=
+                if !batchedGroups then None
+                else
+                  if index%batchSize==0 then
+                    batchedLatents.clear()
+                    if !scalatorch.ffm.CudaSession.memoryTight then
+                      try
+                        val report=progress("base")
+                        val all=baseLatentsPass(current.copy(batchSeeds=Vector.tabulate(batchSize)(k => current.seed+k)),
+                          value => report(value.copy(latents=value.latents.slice(0,0,1).contiguous)))
+                        require(all.shape.dims.head==batchSize,"batched sampling returned a different number of latents")
+                        (0 until batchSize).foreach(k => batchedLatents(index+k)=all.slice(0,k,k+1).contiguous)
+                      catch
+                        case error: BatchedSamplingUnsupported =>
+                          batchedLatents.clear()
+                          System.err.println(s"[scala-torch] batched sampling not used: ${error.getMessage}")
+                        case error: Throwable if CudaUNet.memoryFailure(error) && !context.cancelled() =>
+                          batchedLatents.clear()
+                          System.err.println(s"[scala-torch] batched sampling ran out of memory (${Option(error.getMessage).getOrElse("").take(160)}); sampling one by one")
+                          context.event("log",Map("level"->Str("warn"),"message"->Str(
+                            "not enough GPU memory to sample the batch together; sampling its images one after another")))
+                  batchedLatents.remove(index).map(latents => generationPipeline.decodeLatents(latents,context.cancelled))
+              def basePass(): scalatorch.Tensor[Float]=batchedBase().getOrElse {
                 val (reqBase,srcBase)=if altActive then
                   val invNoise=generationPipeline.invertImageForAlt(current,source.get.image,img2imgAltHook.get,activeNoise,steps,prediction,context.cancelled)
                   (current.copy(initialNoiseOverride=Some(invNoise),onStepObservation=stepObserverFor("base",0,current.seed)),None)
                 else (current.copy(onStepObservation=stepObserverFor("base",0,current.seed)),source)
                 runImagePass(reqBase,if altActive then steps else baseSteps,progress("base"),srcBase,None,sampler,schedule)
               }
-              def baseLatentsPass(): scalatorch.Tensor[Float]=
+              def baseLatentsPass(passRequest: DiffusionImageRequest=current,callback: DiffusionImageProgress => Unit=progress("base")): scalatorch.Tensor[Float]=
                 val actualRequest=if generationPipeline.sdxlConditioning.isEmpty && source.nonEmpty then
-                  current.copy(guidanceRescale=0f) else current
+                  passRequest.copy(guidanceRescale=0f) else passRequest
                 warnUnusedEta(sampler)
                 if sampler=="DPM++ 2M SDE" || sampler=="DPM++ 2M SDE Heun" || sampler=="DPM++ 3M SDE" then
                   val layout=dpmSchedule(baseSteps,schedule,sampler)
                   generationPipeline.generateDpmMultistepSde(actualRequest,layout,order=if sampler=="DPM++ 3M SDE" then 3 else 2,
-                    heunVariant=(sampler=="DPM++ 2M SDE Heun"),onProgress=progress("base"),cancelled=context.cancelled,
+                    heunVariant=(sampler=="DPM++ 2M SDE Heun"),onProgress=callback,cancelled=context.cancelled,
                     prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="UniPC" then
                   val layout=dpmSchedule(baseSteps,schedule,"UniPC")
-                  generationPipeline.generateUniPc(actualRequest,layout,onProgress=progress("base"),cancelled=context.cancelled,
+                  generationPipeline.generateUniPc(actualRequest,layout,onProgress=callback,cancelled=context.cancelled,
                     prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="LCM" then
                   schedule match
@@ -2321,37 +2354,37 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
                       samplerWarnings += s"schedule '$schedule' is not supported by sampler 'LCM'; using the sampler's default spacing"
                     case _ => ()
                   if schedule!="Uniform" then samplerWarnings += "LCM ignores the schedule type"
-                  generationPipeline.generateLcm(actualRequest,LcmSchedule(activeNoise,baseSteps),onProgress=progress("base"),
+                  generationPipeline.generateLcm(actualRequest,LcmSchedule(activeNoise,baseSteps),onProgress=callback,
                     cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="LMS" then
-                  generationPipeline.generateLms(actualRequest,discreteEulerSchedule(baseSteps,schedule,"LMS"),onProgress=progress("base"),
+                  generationPipeline.generateLms(actualRequest,discreteEulerSchedule(baseSteps,schedule,"LMS"),onProgress=callback,
                     cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="DPM2" || sampler=="DPM2 a" then
                   generationPipeline.generateKdpm2(actualRequest,discreteEulerSchedule(baseSteps,schedule,sampler,roundKarrasTimesteps=true),ancestral=(sampler=="DPM2 a"),
-                    onProgress=progress("base"),cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
+                    onProgress=callback,cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="DPM++ 2S a" then
-                  generationPipeline.generateDpm2Sa(actualRequest,dpmSinglestepSchedule(baseSteps,schedule),onProgress=progress("base"),
+                  generationPipeline.generateDpm2Sa(actualRequest,dpmSinglestepSchedule(baseSteps,schedule),onProgress=callback,
                     cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="DPM++ SDE" then
-                  generationPipeline.generateDpmSde(actualRequest,discreteEulerSchedule(baseSteps,schedule,"DPM++ SDE"),onProgress=progress("base"),
+                  generationPipeline.generateDpmSde(actualRequest,discreteEulerSchedule(baseSteps,schedule,"DPM++ SDE"),onProgress=callback,
                     cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="DDIM" then
                   generationPipeline.generateDdim(actualRequest,ddimSchedule(baseSteps,schedule),config.ddimClipSample,config.ddimClipRange,
-                    eta=ddimEta,onProgress=progress("base"),cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
+                    eta=ddimEta,onProgress=callback,cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="DPM++ 2M" then
                   val layout=dpmSchedule(baseSteps,schedule)
-                  generationPipeline.generateDpmLatents(actualRequest,layout,onProgress=progress("base"),cancelled=context.cancelled,
+                  generationPipeline.generateDpmLatents(actualRequest,layout,onProgress=callback,cancelled=context.cancelled,
                     prediction=prediction,source=source)
                 else if sampler=="Euler a" then
                   val layout=ancestralSchedule(baseSteps,schedule)
-                  generationPipeline.generateAncestralLatents(actualRequest,layout,onProgress=progress("base"),
+                  generationPipeline.generateAncestralLatents(actualRequest,layout,onProgress=callback,
                     cancelled=context.cancelled,prediction=prediction,source=source)
                 else if sampler=="Heun" then
-                  generationPipeline.generateHeun(actualRequest,discreteEulerSchedule(baseSteps,schedule,"Heun"),onProgress=progress("base"),
+                  generationPipeline.generateHeun(actualRequest,discreteEulerSchedule(baseSteps,schedule,"Heun"),onProgress=callback,
                     cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
                 else
                   val layout=eulerSchedule(baseSteps,schedule)
-                  generationPipeline.generateLatents(actualRequest,layout,onProgress=progress("base"),cancelled=context.cancelled,
+                  generationPipeline.generateLatents(actualRequest,layout,onProgress=callback,cancelled=context.cancelled,
                     prediction=prediction,source=source)
               def firstPass(): scalatorch.Tensor[Float]=hires match
                 case None => basePass()

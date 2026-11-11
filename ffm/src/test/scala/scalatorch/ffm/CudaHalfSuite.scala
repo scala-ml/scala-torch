@@ -104,6 +104,18 @@ class CudaHalfSuite extends FunSuite:
       s.conv2dFast(v(0),v(1),Conv2dConfig(padding=(1,1),groups=2)))
   }
 
+  test("convolution of a batch as one GEMM: 3x3 padded, strided, dilated and 5x3 kernels over three and five samples") {
+    gpu()
+    for (n,ci,co,h,w) <- Seq((3,5,7,9,11),(5,4,6,8,8)) do
+      val x=tensor(data(n*ci*h*w,41+n),n.toLong,ci.toLong,h.toLong,w.toLong)
+      compare(Seq(x,tensor(data(co*ci*9,42,0.3),co.toLong,ci.toLong,3,3)),1e-2)((s,v) => s.conv2dFast(v(0),v(1),Conv2dConfig(padding=(1,1))))
+      compare(Seq(x,tensor(data(co*ci*9,43,0.3),co.toLong,ci.toLong,3,3)),1e-2)((s,v) =>
+        s.conv2dFast(v(0),v(1),Conv2dConfig(stride=(2,2),padding=(1,1))))
+      compare(Seq(x,tensor(data(co*ci*9,44,0.3),co.toLong,ci.toLong,3,3)),1e-2)((s,v) =>
+        s.conv2dFast(v(0),v(1),Conv2dConfig(padding=(2,2),dilation=(2,2))))
+      compare(Seq(x,tensor(data(co*ci*15,45,0.3),co.toLong,ci.toLong,5,3)),1e-2)((s,v) => s.conv2dFast(v(0),v(1),Conv2dConfig(padding=(2,0))))
+  }
+
   test("GELU, QuickGELU and causal attention") {
     gpu()
     compare(Seq(tensor(data(5*33,26,2.0),5,33)),3e-3)((s,v) => s.geluErf(v(0)))

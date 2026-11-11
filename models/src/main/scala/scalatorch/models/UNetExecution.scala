@@ -28,6 +28,9 @@ private[models] trait UNetPredictor:
       sagStep: Option[(SagConfig,Double)]=None,
       refStep: Option[(ReferenceOnly.BankState,Tensor[Float])]=None): Tensor[Float]
 
+/** A sample batch of several images met a step that only the single-image path implements; the caller samples image by image instead. */
+final class BatchedSamplingUnsupported(message: String) extends IllegalStateException(message)
+
 /** Placement of U-Net prediction. CUDA weights/contexts live for one denoising loop;
   * CPU schedulers exchange only latent inputs and guided predictions each step.
   */
@@ -254,6 +257,21 @@ object UNetExecution:
           val negativeContext=unconditional.map(x => use(session.upload(x)))
           val positiveAddition=positiveFeatures.map(x => use(session.upload(x)))
           val negativeAddition=negativeFeatures.map(x => use(session.upload(x)))
+          // [negative x N; positive x N] (positive x N without guidance) for batched sampling, built once per denoising loop.
+          var repeated: Option[(Int,Boolean,scalatorch.ffm.CudaTensor,Option[scalatorch.ffm.CudaTensor])]=None
+          def repeatedConditioning(count: Int,pair: Boolean): (scalatorch.ffm.CudaTensor,Option[scalatorch.ffm.CudaTensor]) =
+            repeated match
+              case Some((n,p,context,addition)) if n==count && p==pair => (context,addition)
+              case _ =>
+                // The manager also owns these handles; CudaTensor.close is idempotent.
+                repeated.foreach { case (_,_,context,addition) => context.close();addition.foreach(_.close()) }
+                repeated=None
+                def tile(negative: Option[scalatorch.ffm.CudaTensor],positive: scalatorch.ffm.CudaTensor): scalatorch.ffm.CudaTensor =
+                  use(session.cat((if pair then Seq.fill(count)(negative.get) else Seq.empty)++Seq.fill(count)(positive),0))
+                val context=tile(negativeContext,positiveContext)
+                val addition=positiveAddition.map(p => tile(negativeAddition,p))
+                repeated=Some((count,pair,context,addition))
+                (context,addition)
           body(new UNetPredictor:
             def apply(sample: Tensor[Float],timesteps: Tensor[Float],guidance: Float,
                 controlProgress: Double,rescale: Float,scheduled: Option[Float],detail: Option[DetailDaemon.Adjustment],controlProgressEnd: Double,
@@ -270,36 +288,51 @@ object UNetExecution:
                 refStep: Option[(ReferenceOnly.BankState,Tensor[Float])]): Tensor[Float] =
               VaeExecution.checkCancelled(cancelled)
               require(guidance.isFinite && guidance>=0,"invalid guidance scale")
-              // Plain classifier-free guidance: both passes go through the U-Net as one batch of two.
+              // Plain classifier-free guidance: both passes go through the U-Net as one batch of two. A sample batch of N that shares
+              // one prompt ("batched sampling") runs as one batch of 2N, [negative x N; positive x N], or of N without guidance.
               def batchedPlain(): Option[Tensor[Float]] =
-                val eligible=sample.shape.rank==4 && sample.shape.dims.head==1 && negativeContext.isDefined && guidance>1f && controls.isEmpty &&
+                val count=if sample.shape.rank==4 then sample.shape.dims.head.toInt else 0
+                val multi=count>1 && conditional.shape.dims.head==1L && unconditional.forall(_.shape.dims.head==1L)
+                val pair=negativeContext.isDefined && guidance>1f
+                val plain=sample.shape.rank==4 && controls.isEmpty &&
                   detail.isEmpty && cads.isEmpty && refStep.isEmpty && chgState.isEmpty && multiDiffusion.isEmpty && pag.isEmpty && sagStep.isEmpty &&
                   neutralPlan.isEmpty && segUncond.isEmpty && positiveSigns.isEmpty && negativeSigns.isEmpty && conditionalOverride.isEmpty &&
                   unconditionalOverride.isEmpty && positiveAddedOverride.isEmpty && negativeAddedOverride.isEmpty && kohyaHrFix.isEmpty &&
                   tokenDownsampling.isEmpty && guidanceHook.isEmpty && dynamicThresholding.isEmpty && scheduled.isEmpty && rescale==0f &&
-                  positiveAddition.isDefined==negativeAddition.isDefined && CudaUNet.batchedGuidance
-                if !eligible then None
+                  (!pair || positiveAddition.isDefined==negativeAddition.isDefined) && CudaUNet.batchedGuidance
+                val eligible=plain && (if multi then pair || negativeContext.isEmpty else count==1 && pair)
+                if !eligible then
+                  // One context cannot serve N samples on the general path: the caller samples the images one by one instead.
+                  if multi then throw new BatchedSamplingUnsupported("this step cannot run as one U-Net batch")
+                  None
                 else
                   try
                     Using.Manager { temporary =>
                       val input=temporary(session.upload(sample))
-                      val stacked=temporary(session.cat(Seq(input,input),0))
-                      val context=temporary(session.cat(Seq(negativeContext.get,positiveContext),0))
-                      val addition=positiveAddition.map(p => temporary(session.cat(Seq(negativeAddition.get,p),0)))
+                      val (stacked,context,addition)=
+                        if multi then
+                          val (c,a)=repeatedConditioning(count,pair)
+                          (if pair then temporary(session.cat(Seq(input,input),0)) else input,c,a)
+                        else (temporary(session.cat(Seq(input,input),0)),
+                          temporary(session.cat(Seq(negativeContext.get,positiveContext),0)),
+                          positiveAddition.map(p => temporary(session.cat(Seq(negativeAddition.get,p),0))))
                       val output=temporary(unet.applyPrepared(stacked,timesteps,context,addition,None))
                       VaeExecution.checkCancelled(cancelled)
                       val both=output.toCpu
-                      val values=both.toFloatArray
-                      val half=values.length/2
-                      // same operation order as the two-pass path: negative+(positive+(-negative))*guidance
-                      val guided=Array.tabulate(half) { i =>
-                        val n=values(i);val p=values(half+i)
-                        n+(p+(-n))*guidance
-                      }
-                      Some(Tensor.fromFloats(guided,Shape.from(Seq(1L)++both.shape.dims.drop(1))))
+                      if !pair then Some(both)
+                      else
+                        val values=both.toFloatArray
+                        val half=values.length/2
+                        // same operation order as the two-pass path: negative+(positive+(-negative))*guidance
+                        val guided=Array.tabulate(half) { i =>
+                          val n=values(i);val p=values(half+i)
+                          n+(p+(-n))*guidance
+                        }
+                        Some(Tensor.fromFloats(guided,Shape.from(Seq(count.toLong)++both.shape.dims.drop(1))))
                     }.get
                   catch
-                    case error: Throwable if CudaUNet.memoryFailure(error) => None
+                    // A single image falls back to two passes; a batch goes back to the caller, which samples the images one by one.
+                    case error: Throwable if !multi && CudaUNet.memoryFailure(error) => None
               batchedPlain().getOrElse(
               KohyaHrFix.withStep(kohyaHrFix,timesteps.toFloatArray(0)) {
               val tdStep=tokenDownsampling.getOrElse((TokenDownsamplingConfig(),false,0,1))

@@ -54,7 +54,10 @@ final case class DiffusionImageRequest(prompt: String,negativePrompt: String,wid
     fooocusInpaint: Option[FooocusInpaintConfig]=None,
     compile: Option[CompileConfig]=None,
     controlNetPaths: Map[String,String]=Map.empty,
-    onWarning: String=>Unit=_ => ())
+    onWarning: String=>Unit=_ => (),
+    /** Batched sampling: one seed per image of a batch that shares this request (`seed` is then unused). The latent-returning
+      * passes return a batch of latents; every image keeps the noise streams of its own seed. Plain txt2img requests only. */
+    batchSeeds: Vector[Long]=Vector.empty)
 /** SDXL original size and crop; target size is the requested output dimensions. */
 final case class SdxlImageSize(originalHeight: Int,originalWidth: Int,cropTop: Int=0,cropLeft: Int=0):
   require(originalHeight>0 && originalWidth>0 && cropTop>=0 && cropLeft>=0,"invalid SDXL original size or crop")
@@ -86,6 +89,22 @@ object EulerImagePipeline:
       maskedImageLatents.device==Device.Cpu && maskedImageLatents.dtype==DType.Float32 &&
       maskedImageLatents.shape==sample.shape,"nine-channel inpaint condition shape/device mismatch")
     Variable.cat(Seq(Variable(sample),Variable(mask),Variable(maskedImageLatents)),1).data
+
+  /** Fields a request may set and still be sampled as a batch (`batchSeeds`); every other field has to be empty, false or zero,
+    * so a feature added later is excluded until it is listed here. */
+  private val batchableFields=Set("prompt","negativePrompt","width","height","seed","guidanceScale","truncatePrompt","clipSkip","sdxlSize",
+    "torchCpuNoise","trainingSigmas","promptScheduleSteps","latentHookSeed","latentHookBatchSize","latentHookBatchIndex","loraStepFilter",
+    "onWarning","controlNetPaths","batchSeeds")
+  private[models] def batchable(request: DiffusionImageRequest): Boolean =
+    request.productElementNames.zip(request.productIterator).forall { (name,value) =>
+      batchableFields(name) || (value match
+        case None => true
+        case flag: Boolean => !flag
+        case number: Double => number==0.0
+        case number: Float => number==0f
+        case items: Iterable[?] => items.isEmpty
+        case _ => false)
+    }
 
 /** Single-image Euler/DPM++ sampling with explicit U-Net and VAE placement. */
 final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder: ClipTextModel,
@@ -309,6 +328,14 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
     require(pixels<=maxImagePixels && pixels*vae.config.outChannels<=Int.MaxValue,"image exceeds allocation limit")
     val latentShape=Shape.from(Seq(1,vae.config.latentChannels,request.height/factor,request.width/factor))
     require(latentShape.numel<=maxLatentElements && latentShape.numel<=Int.MaxValue,"latent exceeds allocation limit")
+    // Batched sampling: the latent carries one image per seed; all per-image shapes below stay those of one image.
+    val seeds=if request.batchSeeds.isEmpty then Vector(request.seed) else request.batchSeeds
+    val batch=seeds.size
+    if batch>1 then
+      require(BigInt(latentShape.numel)*batch<=maxLatentElements,"latent batch exceeds allocation limit")
+      if !returnLatents || noise.nonEmpty || source.nonEmpty || latentSource.nonEmpty || nineChannelInput || ddimEta!=0.0 ||
+          !EulerImagePipeline.batchable(request) then
+        throw new BatchedSamplingUnsupported("batched sampling supports plain text-to-image latent passes only")
     noise.foreach { value =>
       require(value.shape==latentShape && value.device==Device.Cpu && value.dtype==DType.Float32,"initial noise shape/device mismatch")
       require(value.toFloatArray.forall(_.isFinite),"initial noise has nonfinite values")
@@ -360,11 +387,20 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
       require(start<fullSchedule.timesteps.size,"img2img strength leaves no scheduler steps")
       EulerSchedule(fullSchedule.timesteps.drop(start),fullSchedule.sigmas.drop(start),fullSchedule.initialNoiseSigma)
     }
-    val random=new java.util.Random(request.seed)
-    val torchRandom=Option.when(request.torchCpuNoise)(new TorchCpuNormal(request.seed))
-    def randomNoise(shape: Shape=latentShape): Tensor[Float]=Tensor.fromFloats(torchRandom match
-      case Some(generator) => generator.normal(shape.numel.toInt)
-      case None => Array.fill(shape.numel.toInt)(random.nextGaussian().toFloat),shape)
+    // One noise stream per image: an image of a batch draws exactly what it draws when it is sampled alone.
+    val streams=seeds.map(s => (new java.util.Random(s),Option.when(request.torchCpuNoise)(new TorchCpuNormal(s))))
+    def stacked(parts: Vector[Tensor[Float]]): Tensor[Float] =
+      if parts.size==1 then parts.head
+      else
+        val size=parts.head.shape.numel.toInt
+        val data=new Array[Float](size*parts.size)
+        parts.zipWithIndex.foreach((part,k) => System.arraycopy(part.toFloatArray,0,data,k*size,size))
+        Tensor.fromFloats(data,Shape.from((parts.head.shape.dims.head*parts.size)+:parts.head.shape.dims.tail))
+    def randomNoise(shape: Shape=latentShape): Tensor[Float]=stacked(streams.map { (random,torchRandom) =>
+      Tensor.fromFloats(torchRandom match
+        case Some(generator) => generator.normal(shape.numel.toInt)
+        case None => Array.fill(shape.numel.toInt)(random.nextGaussian().toFloat),shape)
+    })
     def independentNoise(seed: Long,shape: Shape=latentShape): Tensor[Float] =
       val data=if request.torchCpuNoise then new TorchCpuNormal(seed).normal(shape.numel.toInt)
         else
@@ -420,6 +456,8 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
       else PromptSchedule.schedule(baseTxt,schedBaseSteps,schedHiresSteps)
     val promptSched=scheduleText(effReqPrompt)
     val negSched=scheduleText(effReqNegPrompt)
+    if batch>1 && (promptSched.size>1 || negSched.size>1) then
+      throw new BatchedSamplingUnsupported("batched sampling does not support prompts that change between steps")
     val initialPrompt=PromptSchedule.textAt(promptSched,1)
     val initialNegPrompt=PromptSchedule.textAt(negSched,1)
     case class EncodedPair(pos: Tensor[Float],neg: Option[Tensor[Float]],posAdded: Option[DiffusionAddedConditioning],negAdded: Option[DiffusionAddedConditioning],posSigns: Option[Array[Float]],negSigns: Option[Array[Float]])
@@ -554,7 +592,7 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
     }
     val initial=noise.orElse(request.initialNoiseOverride).getOrElse {
       def seedNoise(s: Long): Tensor[Float] = request.noiseResizeFrom.fold(independentNoise(s)) { case (rw,rh) => HiresFixTweaks.resizedNoise(latentShape,s,request.variationSeed,request.variationStrength,rw,rh,factor,(sd,sh)=>independentNoise(sd,sh)) }
-      val base=if (request.torchCpuNoise && source.isEmpty && latentSource.isEmpty) || request.noiseResizeFrom.nonEmpty then seedNoise(request.seed) else randomNoise()
+      val base=if (request.torchCpuNoise && source.isEmpty && latentSource.isEmpty) || request.noiseResizeFrom.nonEmpty then stacked(seeds.map(seedNoise)) else randomNoise()
       if request.variationStrength>0 && source.isEmpty && latentSource.isEmpty && request.noiseResizeFrom.isEmpty then
         val variation=seedNoise(request.variationSeed.get)
         VariationNoise.slerp(base,variation,request.variationStrength)
@@ -877,7 +915,7 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
           latent=dpm2SaSolver.get.stepVp(i,predicted,latent).previous
         else if dpmSdeSolver.nonEmpty then
           val solver=dpmSdeSolver.get
-          val z1=if schedule.sigmas(i+1)>0 then Variable(randomNoise(),requiresGrad=false) else Variable(Tensor.fromFloats(new Array[Float](latentShape.numel.toInt),latentShape),requiresGrad=false)
+          val z1=if schedule.sigmas(i+1)>0 then Variable(randomNoise(),requiresGrad=false) else Variable(Tensor.fromFloats(new Array[Float](latent.data.shape.numel.toInt),latent.data.shape),requiresGrad=false)
           val first=solver.predict(i,predicted,latent,z1)
           latent=if first.requiresSecondEvaluation then
             checkCancelled()
@@ -913,7 +951,7 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
                 case Some(solver) =>
                   val next=schedule.sigmas(i+1)
                   val noise=if next>0 then randomNoise()
-                    else Tensor.fromFloats(new Array[Float](latentShape.numel.toInt),latentShape)
+                    else Tensor.fromFloats(new Array[Float](latent.data.shape.numel.toInt),latent.data.shape)
                   latent=sonarStepper.fold(solver.step(i,predicted,latent,Variable(noise,requiresGrad=false)).previous)(st => Variable(st.step(latent.data,predicted.data,schedule.sigmas(i),next,prediction,Some(noise)),requiresGrad=false))
                 case None => latent=ddim match
                   case Some(solver) =>

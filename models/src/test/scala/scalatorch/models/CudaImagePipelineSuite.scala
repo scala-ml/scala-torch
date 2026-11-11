@@ -76,6 +76,53 @@ class CudaImagePipelineSuite extends munit.FunSuite:
     val limited=new EulerImagePipeline(cpu.tokenizer,cpu.textEncoder,cpu.unet,cpu.vae,unetExecution=UNetExecution.Cuda(maxBytes=1))
     intercept[IllegalArgumentException](limited.generate(request,noise.euler(1)))
   }
+  /** Float32 kernels for a comparison, whatever precision an earlier suite of this test JVM left selected. */
+  private def float32[A](body: => A): A =
+    val previous=CudaDiffusionRuntime.fp16Default
+    CudaDiffusionRuntime.setHalfPrecision(Some(false))
+    try body finally CudaDiffusionRuntime.setHalfPrecision(Some(previous))
+  test("batched sampling gives every image the latents and the noise stream of its own seed") { float32 {
+    val cpu=pipeline(VaeExecution.Cpu)
+    val gpu=new EulerImagePipeline(cpu.tokenizer,cpu.textEncoder,cpu.unet,cpu.vae,
+      vaeExecution=VaeExecution.Cuda(),unetExecution=UNetExecution.Cuda())
+    val noise=DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true)
+    val seeds=Vector(173L,174L,175L)
+    val samplers=Vector[(String,DiffusionImageRequest => Tensor[Float])](
+      "Euler" -> (r => gpu.generateLatents(r,noise.euler(4))),
+      "Euler a" -> (r => gpu.generateAncestralLatents(r,noise.euler(4))),
+      "Heun" -> (r => gpu.generateHeun(r,noise.discreteSchedule(4,DiffusionTimestepSpacing.Linspace,0,"none",false),returnLatents=true)),
+      "DPM++ 2M" -> (r => gpu.generateDpmLatents(r,DpmSchedule.karras(noise,4))),
+      "DDIM" -> (r => gpu.generateDdim(r,DdimSchedule(noise,4,DiffusionTimestepSpacing.Leading,1),false,1f,returnLatents=true)),
+      "LMS" -> (r => gpu.generateLms(r,noise.discreteSchedule(4,DiffusionTimestepSpacing.Linspace,0,"none",false),returnLatents=true)),
+      "DPM2 a" -> (r => gpu.generateKdpm2(r,noise.discreteSchedule(4,DiffusionTimestepSpacing.Linspace,0,"none",true),ancestral=true,returnLatents=true)),
+      "DPM++ 2S a" -> (r => gpu.generateDpm2Sa(r,DpmSchedule.karras(noise,4),returnLatents=true)),
+      "DPM++ SDE" -> (r => gpu.generateDpmSde(r,noise.discreteSchedule(4,DiffusionTimestepSpacing.Linspace,0,"karras",false),returnLatents=true)),
+      "DPM++ 2M SDE" -> (r => gpu.generateDpmMultistepSde(r,DpmSchedule.exponential(noise,4),returnLatents=true)),
+      "DPM++ 3M SDE" -> (r => gpu.generateDpmMultistepSde(r,DpmSchedule.exponential(noise,4),order=3,returnLatents=true)),
+      "UniPC" -> (r => gpu.generateUniPc(r,DpmSchedule.karras(noise,4),returnLatents=true)),
+      "LCM" -> (r => gpu.generateLcm(r,LcmSchedule(noise,4),returnLatents=true)))
+    // every sampler with guidance; the stochastic ones also with the torch noise stream and without guidance (one batch of three)
+    val variants=Set("Euler a","DPM++ SDE")
+    for (name,run) <- samplers; (guidance,torchNoise) <- Seq((7.5f,false),(7.5f,true),(1f,false)).take(if variants(name) then 3 else 1) do
+      val request=DiffusionImageRequest("a red cat","green trees",10,6,seeds.head,guidanceScale=guidance,torchCpuNoise=torchNoise)
+      val batched=run(request.copy(batchSeeds=seeds))
+      val single=seeds.map(seed => run(request.copy(seed=seed)))
+      assertEquals(batched.shape.dims.toSeq,3L+:single.head.shape.dims.toSeq.drop(1))
+      val expected=single.flatMap(_.toFloatArray).toArray
+      val error=batched.toFloatArray.zip(expected).map((a,e) => math.abs(a.toDouble-e)).max
+      println(s"batched sampling $name cfg=$guidance torchNoise=$torchNoise maxAbsError=$error")
+      // Float32 rounding of the batched U-Net pass, accumulated over the steps (latents reach the initial sigma of about 14);
+      // a wrong seed or noise stream gives errors of order one.
+      assert(error<5e-4,s"$name cfg=$guidance torchNoise=$torchNoise")
+      assert(single(0).toFloatArray.zip(single(1).toFloatArray).exists((a,b) => math.abs(a-b)>1e-3),"seeds must give different latents")
+    // an image pass, a hook or a prompt that changes between steps is not sampled as a batch
+    val request=DiffusionImageRequest("a red cat","green trees",10,6,173,batchSeeds=seeds)
+    intercept[BatchedSamplingUnsupported](gpu.generate(request,noise.euler(2)))
+    intercept[BatchedSamplingUnsupported](gpu.generateLatents(request.copy(guidanceRescale=0.5f),noise.euler(2)))
+    intercept[BatchedSamplingUnsupported](gpu.generateLatents(request.copy(prompt="a [red:blue:0.5] cat"),noise.euler(2)))
+    assert(EulerImagePipeline.batchable(request) && !EulerImagePipeline.batchable(request.copy(mahiro=true)) &&
+      !EulerImagePipeline.batchable(request.copy(variationStrength=0.3,variationSeed=Some(1L))))
+  } }
   test("worker U-Net placement and budget settings reject invalid values") {
     assertEquals(UNetExecution.fromEnvironment(Map.empty),UNetExecution.Cpu)
     assertEquals(UNetExecution.fromEnvironment(Map("SDFX_SCALATORCH_UNET_DEVICE"->"cuda")),UNetExecution.Cuda())

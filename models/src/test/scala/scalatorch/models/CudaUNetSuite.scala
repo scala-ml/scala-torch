@@ -101,3 +101,51 @@ class CudaUNetSuite extends munit.FunSuite:
       println(s"CUDA batched guidance g=$guidance t=$t maxAbsError=$error")
       assert(error<1e-4)
   }
+  /** Float32 kernels for a comparison, whatever precision an earlier suite of this test JVM left selected. */
+  private def float32[A](body: => A): A =
+    val previous=CudaDiffusionRuntime.fp16Default
+    CudaDiffusionRuntime.setHalfPrecision(Some(false))
+    try body finally CudaDiffusionRuntime.setHalfPrecision(Some(previous))
+  test("a sample batch of three with one prompt matches three single-sample predictor calls") { float32 {
+    val cpu=loaded()
+    val positive=context(1);val negative=Tensor.fromFloats(Array.tabulate(3*32)(i => math.sin(i*.31).toFloat),Shape.from(Seq(1L,3L,32L)))
+    val samples=input(3,4,6)
+    def single(index: Int)=samples.slice(0,index,index+1).contiguous
+    // guidance above one: one U-Net batch of six; guidance one without a negative prompt: one batch of three
+    for (guidance,unconditional) <- Seq((7.5f,Some(negative)),(1.5f,Some(negative)),(1f,None)); t <- Seq(7.5f,123f) do
+      UNetExecution.Cuda().withPredictor(cpu,positive,unconditional,() => false) { predict =>
+        val batched=predict(samples,times(t),guidance)
+        assertEquals(batched.shape,samples.shape)
+        val expected=(0 until 3).flatMap(i => predict(single(i),times(t),guidance).toFloatArray).toArray
+        val error=batched.toFloatArray.zip(expected).map((a,e) => math.abs(a.toDouble-e)).max
+        println(s"CUDA batched sampling g=$guidance t=$t maxAbsError=$error")
+        assert(error<1e-4)
+        // the three samples are different images, not one repeated
+        assert(expected.take(expected.length/3).zip(expected.drop(expected.length/3)).exists((a,b) => math.abs(a-b)>1e-3))
+      }
+  } }
+  test("a sample batch that does not fit reports the memory failure to the caller") {
+    val cpu=loaded()
+    val negative=Tensor.fromFloats(Array.tabulate(3*32)(i => math.sin(i*.31).toFloat),Shape.from(Seq(1L,3L,32L)))
+    def run(budget: Long,batch: Int)=UNetExecution.Cuda(maxBytes=budget).withPredictor(cpu,context(1),Some(negative),() => false)(
+      _.apply(input(batch,4,6),times(7.5f),7.5f))
+    // the smallest power-of-two budget that serves one image
+    val budget=Iterator.iterate(1L<<16)(_*2).takeWhile(_<=(1L<<32)).find { bytes =>
+      try { run(bytes,1);true } catch case error: Throwable if CudaUNet.memoryFailure(error) => false
+    }.get
+    val error=intercept[Throwable](run(budget,1024))
+    assert(CudaUNet.memoryFailure(error),error.toString)
+    assert(run(budget,1).toFloatArray.forall(_.isFinite))
+  }
+  test("a sample batch falls back to the caller when the step is not plain") {
+    val cpu=loaded()
+    val negative=Tensor.fromFloats(Array.tabulate(3*32)(i => math.sin(i*.31).toFloat),Shape.from(Seq(1L,3L,32L)))
+    UNetExecution.Cuda().withPredictor(cpu,context(1),Some(negative),() => false) { predict =>
+      intercept[BatchedSamplingUnsupported](predict(input(3,4,6),times(7.5f),7.5f,rescale=0.5f))
+      // the single-image general path still serves the same step
+      assert(predict(input(1,4,6),times(7.5f),7.5f,rescale=0.5f).toFloatArray.forall(_.isFinite))
+    }
+    intercept[BatchedSamplingUnsupported] {
+      UNetExecution.Cuda(maxBytes=1L<<30).withPredictor(cpu,context(1),None,() => false)(_.apply(input(2,4,6),times(7.5f),1f,scheduled=Some(2f)))
+    }
+  }

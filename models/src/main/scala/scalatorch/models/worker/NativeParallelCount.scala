@@ -46,6 +46,27 @@ private[worker] object NativeParallelCount:
     case Obj(fields) => hookEnabled(fields.getOrElse("enabled",Bool(true)))
     case _ => true
 
+  /** No LoRA, no prompt tag, no hook that does anything, no parameter this class does not know. */
+  private def plainParams(g: Map[String,NativeJson],keywordInert: (Option[NativeJson],String,Int) => Boolean): Boolean=
+    val n=num(g,"n_iter").map(_.toInt).getOrElse(1)
+    val b=num(g,"batch_size").map(_.toInt).getOrElse(1)
+    val prompts=text(g,"prompt")+" "+text(g,"negative_prompt")
+    val activeHooks=g.get("hooks") match
+      case Some(Obj(h)) => h.filter((_,v) => hookEnabled(v)).keySet
+      case _ => Set.empty[String]
+    // The model keyword hook is always sent; it only matters when it changes a prompt or the keyword state.
+    val hooksPlain=(activeHooks-"model_keyword").isEmpty && (!activeHooks.contains("model_keyword") || keywordInert(g.get("hooks"),text(g,"prompt"),n*b))
+    g.forall((k,v) => knownParams(k) || emptyish(v)) && g.get("loras").forall(emptyish) && hooksPlain &&
+      !prompts.contains("<lora:") && !prompts.contains("<lyco:") && !prompts.contains("<hypernet:") && !prompts.contains("<")
+
+  /** The plain txt2img requests that parallel count may split are also the ones whose batch may be sampled as one U-Net batch
+    * (`batch_size` images per step); the backend adds its own conditions on top. */
+  def plainTxt2img(request: NativeRequest,keywordInert: (Option[NativeJson],String,Int) => Boolean): Boolean=
+    request.kind=="txt2img" && !request.params.exists((k,v) => !knownOuter(k) && !catalogs(k) && !emptyish(v)) &&
+      (request.params.get("params") match
+        case Some(Obj(g)) => plainParams(g,keywordInert)
+        case _ => false)
+
   private def plan(request: NativeRequest,usesCuda: Boolean,keywordInert: (Option[NativeJson],String,Int) => Boolean): Option[(Int,Int,Map[String,NativeJson])]=
     if request.kind!="txt2img" || !usesCuda || limit<=1 then None
     else if request.params.exists((k,v) => !knownOuter(k) && !catalogs(k) && !emptyish(v)) then
@@ -56,13 +77,7 @@ private[worker] object NativeParallelCount:
         val n=num(g,"n_iter").map(_.toInt).getOrElse(1)
         val b=num(g,"batch_size").map(_.toInt).getOrElse(1)
         val prompts=text(g,"prompt")+" "+text(g,"negative_prompt")
-        val activeHooks=g.get("hooks") match
-          case Some(Obj(h)) => h.filter((_,v) => hookEnabled(v)).keySet
-          case _ => Set.empty[String]
-        // The model keyword hook is always sent; it only matters when it changes a prompt or the keyword state.
-        val hooksPlain=(activeHooks-"model_keyword").isEmpty && (!activeHooks.contains("model_keyword") || keywordInert(g.get("hooks"),text(g,"prompt"),n*b))
-        val plain=g.forall((k,v) => knownParams(k) || emptyish(v)) && g.get("loras").forall(emptyish) && hooksPlain &&
-          !prompts.contains("<lora:") && !prompts.contains("<lyco:") && !prompts.contains("<hypernet:") && !prompts.contains("<")
+        val plain=plainParams(g,keywordInert)
         if n>1 && n<=100 && b>=1 && plain then Some((n,b,g))
         else
           if n>1 then skipped(request,"values "+Seq("img2img","controlnet","eta","hooks").flatMap(k => g.get(k).map(v => k+"="+v.toString.take(300))).mkString(" | ")+" parameters "+(g.keySet--knownParams).mkString(",")+(if g.get("loras").exists(!emptyish(_)) then " loras" else "")+(if g.get("hooks").exists(!emptyish(_)) then " hooks" else "")+(if prompts.contains("<") then " prompt-tags" else ""))

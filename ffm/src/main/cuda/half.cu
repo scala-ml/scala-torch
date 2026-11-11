@@ -166,6 +166,25 @@ __global__ void h_im2col(const __half* x, __half* col, unsigned count,
   col[i] = v;
 }
 
+// im2col for `samples` batch entries at once (one group): col[r][s * positions + p], r in [0, ci*kh*kw), all output positions.
+__global__ void h_im2col_batch(const __half* x, __half* col, unsigned count,
+                               unsigned ci, unsigned h, unsigned w, unsigned kh, unsigned kw,
+                               unsigned oh, unsigned ow, int sh, int sw, int ph, int pw, int dh, int dw,
+                               unsigned batchStart, unsigned samples) {
+  GRID_INDEX(i, count)
+  unsigned positions = oh * ow, rowLength = samples * positions;
+  unsigned r = i / rowLength, q = i % rowLength;
+  unsigned s = q / positions, p = q % positions;
+  unsigned kx = r % kw, t = r / kw, ky = t % kh, c = t / kh;
+  unsigned oy = p / ow, ox = p % ow;
+  int iy = (int)oy * sh - ph + (int)ky * dh;
+  int ix = (int)ox * sw - pw + (int)kx * dw;
+  __half v = __float2half_rn(0.f);
+  if (iy >= 0 && iy < (int)h && ix >= 0 && ix < (int)w)
+    v = x[(((unsigned long long)(batchStart + s) * ci + c) * h + iy) * w + ix];
+  col[i] = v;
+}
+
 // In-place softmax over the last axis of [rows, width], one block per row.
 __global__ void h_softmax(__half* x, unsigned rows, unsigned width) {
   __shared__ float shared[32];

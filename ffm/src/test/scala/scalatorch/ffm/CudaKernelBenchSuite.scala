@@ -24,6 +24,11 @@ class CudaKernelBenchSuite extends munit.FunSuite:
         run(20)
         val micros=Seq.fill(7)(run(rounds)).min // the GPU is shared with the desktop: the fastest of several runs
         println(f"[bench] $label%-46s $micros%8.1f us")
+      for (n,c,side) <- Seq((2L,320L,64L),(8L,320L,64L),(2L,640L,32L),(8L,640L,32L),(8L,1280L,16L),(8L,1280L,8L)) do
+        val x=half(n,c,side,side)
+        val w=half(c,c,3,3)
+        time(s"conv 3x3           [$n,$c,$side,$side]",60)(s.conv2dFast(x,w,Conv2dConfig(padding=(1,1))))
+        x.close();w.close()
       for (c,side) <- Seq((320L,64L),(640L,32L),(1280L,16L),(1280L,8L)) do
         val x=half(2,c,side,side)
         val channelBias=half(1,c,1,1)
