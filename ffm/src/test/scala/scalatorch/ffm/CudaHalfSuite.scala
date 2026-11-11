@@ -40,6 +40,32 @@ class CudaHalfSuite extends FunSuite:
     compare(Seq(tensor(x,2,3,5,7)),2e-3)((s,v) => s.silu(v(0)))
   }
 
+  test("broadcast add: bias along one axis (fast path), along two axes, and a broadcast first operand") {
+    gpu()
+    val x=data(2*6*5*7,21)
+    // one axis: channel bias of a rank-4 tensor, the batch axis, the last axis of a rank-3 tensor, a scalar
+    compare(Seq(tensor(x,2,6,5,7),tensor(data(6,22),1,6,1,1)),2e-3)((s,v) => s.addBroadcast(v(0),v(1)))
+    compare(Seq(tensor(x,2,6,5,7),tensor(data(2,23),2,1,1,1)),2e-3)((s,v) => s.addBroadcast(v(0),v(1)))
+    compare(Seq(tensor(x,2,30,7),tensor(data(7,24),7)),2e-3)((s,v) => s.addBroadcast(v(0),v(1)))
+    compare(Seq(tensor(x,2,6,5,7),tensor(data(1,25),1)),2e-3)((s,v) => s.addBroadcast(v(0),v(1)))
+    compare(Seq(tensor(x,1,2,6,5,7),tensor(data(5,26),5,1)),2e-3)((s,v) => s.addBroadcast(v(0),v(1)))
+    // two axes (time embedding [N,C,1,1]) and a first operand that is itself broadcast: the general path
+    compare(Seq(tensor(x,2,6,5,7),tensor(data(12,27),2,6,1,1)),2e-3)((s,v) => s.addBroadcast(v(0),v(1)))
+    compare(Seq(tensor(data(6,28),1,6,1,1),tensor(x,2,6,5,7)),2e-3)((s,v) => s.addBroadcast(v(0),v(1)))
+    compare(Seq(tensor(data(2*5,29),2,1,5,1),tensor(data(6*7,30),1,6,1,7)),2e-3)((s,v) => s.addBroadcast(v(0),v(1)))
+  }
+
+  test("GroupNorm over wide groups (1024-thread statistics) and softmax over long and short rows") {
+    gpu()
+    val x=data(2*4*48*48,31,2.0)
+    compare(Seq(tensor(x,2,4,48,48),tensor(data(4,32),4),tensor(data(4,33),4)),6e-3)((s,v) => s.groupNorm(v(0),2,1e-5,Some(v(1)),Some(v(2))))
+    // rows of 700 keys (more than one element per thread) and of 5 keys (most threads see nothing); large scores exercise the rescaling
+    for (queries,keys,scale) <- Seq((9,700,1.0),(9,700,6.0),(300,5,3.0)) do
+      val q=tensor(data(2*queries*8,34,scale),1,2,queries,8);val k=tensor(data(2*keys*8,35,scale),1,2,keys,8)
+      val value=tensor(data(2*keys*8,36),1,2,keys,8)
+      compare(Seq(q,k,value),2e-2)((s,v) => s.scaledDotProductAttention(v(0),v(1),v(2)))
+  }
+
   test("geglu, transpose, cat and nearest resize") {
     gpu()
     compare(Seq(tensor(data(4*10,5),4,10)),3e-3)((s,v) => s.geglu(v(0)))

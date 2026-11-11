@@ -53,6 +53,20 @@ __global__ void h_add5(const __half* a, const __half* b, __half* out, unsigned n
                        unsigned a0, unsigned a1, unsigned a2, unsigned a3, unsigned a4,
                        unsigned b0, unsigned b1, unsigned b2, unsigned b3, unsigned b4) {
   GRID_INDEX(i, n)
+  // The usual case is a bias: `a` is the whole tensor and `b` varies along one axis only. One division pair instead of five.
+  // (An axis of size 1 has stride 0 by convention and does not matter.)
+  if ((d4 == 1 || a4 == 1) && (d3 == 1 || a3 == d4) && (d2 == 1 || a2 == d3 * d4) && (d1 == 1 || a1 == d2 * d3 * d4) &&
+      (d0 == 1 || a0 == d1 * d2 * d3 * d4) &&
+      (b0 != 0) + (b1 != 0) + (b2 != 0) + (b3 != 0) + (b4 != 0) <= 1) {
+    unsigned inner, dim, stride;
+    if (b4) { inner = 1; dim = d4; stride = b4; }
+    else if (b3) { inner = d4; dim = d3; stride = b3; }
+    else if (b2) { inner = d3 * d4; dim = d2; stride = b2; }
+    else if (b1) { inner = d2 * d3 * d4; dim = d1; stride = b1; }
+    else { inner = d1 * d2 * d3 * d4; dim = d0; stride = b0; }
+    st(out, i, ld(a, i) + ld(b, ((i / inner) % dim) * stride));
+    return;
+  }
   unsigned t = i, ia = 0, ib = 0, c;
   c = t % d4; t /= d4; ia += c * a4; ib += c * b4;
   c = t % d3; t /= d3; ia += c * a3; ib += c * b3;
@@ -158,12 +172,17 @@ __global__ void h_softmax(__half* x, unsigned rows, unsigned width) {
   unsigned row = blockIdx.x;
   if (row >= rows) return;
   __half* base = x + (unsigned long long)row * width;
-  float m = -3.402823466e+38f;
-  for (unsigned i = threadIdx.x; i < width; i += blockDim.x) m = fmaxf(m, ld(base, i));
-  m = block_max(m, shared);
-  float s = 0.f;
-  for (unsigned i = threadIdx.x; i < width; i += blockDim.x) s += __expf(ld(base, i) - m);
-  s = block_sum(s, shared);
+  // One read for the maximum and the sum together: each thread keeps a running maximum and rescales its sum when the maximum grows;
+  // the per-thread sums are brought to the common maximum afterwards. The score matrix is far larger than any cache, so a read less
+  // is time saved.
+  float tm = -3.402823466e+38f, ts = 0.f;
+  for (unsigned i = threadIdx.x; i < width; i += blockDim.x) {
+    float v = ld(base, i);
+    if (v > tm) { ts = ts * __expf(tm - v) + 1.f; tm = v; }
+    else ts += __expf(v - tm);
+  }
+  float m = block_max(tm, shared);
+  float s = block_sum(ts * __expf(tm - m), shared);
   float inv = 1.f / s;
   for (unsigned i = threadIdx.x; i < width; i += blockDim.x) st(base, i, __expf(ld(base, i) - m) * inv);
 }

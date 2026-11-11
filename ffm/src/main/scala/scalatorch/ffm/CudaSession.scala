@@ -35,6 +35,12 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   private lazy val weightArena=CudaWeightPool.newArena(deviceIndex)
   private var weightArenaUsed=false
   private var peakUsed=0L
+  // SCALATORCH_CUDA_LAUNCH_STATS=1: time spent on the CPU inside cuLaunchKernel and in preparing its arguments.
+  private val launchStats=sys.env.get("SCALATORCH_CUDA_LAUNCH_STATS").contains("1")
+  private val opened=System.nanoTime()
+  private var launchNanos=0L
+  private var launchPrepNanos=0L
+  private var launchCount=0L
   private var peakOwned=0L
   /** Set while a kept weight is uploaded: its blocks come from the arena of the kept weights, which outlives the session. */
   private var sharedAllocation=false
@@ -1158,7 +1164,9 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     if input.half then
       Seq(weight,bias).flatten.foreach(p => require(p.half,"Float16 GroupNorm needs Float16 affine parameters"))
       return Using.resource(allocate(Shape.from(Seq(rows*2)))) { stats =>
-        launch(rows,halfKernels("h_groupnorm_stats"),threadsPerBlock=256,threadsPerOutput=256,label="h_groupnorm_stats") { arena =>
+        // One block per group: wide groups get 1024 threads, otherwise a block leaves most of its multiprocessor idle.
+        val statThreads=if width>=4096 then 1024 else 256
+        launch(rows,halfKernels("h_groupnorm_stats"),threadsPerBlock=statThreads,threadsPerOutput=statThreads,label="h_groupnorm_stats") { arena =>
           Seq(input.address,stats.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
             Seq(rows.toInt,width).map(v => arena.allocateFrom(JAVA_INT,v)) :+ arena.allocateFrom(JAVA_FLOAT,epsilon.toFloat)
         }
@@ -1297,11 +1305,17 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       val outputsPerBlock=threadsPerBlock/threadsPerOutput
       if count > 0 then Using.resource(Arena.ofConfined()) { arena =>
         val started=if profileEnabled then System.nanoTime() else 0L
+        val prepStarted=if launchStats then System.nanoTime() else 0L
         val args=arguments(arena)
         val params=arena.allocate(ADDRESS,args.size.toLong)
         args.zipWithIndex.foreach((arg,i) => params.setAtIndex(ADDRESS,i.toLong,arg))
         val blocks=((count+outputsPerBlock-1)/outputsPerBlock).toInt
-        driver.launchKernel(kernel,blocks,threadsPerBlock,stream,params)
+        if launchStats then
+          val t0=System.nanoTime()
+          driver.launchKernel(kernel,blocks,threadsPerBlock,stream,params)
+          launchNanos+=System.nanoTime()-t0;launchCount+=1
+          launchPrepNanos+=t0-prepStarted
+        else driver.launchKernel(kernel,blocks,threadsPerBlock,stream,params)
         if syncEveryLaunch then
           try driver.synchronize(stream)
           catch case error: Throwable => throw IllegalStateException(s"CUDA kernel '$label' failed during synchronization",error)
@@ -1342,6 +1356,9 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     if weightArenaUsed then weightArena.retired=true
     var shared=0L;touchedShared.forEach(a => shared+=a.bytes)
     attempt { CudaWeightPool.releaseUsers(touchedShared) }
+    if launchStats && launchCount>0 then
+      System.err.println(f"[scala-torch CUDA launches] $launchCount launches, ${launchNanos/1e6}%.1f ms in cuLaunchKernel, " +
+        f"${launchPrepNanos/1e6}%.1f ms preparing arguments, session open ${(System.nanoTime()-opened)/1e6}%.1f ms")
     if memoryLog then
       def mb(v: Long)=v/1048576
       System.err.println(s"[scala-torch CUDA memory] session closed: peak live ${mb(peakUsed)} MiB, peak chunks ${mb(peakOwned)} MiB, kept weights used ${mb(shared)} MiB; " +
