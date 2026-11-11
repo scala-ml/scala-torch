@@ -13,7 +13,28 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
   private def fillZero(shape: Shape,value: Float): CudaTensor = if half then session.fillHalf(shape,value) else session.fill(shape,value)
   private val offloadedWeights=scala.collection.mutable.LinkedHashMap.empty[Parameter,CudaTensor]
   private var offloadedWeightBytes=0L
-  private val offloadedWeightLimit=CudaDiffusionRuntime.offloadedWeightLimit(session.maxBytes)
+  private val unit=if half then 2L else 4L
+  private var offloadedWeightLimit=
+    if host.isEmpty then 0L else CudaDiffusionRuntime.offloadedWeightLimit(session.maxBytes,session.availableBytes)
+  // Offloaded weights handed out inside the running operation: its kernels read them, so they must not be evicted before it ends.
+  private val pinned=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[Parameter,java.lang.Boolean]())
+  private var scopeDepth=0
+  /** Closes the kept offloaded weight that was added last and is not in use by the running operation. */
+  private def evictNewest(): Boolean =
+    offloadedWeights.keysIterator.toVector.reverseIterator.find(p => !pinned.contains(p)) match
+      case None => false
+      case Some(parameter) =>
+        val tensor=offloadedWeights.remove(parameter).get
+        offloadedWeightBytes-=math.max(tensor.shape.numel*unit,1L)
+        offloadedWeightEvictions+=1
+        tensor.close()
+        true
+  // The activations turned out to need the room: give up kept weights, and do not fill the room again on the next step.
+  if host.nonEmpty then session.pressure = missing =>
+    val before=offloadedWeightBytes
+    while before-offloadedWeightBytes<missing && evictNewest() do ()
+    offloadedWeightLimit=math.min(offloadedWeightLimit,offloadedWeightBytes)
+    offloadedWeightBytes<before
   private val profileEnabled=sys.env.get("SCALATORCH_CUDA_PROFILE").contains("1")
   private var offloadedWeightCacheHits=0L
   private var offloadedWeightCacheHitBytes=0L
@@ -29,6 +50,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       try clearOffloadedWeights() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
   private def scope(body: Using.Manager => CudaTensor): CudaTensor =
+    scopeDepth+=1
     try
       check()
       Using.Manager { use =>
@@ -39,6 +61,9 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     catch case error: Throwable =>
       try clearOffloadedWeights() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
+    finally
+      scopeDepth-=1
+      if scopeDepth==0 then pinned.clear()
 
   private def weightShape(p: Parameter): Shape =
     host.get(p).fold(weights(p).shape)(_.shape)
@@ -56,24 +81,20 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         offloadedWeights.get(p) match
           case Some(cached) =>
             offloadedWeightCacheHits+=1
-            offloadedWeightCacheHitBytes+=math.max(cached.shape.numel*4,1L)
+            offloadedWeightCacheHitBytes+=math.max(cached.shape.numel*unit,1L)
+            pinned.add(p)
             cached
           case None =>
-            val bytes=math.max(snapshot.shape.numel*4,1L)
+            val bytes=math.max(snapshot.shape.numel*unit,1L)
             val retain=bytes<=offloadedWeightLimit && bytes<=offloadedWeightLimit-offloadedWeightBytes
-            def evictNewest(): Unit =
-              val (parameter,tensor)=offloadedWeights.last
-              offloadedWeights.remove(parameter)
-              offloadedWeightBytes-=math.max(tensor.shape.numel*4,1L)
-              offloadedWeightEvictions+=1
-              tensor.close()
-            while offloadedWeights.nonEmpty && bytes>session.maxBytes-session.allocatedBytes do evictNewest()
+            while bytes>session.maxBytes-session.allocatedBytes && evictNewest() do ()
             val uploaded=if half then session.uploadHalfBits(snapshot.shape,HalfWeightCache.bits(p,snapshot)) else up(snapshot)
             offloadedWeightUploads+=1
             offloadedWeightUploadBytes+=bytes
             if retain then
               offloadedWeights(p)=uploaded
-              offloadedWeightBytes+=math.max(uploaded.shape.numel*4,1L)
+              pinned.add(p)
+              offloadedWeightBytes+=math.max(uploaded.shape.numel*unit,1L)
               uploaded
             else
               offloadedWeightTransientUploads+=1
@@ -811,6 +832,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       weights.values.foreach(_.close())
       mergedWeights.values.foreach(_._2.close());mergedWeights.clear()
       clearOffloadedWeights()
+      if host.nonEmpty then session.pressure = _ => false
       host=Map.empty
       closed=true
 
@@ -826,6 +848,26 @@ private[models] object CudaDiffusionRuntime:
   private[models] def offloadedWeightLimit(sessionMaxBytes: Long): Long =
     require(sessionMaxBytes>=0,"negative CUDA session budget")
     math.min(sessionMaxBytes/4,MaximumOffloadedWeightBytes)
+  /** Room for activations that weights must leave free: SDXL at 1024 x 1024 needs about 0.75 GiB of chunks. */
+  private[models] val ActivationReserve=1280L*1024L*1024L
+  private val OffloadMargin=256L*1024L*1024L
+  /** Offloaded weights that stay on the device for the whole run: at first as many as fit, then (after the session reported pressure)
+    * as many as fit beside the activations. The rest is sent again on every use, so a model that is larger than the free memory still
+    * runs, at the cost of the transfers. */
+  private[models] def offloadedWeightLimit(sessionMaxBytes: Long,availableBytes: Long): Long =
+    math.max(offloadedWeightLimit(sessionMaxBytes),math.min(sessionMaxBytes,availableBytes)-OffloadMargin)
+  /** True when the weights of `model` do not fit the device beside the activations: they are then offloaded (see above). */
+  private[models] def shouldOffload[A: Module](session: CudaSession,model: A,half: Boolean,label: String): Boolean =
+    val parameters=Module.parameters(model).distinct
+    val unit=if half then 2L else 4L
+    val total=parameters.iterator.map(p => math.max(p.data.shape.numel*unit,1L)).sum
+    val missing=total-session.sharedInUseBytes(parameters,half)
+    val available=session.availableBytes
+    val offload=missing>0 && missing+ActivationReserve>available
+    if offload then
+      System.err.println(s"[scala-torch] $label weights (${total/1048576} MiB) do not fit the free device memory (${available/1048576} MiB): " +
+        s"keeping up to ${math.max(0L,offloadedWeightLimit(session.maxBytes,available))/1048576} MiB on the device and sending the rest on every use")
+    offload
 
   def upload[A: Module](session: CudaSession,model: A,cancelled: () => Boolean=() => false,offloadWeights: Boolean=false,
       includeAdapters: Boolean=true,half: Boolean=false): CudaDiffusionRuntime =

@@ -54,6 +54,13 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   /** Returns the chunks that hold no tensor to the device (for example after the Float32 staging blocks of a weight upload). */
   def trimFreed(): Unit = { check();hostSync();trimPool();weightArena.trim(rawFree) }
   private def deviceFree(): Long = CudaWeightPool.governedFree(deviceIndex,driver.freeBytes())
+  /** Called when the session is short of memory, with the number of bytes that are missing. It may close tensors of this session that
+    * can be rebuilt (offloaded weights kept for speed) and returns true when it closed something. */
+  var pressure: Long => Boolean = _ => false
+  /** Device memory this session could still get: what is free now plus the kept weights that would be evicted for it. */
+  def availableBytes: Long = { check();deviceFree()+CudaWeightPool.unusedBytes(deviceIndex)+(arena.ownedBytes-arena.liveBytes) }
+  /** Bytes of the kept weights for `keys` that another open session holds on the device (no upload needed, not evictable). */
+  def sharedInUseBytes(keys: Iterable[AnyRef],half: Boolean): Long = CudaWeightPool.residentInUse(deviceIndex,keys,half)
   private val stamp=CudaWeightPool.clock.incrementAndGet()
   /** Evicts unused kept weights, oldest first, until the device has `needed` bytes free or nothing is left to evict. */
   private def evictSharedWeights(needed: Long): Boolean =
@@ -79,6 +86,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       hostSync()
       trimPool();weightArena.trim(rawFree)
       if deviceFree()<needed then evictSharedWeights(needed)
+      if deviceFree()<needed && pressure(needed-deviceFree()) then trimPool()
   private val rawAllocateOrEvict: Long => Long = bytes =>
     try rawAllocate(bytes)
     catch case error: Throwable =>
@@ -174,6 +182,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     check()
     require(shape.numel <= Int.MaxValue,"CUDA tensor exceeds Int indexing")
     val bytes=math.max(shape.numel*(if half then 2L else 4L),1L)
+    while bytes>maxBytes-used && pressure(bytes-(maxBytes-used)) do ()
     require(bytes <= maxBytes-used,"CUDA session allocation budget exceeded")
     val from=if sharedAllocation then weightArena else arena
     val address=from.allocate(bytes,makeRoom,rawAllocateOrEvict,rawFree)

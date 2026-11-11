@@ -75,6 +75,22 @@ private[ffm] object CudaWeightPool:
       touched.clear()
     }
 
+  /** Bytes of the kept weights for `keys` that an open session uses right now (they cannot be evicted and need no upload). */
+  def residentInUse(device: Int,keys: Iterable[AnyRef],half: Boolean): Long =
+    entries.synchronized {
+      val byKey=entries.get(device)
+      if byKey==null then 0L
+      else
+        var total=0L
+        keys.foreach { key =>
+          val pair=byKey.get(key)
+          if pair!=null then
+            val e=pair(slot(half))
+            if e!=null && e.allocation.users>0 then total+=e.allocation.bytes
+        }
+        total
+    }
+
   /** Bytes of kept weights that no open session uses. */
   def unusedBytes(device: Int): Long =
     entries.synchronized {
