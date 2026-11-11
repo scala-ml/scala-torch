@@ -16,6 +16,8 @@ private[ffm] final class CudaArena(chunkBytes: Long):
   private val live = new java.util.HashMap[Long, Block]()
   private var owned = 0L
   private var used = 0L
+  /** Set by the owner when it will not allocate from this arena any more (its session ended). */
+  @volatile var retired = false
 
   def ownedBytes: Long = synchronized(owned)
   def liveBytes: Long = synchronized(used)

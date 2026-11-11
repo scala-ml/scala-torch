@@ -29,12 +29,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         offloadedWeightEvictions+=1
         tensor.close()
         true
-  // The activations turned out to need the room: give up kept weights, and do not fill the room again on the next step.
-  if host.nonEmpty then session.pressure = missing =>
-    val before=offloadedWeightBytes
-    while before-offloadedWeightBytes<missing && evictNewest() do ()
-    offloadedWeightLimit=math.min(offloadedWeightLimit,offloadedWeightBytes)
-    offloadedWeightBytes<before
+
   private val profileEnabled=sys.env.get("SCALATORCH_CUDA_PROFILE").contains("1")
   private var offloadedWeightCacheHits=0L
   private var offloadedWeightCacheHitBytes=0L
@@ -832,7 +827,6 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       weights.values.foreach(_.close())
       mergedWeights.values.foreach(_._2.close());mergedWeights.clear()
       clearOffloadedWeights()
-      if host.nonEmpty then session.pressure = _ => false
       host=Map.empty
       closed=true
 
@@ -850,12 +844,11 @@ private[models] object CudaDiffusionRuntime:
     math.min(sessionMaxBytes/4,MaximumOffloadedWeightBytes)
   /** Room for activations that weights must leave free: SDXL at 1024 x 1024 needs about 0.75 GiB of chunks. */
   private[models] val ActivationReserve=1280L*1024L*1024L
-  private val OffloadMargin=256L*1024L*1024L
-  /** Offloaded weights that stay on the device for the whole run: at first as many as fit, then (after the session reported pressure)
-    * as many as fit beside the activations. The rest is sent again on every use, so a model that is larger than the free memory still
-    * runs, at the cost of the transfers. */
+  /** Offloaded weights that stay on the device for the whole run: as many as fit beside a fixed reserve for the activations. The rest is
+    * sent again on every use, so a model that is larger than the free memory still runs, at the cost of the transfers.
+    * (Giving up kept weights when the activations needed the room kept more of them, but changed the images: not used.) */
   private[models] def offloadedWeightLimit(sessionMaxBytes: Long,availableBytes: Long): Long =
-    math.max(offloadedWeightLimit(sessionMaxBytes),math.min(sessionMaxBytes,availableBytes)-OffloadMargin)
+    math.max(offloadedWeightLimit(sessionMaxBytes),math.min(sessionMaxBytes,availableBytes)-ActivationReserve)
   /** True when the weights of `model` do not fit the device beside the activations: they are then offloaded (see above). */
   private[models] def shouldOffload[A: Module](session: CudaSession,model: A,half: Boolean,label: String): Boolean =
     val parameters=Module.parameters(model).distinct

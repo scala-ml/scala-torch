@@ -35,9 +35,25 @@ private[ffm] object CudaWeightPool:
   private val held=new java.util.concurrent.ConcurrentHashMap[Int,java.util.concurrent.atomic.AtomicLong]()
   def heldCounter(device: Int): java.util.concurrent.atomic.AtomicLong =
     held.computeIfAbsent(device,_ => new java.util.concurrent.atomic.AtomicLong())
-  private val arenas=new java.util.concurrent.ConcurrentHashMap[Int,CudaArena]()
-  /** The chunks that hold the kept weights of `device`. */
-  def arena(device: Int): CudaArena = arenas.computeIfAbsent(device,_ => new CudaArena(64L*1024L*1024L))
+  private val arenas=new java.util.HashMap[Int,java.util.ArrayList[CudaArena]]()
+  /** A new arena for the kept weights that one session uploads. The weights of a model are uploaded by one session and evicted together,
+    * so its chunks become empty and return to the device; in one arena for all models, a few surviving tensors kept every chunk alive. */
+  def newArena(device: Int): CudaArena = arenas.synchronized {
+    val created=new CudaArena(64L*1024L*1024L)
+    arenas.computeIfAbsent(device,_ => new java.util.ArrayList[CudaArena]()).add(created)
+    created
+  }
+  private def arenasOf(device: Int): Vector[CudaArena] = arenas.synchronized {
+    val list=arenas.get(device)
+    if list==null then Vector.empty
+    else
+      list.removeIf(a => a.ownedBytes==0L && a.liveBytes==0L && a.retired)
+      scala.jdk.CollectionConverters.ListHasAsScala(list).asScala.toVector
+  }
+  /** Returns the empty chunks of every kept-weight arena of `device` to the driver. */
+  def trimArenas(device: Int,rawFree: (Long,Long) => Unit): Long = arenasOf(device).map(_.trim(rawFree)).sum
+  /** (live bytes, chunk bytes) of the kept weights of `device`. */
+  def arenaBytes(device: Int): (Long,Long) = { val all=arenasOf(device);(all.map(_.liveBytes).sum,all.map(_.ownedBytes).sum) }
   /** `SCALATORCH_CUDA_VRAM_LIMIT_MB`: use at most this much device memory (all sessions and kept weights together). */
   val limitBytes: Option[Long] =
     sys.env.get("SCALATORCH_CUDA_VRAM_LIMIT_MB").flatMap(_.trim.toLongOption).filter(_ > 0).map(_*1024L*1024L)
@@ -150,4 +166,4 @@ private[ffm] object CudaWeightPool:
       Option(retired.remove(device)).foreach(_.forEach(e => result+=e))
       result
     }
-    arena(device).releaseAll { (address,bytes) => CudaContextKeeper.freeMemory(address);heldCounter(device).addAndGet(-bytes) }
+    arenasOf(device).foreach(_.releaseAll { (address,bytes) => CudaContextKeeper.freeMemory(address);heldCounter(device).addAndGet(-bytes) })

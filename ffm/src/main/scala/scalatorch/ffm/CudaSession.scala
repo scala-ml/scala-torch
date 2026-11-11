@@ -32,7 +32,8 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   // Device memory comes from an arena of large chunks (see [[CudaArena]]): steady-state inference does no cuMemAlloc/cuMemFree
   // (cuMemFree synchronizes the whole device). Reuse is safe because every kernel and cuBLAS call runs on one stream.
   private val arena=new CudaArena(CudaSession.chunkBytes)
-  private val weightArena=CudaWeightPool.arena(deviceIndex)
+  private lazy val weightArena=CudaWeightPool.newArena(deviceIndex)
+  private var weightArenaUsed=false
   private var peakUsed=0L
   private var peakOwned=0L
   /** Set while a kept weight is uploaded: its blocks come from the arena of the kept weights, which outlives the session. */
@@ -52,7 +53,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   }
   private def trimPool(): Long = arena.trim(rawFree)
   /** Returns the chunks that hold no tensor to the device (for example after the Float32 staging blocks of a weight upload). */
-  def trimFreed(): Unit = { check();hostSync();trimPool();weightArena.trim(rawFree) }
+  def trimFreed(): Unit = { check();hostSync();trimPool();CudaWeightPool.trimArenas(deviceIndex,rawFree) }
   private def deviceFree(): Long = CudaWeightPool.governedFree(deviceIndex,driver.freeBytes())
   /** Called when the session is short of memory, with the number of bytes that are missing. It may close tensors of this session that
     * can be rebuilt (offloaded weights kept for speed) and returns true when it closed something. */
@@ -75,8 +76,8 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
         if evicted.isEmpty then more=false
         else
           any=true
-          evicted.foreach(e => weightArena.release(e.allocation.address))
-          weightArena.trim(rawFree)
+          evicted.foreach(e => e.allocation.arena.release(e.allocation.address))
+          CudaWeightPool.trimArenas(deviceIndex,rawFree)
     any
   /** Before a new chunk: when the device is short of `bytes`, give back this session's empty chunks, then the kept weights that no open
     * session uses. On Windows an over-full device does not fail, it silently spills into system memory and becomes very slow. */
@@ -84,14 +85,14 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val needed=bytes+67108864L
     if deviceFree()<needed then
       hostSync()
-      trimPool();weightArena.trim(rawFree)
+      trimPool();CudaWeightPool.trimArenas(deviceIndex,rawFree)
       if deviceFree()<needed then evictSharedWeights(needed)
       if deviceFree()<needed && pressure(needed-deviceFree()) then trimPool()
   private val rawAllocateOrEvict: Long => Long = bytes =>
     try rawAllocate(bytes)
     catch case error: Throwable =>
       hostSync()
-      val freed=trimPool()+weightArena.trim(rawFree)
+      val freed=trimPool()+CudaWeightPool.trimArenas(deviceIndex,rawFree)
       if !evictSharedWeights(Long.MaxValue>>1) && freed==0L then throw error
       rawAllocate(bytes)
   private def hostSync(): Unit = driver.synchronize(stream)
@@ -184,7 +185,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val bytes=math.max(shape.numel*(if half then 2L else 4L),1L)
     while bytes>maxBytes-used && pressure(bytes-(maxBytes-used)) do ()
     require(bytes <= maxBytes-used,"CUDA session allocation budget exceeded")
-    val from=if sharedAllocation then weightArena else arena
+    val from=if sharedAllocation then { weightArenaUsed=true;weightArena } else arena
     val address=from.allocate(bytes,makeRoom,rawAllocateOrEvict,rawFree)
     val tensor=new CudaTensor(this,shape,new CudaAllocation(address,bytes,from),half)
     live+=tensor;used+=bytes
@@ -1337,13 +1338,14 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     attempt { driver.synchronize(stream) }
     live.toVector.reverse.foreach(tensor => attempt { release(tensor) })
     attempt { trimPool() }
-    attempt { weightArena.trim(rawFree) }
+    attempt { CudaWeightPool.trimArenas(deviceIndex,rawFree) }
+    if weightArenaUsed then weightArena.retired=true
     var shared=0L;touchedShared.forEach(a => shared+=a.bytes)
     attempt { CudaWeightPool.releaseUsers(touchedShared) }
     if memoryLog then
       def mb(v: Long)=v/1048576
       System.err.println(s"[scala-torch CUDA memory] session closed: peak live ${mb(peakUsed)} MiB, peak chunks ${mb(peakOwned)} MiB, kept weights used ${mb(shared)} MiB; " +
-        s"process holds ${mb(held.get())} MiB (kept weights ${mb(weightArena.liveBytes)} MiB in ${mb(weightArena.ownedBytes)} MiB of chunks, unused ${mb(CudaWeightPool.unusedBytes(deviceIndex))} MiB), driver free ${mb(driver.freeBytes())} MiB")
+        s"process holds ${mb(held.get())} MiB (kept weights ${mb(CudaWeightPool.arenaBytes(deviceIndex)._1)} MiB in ${mb(CudaWeightPool.arenaBytes(deviceIndex)._2)} MiB of chunks, unused ${mb(CudaWeightPool.unusedBytes(deviceIndex))} MiB), driver free ${mb(driver.freeBytes())} MiB")
     if profileEnabled then
       val entries=profile.toVector
       val selected=(entries.sortBy(-_._2._2).take(400) ++ entries.filter { case (label,_) =>
