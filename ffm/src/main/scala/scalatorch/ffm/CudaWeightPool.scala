@@ -16,6 +16,12 @@ private[ffm] object CudaWeightPool:
   /** True once kept weights had to make room on some device: uploads then go through cached Float16 host copies, which are much faster
     * to send again. */
   def evictedOnce: Boolean = evictionCount.get()>0 || limitBytes.nonEmpty
+  @volatile private var lastTight=Long.MinValue
+  /** Device memory was short just now (an eviction, or a model that had to be offloaded). */
+  def markTight(): Unit = lastTight=System.nanoTime()
+  /** True while device memory is known to be short: a limit is set, or it ran short within the last ten minutes. Callers then avoid
+    * work that multiplies memory use, such as several generations at the same time. */
+  def tight: Boolean = limitBytes.nonEmpty || (lastTight!=Long.MinValue && System.nanoTime()-lastTight<600_000_000_000L)
   /** Device memory this process uses outside the tracked chunks (context, cuBLAS, kernel modules); measured at 300 to 700 MiB. */
   private val overheadBytes=600L*1024L*1024L
   val lock=new Object
@@ -131,7 +137,7 @@ private[ffm] object CudaWeightPool:
         found+=e.allocation.bytes
         result+=e
       val out=result.result()
-      if out.nonEmpty then evictionCount.incrementAndGet()
+      if out.nonEmpty then { evictionCount.incrementAndGet();markTight() }
       out
     }
 

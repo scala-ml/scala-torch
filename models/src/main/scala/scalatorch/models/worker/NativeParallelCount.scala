@@ -71,7 +71,10 @@ private[worker] object NativeParallelCount:
 
   def run(request: NativeRequest,context: NativeWorkContext,usesCuda: Boolean,keywordInert: (Option[NativeJson],String,Int) => Boolean)(
       runOne: (NativeRequest,NativeWorkContext) => Map[String,NativeJson]): Option[Map[String,NativeJson]]=
-    plan(request,usesCuda,keywordInert).map { case (n,b,g) =>
+    // Parallel groups multiply the activations, and offloaded weights are private to a session: when device memory is short, one
+    // group after the other is both smaller and faster (measured: SD1.5 count 4 at a 3000 MB limit took 30 s in parallel).
+    val candidate=if usesCuda && scalatorch.ffm.CudaSession.memoryTight then None else plan(request,usesCuda,keywordInert)
+    candidate.map { case (n,b,g) =>
       val started=System.nanoTime()
       val parallel=math.min(n,limit)
       val seed=num(g,"seed").map(_.toLong).getOrElse(-1L)

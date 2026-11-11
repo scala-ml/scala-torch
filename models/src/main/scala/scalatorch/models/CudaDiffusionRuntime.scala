@@ -865,6 +865,7 @@ private[models] object CudaDiffusionRuntime:
     val available=session.availableBytes
     val offload=missing>0 && missing+ActivationReserve>available
     if offload then
+      CudaSession.markMemoryTight()
       System.err.println(s"[scala-torch] $label weights (${total/1048576} MiB) do not fit the free device memory (${available/1048576} MiB): " +
         s"keeping up to ${math.max(0L,offloadedWeightLimit(session.maxBytes,available))/1048576} MiB on the device and sending the rest on every use")
     offload

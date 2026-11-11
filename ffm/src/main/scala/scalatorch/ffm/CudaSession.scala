@@ -1360,6 +1360,10 @@ object CudaSession:
   /** Chunk size of a session's arena (`SCALATORCH_CUDA_CHUNK_MB`, default 128). */
   private[ffm] val chunkBytes: Long =
     sys.env.get("SCALATORCH_CUDA_CHUNK_MB").flatMap(_.trim.toLongOption).filter(_ > 0).getOrElse(128L)*1024L*1024L
+  /** True while device memory is known to be short (see `CudaWeightPool.tight`). */
+  def memoryTight: Boolean = CudaWeightPool.tight
+  /** Records that a model did not fit the device. */
+  def markMemoryTight(): Unit = CudaWeightPool.markTight()
   /** `maxBytes` value meaning "92 % of the device memory that is free when the session opens". */
   val AutoBudget: Long = Long.MaxValue
   /** Parses a byte budget from configuration: a number of bytes or `auto`. */
