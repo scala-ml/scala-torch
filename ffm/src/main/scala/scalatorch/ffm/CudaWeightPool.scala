@@ -143,15 +143,31 @@ private[ffm] object CudaWeightPool:
       val result=Vector.newBuilder[Entry]
       var found=0L
       val ordered=candidates.sortBy((e,key,_) => (if key==null then 0 else 1,e.lastUse)).iterator
-      while found<wanted && ordered.hasNext do
-        val (e,key,index)=ordered.next()
-        if key==null then old.remove(e)
-        else
-          val pair=byKey.get(key)
-          pair(index)=null
-          if pair.forall(_ == null) then byKey.remove(key)
-        found+=e.allocation.bytes
-        result+=e
+      // Whole uploads leave together: once one tensor of an arena (one model) goes, the rest of that arena goes too. A model that
+      // is half evicted must be uploaded again anyway, and its remaining tensors would keep every chunk of the arena alive.
+      val leaving=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[CudaArena,java.lang.Boolean]())
+      var pending=Vector.empty[(Entry,AnyRef,Int)]
+      val all=ordered.toVector
+      var cursor=0
+      def next(): Option[(Entry,AnyRef,Int)] =
+        if pending.nonEmpty then { val head=pending.head;pending=pending.tail;Some(head) }
+        else if found<wanted && cursor<all.length then { cursor+=1;Some(all(cursor-1)) }
+        else None
+      val taken=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[Entry,java.lang.Boolean]())
+      var current=next()
+      while current.nonEmpty do
+        val (e,key,index)=current.get
+        current=None
+        if taken.add(e) then
+          if leaving.add(e.allocation.arena) then pending=pending++all.filter(c => (c._1.allocation.arena eq e.allocation.arena) && !taken.contains(c._1))
+          if key==null then old.remove(e)
+          else
+            val pair=byKey.get(key)
+            pair(index)=null
+            if pair.forall(_ == null) then byKey.remove(key)
+          found+=e.allocation.bytes
+          result+=e
+        current=next()
       val out=result.result()
       if out.nonEmpty then { evictionCount.incrementAndGet();markTight() }
       out

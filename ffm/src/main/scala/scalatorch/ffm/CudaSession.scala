@@ -156,6 +156,10 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
   driver.cleanup { driver.call("cuStreamDestroy_v2",Seq(ADDRESS),stream) }
   private val cublas: Option[Cublas]=Cublas.openShared(deviceIndex,stream).orElse(Cublas.open(driver.arena,stream,action => driver.cleanup(action())))
+  // cuDNN is opened on first use: creating its handle is slow and most sessions (text encoders) never convolve.
+  private lazy val cudnn: Option[Cudnn]=
+    try Cudnn.open(driver.arena,stream,action => driver.cleanup(action())) catch case _: Throwable => None
+  def hasCudnn: Boolean = cudnn.isDefined
   private def cublasGemm(m: Int,n: Int,k: Int,a: Long,lda: Int,b: Long,ldb: Int,c: Long,ldc: Int): Boolean =
     cublas match
       case Some(lib) if m>0 && n>0 && k>0 =>
@@ -1056,6 +1060,19 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       val direct=g.kh==1 && g.kw==1 && config.stride==((1,1)) && config.padding==((0,0)) && config.dilation==((1,1))
       val output=allocate(g.shape,half=true)
       try
+        // cuDNN convolves without the im2col copy and with tensor-core kernels made for convolution.
+        val planned=if direct then None else cudnn.flatMap(_.plan(g.n,g.ci,g.h,g.w,g.co,g.cg,g.kh,g.kw,g.oh,g.ow,
+          config.stride,config.padding,config.dilation,config.groups)).filter(p => p.workspace<=math.max(0L,(maxBytes-used)/2))
+        if planned.nonEmpty then
+          val plan=planned.get
+          val started=if profileEnabled then System.nanoTime() else 0L
+          Using.resource(allocate(Shape.from(Seq(math.max(1L,(plan.workspace+1)/2))),half=true)) { workspace =>
+            cudnn.get.forward(plan,input.address,weight.address,workspace.address,output.address)
+          }
+          if profileEnabled then
+            driver.synchronize(stream)
+            record(s"cudnn_conv[${g.n},${g.ci},${g.h},${g.w},${g.co},${g.kh}]",started)
+          return output
         def gemm(batch: Int,group: Int,inputAddress: Long,ldb: Int,positions: Int,positionStart: Long): Unit =
           val weightOffset=group.toLong*outputChannelsPerGroup*k*2
           val outputOffset=((batch.toLong*g.co+group.toLong*outputChannelsPerGroup)*spatial+positionStart)*2
