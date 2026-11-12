@@ -45,16 +45,17 @@ private[ffm] final class Cublas private (handle: MemorySegment,sgemmHandle: Meth
 
   /** Row-major C[m,n] = A[m,k] * B[k,n], all Float16, Float32 accumulation (tensor cores). */
   def gemmHalfRowMajor(m: Int,n: Int,k: Int,a: Long,lda: Int,b: Long,ldb: Int,c: Long,ldc: Int): Unit =
-    val status=gemmExHandle.invokeWithArguments(handle,Int.box(0),Int.box(0),Int.box(n),Int.box(m),Int.box(k),alpha,
-      MemorySegment.ofAddress(b),Int.box(2),Int.box(ldb),MemorySegment.ofAddress(a),Int.box(2),Int.box(lda),beta,
-      MemorySegment.ofAddress(c),Int.box(2),Int.box(ldc),Int.box(68),Int.box(99)).asInstanceOf[Integer].intValue()
+    val status: Int=gemmExHandle.invokeExact(handle,0,0,n,m,k,alpha,
+      MemorySegment.ofAddress(b),2,ldb,MemorySegment.ofAddress(a),2,lda,beta,
+      MemorySegment.ofAddress(c),2,ldc,68,99)
     if status!=0 then throw IllegalStateException(s"cublasGemmEx (half) failed with status $status")
 
   /** Row-major C[m,n] = A[m,k] * W[n,k]^T, all Float16, Float32 accumulation. */
   def gemmHalfRowMajorBT(m: Int,n: Int,k: Int,a: Long,w: Long,c: Long,accumulate: Boolean=false): Unit =
-    val status=gemmExHandle.invokeWithArguments(handle,Int.box(1),Int.box(0),Int.box(n),Int.box(m),Int.box(k),alpha,
-      MemorySegment.ofAddress(w),Int.box(2),Int.box(k),MemorySegment.ofAddress(a),Int.box(2),Int.box(k),if accumulate then alpha else beta,
-      MemorySegment.ofAddress(c),Int.box(2),Int.box(n),Int.box(68),Int.box(99)).asInstanceOf[Integer].intValue()
+    // invokeExact: no boxing and no argument array (invokeWithArguments cost tens of microseconds per call; a U-Net pass makes hundreds)
+    val status: Int=gemmExHandle.invokeExact(handle,1,0,n,m,k,alpha,
+      MemorySegment.ofAddress(w),2,k,MemorySegment.ofAddress(a),2,k,if accumulate then alpha else beta,
+      MemorySegment.ofAddress(c),2,n,68,99)
     if status!=0 then throw IllegalStateException(s"cublasGemmEx (half, transposed) failed with status $status")
 
   /** Column-major strided-batched GEMM, all Float16 with Float32 accumulation. Transpose codes 0 (N) / 1 (T). */

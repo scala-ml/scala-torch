@@ -141,6 +141,8 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
   // LoRA merged into a private copy of the Float16 weight: one GEMM per step instead of five kernels. Rebuilt whenever
   // the adapter set or a multiplier changes (per-step LoRA schedules), and disabled with SCALATORCH_LORA_MERGE=0.
   private val mergedWeights=scala.collection.mutable.HashMap.empty[Parameter,(Vector[(AnyRef,Float)],CudaTensor)]
+  // Query, key and value weights of a self-attention layer stacked into one matrix, by the query weight. Built on first use.
+  private val packedWeights=scala.collection.mutable.HashMap.empty[Parameter,CudaTensor]
   private val mergeEnabled= !sys.env.get("SCALATORCH_LORA_MERGE").contains("0")
 
   private def mergedWeight(l: Linear,adapters: Vector[(LowRankAdapter,Float)]): CudaTensor =
@@ -275,6 +277,26 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     // Plain Float16 self-attention: the fused kernels read the heads where the projections put them, without transposed copies.
     val special=(context.isEmpty && Pag.currentSection=="mid" && (Sag.currentStore.isDefined || Incantations.currentSeg.isDefined)) ||
       (context.isDefined && NegPip.currentSigns.isDefined)
+    // Self-attention whose three projections are plain resident weights: one matrix product with the weights stacked instead of
+    // three (a cuBLAS call costs about 50 microseconds on the CPU whatever its size), and the kernel reads the three parts in place.
+    def plainWeight(l: Linear): Boolean =
+      l.bias.isEmpty && l.lora.isEmpty && weights.contains(l.weight) && LinearAdapterScope.forWeight(l.weight).isEmpty
+    if input.half && !special && context.isEmpty && host.isEmpty && CudaDiffusionRuntime.packedProjections &&
+        plainWeight(model.toQ) && plainWeight(model.toK) && plainWeight(model.toV) &&
+        session.canAttendTokensMajor(queries,queries,inner/model.heads) then
+      return scope { use =>
+        val stacked=packedWeights.getOrElseUpdate(model.toQ.weight,
+          session.cat(Seq(weights(model.toQ.weight),weights(model.toK.weight),weights(model.toV.weight)),0))
+        val flat=use(session.reshape(input,Shape.from(Seq(batch*queries,queryWidth))))
+        val projected=use(session.matmulTransposedB(flat,stacked));flat.close()
+        val packed=use(session.reshape(projected,Shape.from(Seq(batch,queries,3*inner))));projected.close()
+        val attended=use(session.attentionPacked(packed,model.heads));packed.close()
+        val merged=use(session.reshape(attended,Shape.from(Seq(batch*queries,inner))));attended.close()
+        val out=use(linear(merged,model.toOut));merged.close()
+        val result=use(session.reshape(out,Shape.from(Seq(batch,queries,queryWidth))))
+        out.close()
+        result
+      }
     if input.half && !special && session.canAttendTokensMajor(queries,keys,inner/model.heads) then
       return scope { use =>
         def project(value: CudaTensor,l: Linear,tokens: Long): CudaTensor =
@@ -856,6 +878,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
           f"transient=$offloadedWeightTransientUploads evictions=$offloadedWeightEvictions")
       weights.values.foreach(_.close())
       mergedWeights.values.foreach(_._2.close());mergedWeights.clear()
+      packedWeights.values.foreach(_.close());packedWeights.clear()
       clearOffloadedWeights()
       host=Map.empty
       closed=true
@@ -864,6 +887,9 @@ private[models] object CudaDiffusionRuntime:
   private val MaximumOffloadedWeightBytes=512L*1024L*1024L
   /** Precision chosen for the loaded model (`load_model` dtype). None = follow the environment default. */
   @volatile private var precisionOverride: Option[Boolean]=None
+  /** Self-attention projections as one matrix product, only with `SCALATORCH_CUDA_PACKED_PROJECTIONS=1`. Measured on an RTX 3090:
+    * no gain (SD1.5 1.6 s and 4.1 s for 20 and 60 steps either way, SDXL 7.5 s) and more memory for the stacked weights, so off. */
+  private[models] val packedProjections: Boolean = sys.env.get("SCALATORCH_CUDA_PACKED_PROJECTIONS").contains("1")
   private[models] def environmentFp16: Boolean = !sys.env.get("SCALATORCH_CUDA_FP16").contains("0")
   private[models] def setHalfPrecision(value: Option[Boolean]): Unit = precisionOverride=value
   /** Float16 U-Net / VAE / CLIP (weights, activations, tensor-core GEMM): the dtype of the loaded model (`load_model`), else

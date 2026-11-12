@@ -60,7 +60,30 @@ final class NativeWorker(out: OutputStream,backend: NativeWorkerBackend) extends
           },(name,fields) => emitter.event(job.id,name,fields))
           try
             context.checkCancelled()
-            val result=backend.execute(request,context)
+            val requestStarted=scalatorch.ffm.CudaSession.clockMillis
+            // SCALATORCH_SAMPLE_STACKS=1: where the request thread spends its time (a stack every 2 ms, counted by the deepest
+            // scalatorch frames), to find time that no GPU session accounts for.
+            val sampler=if !sys.env.get("SCALATORCH_SAMPLE_STACKS").contains("1") then None else
+              val target=Thread.currentThread()
+              val counts=new java.util.concurrent.ConcurrentHashMap[String,java.lang.Integer]()
+              val running=new java.util.concurrent.atomic.AtomicBoolean(true)
+              val thread=new Thread(() => {
+                while running.get() do
+                  val frames=target.getStackTrace.filter(f => f.getClassName.startsWith("scalatorch.")).take(3)
+                  val top=target.getStackTrace.headOption.map(f => f.getClassName.split('.').last+"."+f.getMethodName).getOrElse("?")
+                  val key=top+" <- "+frames.map(f => f.getClassName.split('.').last+"."+f.getMethodName+":"+f.getLineNumber).mkString(" <- ")
+                  counts.merge(key,1,(a,b) => a+b)
+                  Thread.sleep(2)
+              },"scala-torch-stack-sampler")
+              thread.setDaemon(true);thread.start()
+              Some((running,counts))
+            val result=try backend.execute(request,context) finally sampler.foreach { (running,counts) =>
+              running.set(false)
+              val rows=scala.jdk.CollectionConverters.MapHasAsScala(counts).asScala.toVector.sortBy(-_._2.intValue).take(40)
+              rows.foreach((key,n) => System.err.println(s"[scala-torch stacks] ${n.intValue*2} ms  $key"))
+            }
+            if sys.env.get("SCALATORCH_CUDA_LAUNCH_STATS").contains("1") then
+              System.err.println(f"[scala-torch request] ${request.kind} from $requestStarted%.0f to ${scalatorch.ffm.CudaSession.clockMillis}%.0f ms")
             context.beginPublication()
             emitter.result(job.id,result)
           catch

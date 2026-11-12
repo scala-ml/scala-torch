@@ -86,9 +86,9 @@ private[ffm] final class Cudnn private (handle: MemorySegment, arena: Arena, h: 
     Option(built).filter(_.algo >= 0)
 
   def forward(plan: Plan, input: Long, weight: Long, workspace: Long, output: Long): Unit =
-    check(h.forward.invokeWithArguments(handle, one, plan.x, MemorySegment.ofAddress(input), plan.w, MemorySegment.ofAddress(weight), plan.conv,
-      Int.box(plan.algo), MemorySegment.ofAddress(workspace), Long.box(plan.workspace), zero, plan.y, MemorySegment.ofAddress(output)),
-      "cudnnConvolutionForward")
+    val status: Int = h.forward.invokeExact(handle, one, plan.x, MemorySegment.ofAddress(input), plan.w, MemorySegment.ofAddress(weight),
+      plan.conv, plan.algo, MemorySegment.ofAddress(workspace), plan.workspace, zero, plan.y, MemorySegment.ofAddress(output))
+    if status != 0 then throw IllegalStateException(s"cudnnConvolutionForward failed with cuDNN status $status")
 
   def close(): Unit = try h.destroy.invokeWithArguments(handle) catch case _: Throwable => ()
 

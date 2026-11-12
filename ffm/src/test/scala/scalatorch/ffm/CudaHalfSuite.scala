@@ -185,6 +185,17 @@ class CudaHalfSuite extends FunSuite:
         // both go through the same kernels on the same numbers in another layout: equal bit for bit
         assert(actual.sameElements(expected),s"layouts differ for ($b,$h,$t,$kt,$d)")
         Seq(q,k,v).foreach(_.close())
+      // queries, keys and values as the three parts of one tensor: the same result as three tensors
+      for (b,h,t,d) <- Seq((1,8,64,40),(2,10,32,64),(3,4,48,80),(2,8,128,40)) do
+        def tokens(seed: Long)=s.uploadHalf(tensor(data(b*t*h*d,seed),b.toLong,t.toLong,(h*d).toLong))
+        val q=tokens(81);val k=tokens(82);val v=tokens(83)
+        val separate=Using.resource(s.attentionTokensMajor(q,k,v,h))(out => s.castToFloat(out).toCpu.toFloatArray)
+        val packed=Using.resource(s.cat(Seq(q,k,v),2)) { all =>
+          assertEquals(all.shape,Shape.from(Seq(b.toLong,t.toLong,3L*h*d)))
+          Using.resource(s.attentionPacked(all,h))(out => s.castToFloat(out).toCpu.toFloatArray)
+        }
+        assert(packed.sameElements(separate),s"packed differs for ($b,$h,$t,$d)")
+        Seq(q,k,v).foreach(_.close())
       assert(!s.canAttendTokensMajor(64,77,40) && !s.canAttendTokensMajor(64,64,160) && !s.canAttendTokensMajor(64,64,50))
     }
   }
