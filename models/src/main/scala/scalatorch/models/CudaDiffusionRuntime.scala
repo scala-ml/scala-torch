@@ -1037,7 +1037,7 @@ private[models] object CudaDiffusionRuntime:
     offload
 
   def upload[A: Module](session: CudaSession,model: A,cancelled: () => Boolean=() => false,offloadWeights: Boolean=false,
-      includeAdapters: Boolean=true,half: Boolean=false): CudaDiffusionRuntime =
+      includeAdapters: Boolean=true,half: Boolean=false,extraParameters: Vector[Parameter]=Vector.empty): CudaDiffusionRuntime =
     session.allocatedBytes
     val uploadStart=System.nanoTime()
     val host=scala.collection.mutable.LinkedHashMap.empty[Parameter,Tensor[Float]]
@@ -1050,7 +1050,8 @@ private[models] object CudaDiffusionRuntime:
         VaeExecution.checkCancelled(cancelled)
         if offloadWeights then host(p)=p.data else uploaded(p)=session.sharedUpload(p,p.data,half,if half then Some(() => HalfWeightCache.bits(p,p.data)) else None)
       }
-      (if includeAdapters then LinearAdapterScope.parameters.filterNot(baseSet.contains) else Vector.empty).distinct.foreach { p =>
+      // `extraParameters`: adapter factors of this model alone, for a caller that does not want every adapter in scope.
+      ((if includeAdapters then LinearAdapterScope.parameters else Vector.empty)++extraParameters).filterNot(baseSet.contains).distinct.foreach { p =>
         VaeExecution.checkCancelled(cancelled)
         if offloadWeights then host(p)=p.data else uploaded(p)=(if half then session.uploadHalf(p.data) else session.upload(p.data))
       }

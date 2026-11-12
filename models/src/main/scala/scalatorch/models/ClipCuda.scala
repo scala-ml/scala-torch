@@ -32,11 +32,18 @@ object ClipCuda:
   private val cacheEnabled= !sys.env.get("SCALATORCH_CLIP_CACHE").contains("0")
   private def weightIdentity(stack: ClipStack): Long =
     Module.parameters(stack).foldLeft(17L)((acc,p) => acc*31+System.identityHashCode(p.data))
+  /** The LoRA factors that apply to the weights of this stack right now, with their strengths. */
+  private def stackAdapters(stack: ClipStack): Vector[LinearAdapterScope.Applied] =
+    Module.parameters(stack).flatMap(LinearAdapterScope.forWeight)
   private def cached(model: ClipTextModel,stack: ClipStack,embedded: Tensor[Float],depth: Int,half: Boolean)(compute: => States): States =
-    if !cacheEnabled || LinearAdapterScope.parameters.nonEmpty then return compute
+    if !cacheEnabled then return compute
     val values=embedded.toFloatArray
     val dims=embedded.shape.dims.toVector
-    val identity=weightIdentity(stack)
+    // A text-encoder LoRA changes the result: its factor tensors and strengths are part of the identity. (A LoRA file that is
+    // read again gives new tensors and so a new identity; the encoding is then computed again on the GPU.)
+    val identity=stackAdapters(stack).foldLeft(weightIdentity(stack)) { case (acc,(adapter,strength)) =>
+      ((acc*31+System.identityHashCode(adapter.a.data))*31+System.identityHashCode(adapter.b.data))*31+java.lang.Float.floatToIntBits(strength)
+    }
     owners.synchronized {
       owners.removeIf(o => o.layers.get()==null)
       val it=owners.iterator()
@@ -73,7 +80,10 @@ object ClipCuda:
         val half=CudaDiffusionRuntime.fp16Default
         Some(cached(model,stack,embedded,selectedDepth,half) {
           CudaSession.withDevice(index,maxBytes=budget) { session =>
-            Using.resource(CudaDiffusionRuntime.upload(session,stack,includeAdapters=false,half=half)) { runtime =>
+            // Only the LoRA factors of the text encoder are uploaded. Without them the linear layers of a prompt with a LoRA
+            // failed ("key not found") and the encoder fell back to the CPU: about 20 s per SDXL prompt.
+            val factors=stackAdapters(stack).flatMap((adapter,_) => Seq(adapter.a,adapter.b)).distinct
+            Using.resource(CudaDiffusionRuntime.upload(session,stack,includeAdapters=false,half=half,extraParameters=factors)) { runtime =>
               runtime.clipStates(stack,session.upload(embedded),selectedDepth,model.maxScoreElements)
             }
           }
