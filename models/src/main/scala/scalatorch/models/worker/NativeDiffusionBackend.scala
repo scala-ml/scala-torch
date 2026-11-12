@@ -28,6 +28,13 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
   private var loadedEmbeddingTokens=Set.empty[String]
   private var loadedEmbeddingInfo=Vector.empty[NativeEmbeddingInspector.LoadedEmbedding]
   private var linearTargets=Map.empty[String,scalatorch.nn.Parameter]
+  // LoRA files that were read for the loaded model, by file, size, modification time and dynamic rank. Reading and matching an
+  // SDXL LoRA took about a second of every generation; with the same tensors the text encoder cache also applies again.
+  // `SCALATORCH_LORA_FILE_CACHE=0` reads the file on every request.
+  private val loraFileCacheEnabled= !sys.env.get("SCALATORCH_LORA_FILE_CACHE").contains("0")
+  private var loraFileCacheTargets: AnyRef=null
+  private val loraFileCache=scala.collection.mutable.LinkedHashMap.empty[(Path,Option[Int],Long,Long),
+    (Long,Map[scalatorch.nn.Parameter,Vector[LinearAdapterScope.Applied]])]
   private var keywordState=ModelKeyword.State()
   @volatile private var pendingSystemSubmission: Option[(Long,Map[String,NativeJson])]=None
   @volatile private var vramLastProfile: Option[NativeJson]=None
@@ -1734,10 +1741,20 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           require(Vector(".safetensors",".pt",".pth",".bin",".ckpt").exists(lower.endsWith) && Files.isRegularFile(file),
             s"LoRA tensor archive is missing or unsupported: $name")
           val loadedAdapter=adapterCache.getOrElseUpdate((file,dynamicRank), {
-            val loaded=DiffusionLoRA.load(file,linearTargets,elementBudget=remainingAdapterElements,dynamicRank=dynamicRank)
-            val used=loaded.valuesIterator.flatten.map { case (adapter,_) =>
-              adapter.a.data.shape.numel+adapter.b.data.shape.numel
-            }.sum
+            if loraFileCacheTargets ne linearTargets then { loraFileCache.clear();loraFileCacheTargets=linearTargets }
+            val fileKey=(file,dynamicRank,Files.size(file),Files.getLastModifiedTime(file).toMillis)
+            val kept=if loraFileCacheEnabled then loraFileCache.get(fileKey).filter(_._1<=remainingAdapterElements) else None
+            val (used,loaded)=kept.getOrElse {
+              val read=DiffusionLoRA.load(file,linearTargets,elementBudget=remainingAdapterElements,dynamicRank=dynamicRank)
+              val elements=read.valuesIterator.flatten.map { case (adapter,_) =>
+                adapter.a.data.shape.numel+adapter.b.data.shape.numel
+              }.sum
+              if loraFileCacheEnabled then
+                loraFileCache.remove(fileKey)
+                loraFileCache(fileKey)=(elements,read)
+                while loraFileCache.size>4 do loraFileCache.remove(loraFileCache.head._1)
+              (elements,read)
+            }
             remainingAdapterElements-=used
             loaded
           })

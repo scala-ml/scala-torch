@@ -142,6 +142,11 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
   // the adapter set or a multiplier changes (per-step LoRA schedules), and disabled with SCALATORCH_LORA_MERGE=0.
   private val mergedWeights=scala.collection.mutable.HashMap.empty[Parameter,(Vector[(AnyRef,Float)],CudaTensor)]
   // Key and value projections of the text context per cross-attention layer (by the key weight): (context, keys, values).
+  // Key and value projections of a text context in the tokens-major form of the fused attention, by the key weight: the
+  // context does not change between the steps of a sampling, so the two matrix products per layer are done once. At most two
+  // contexts per layer are kept (conditional and unconditional when they are not batched).
+  private val contextTokens=
+    scala.collection.mutable.HashMap.empty[Parameter,scala.collection.mutable.ArrayBuffer[(CudaTensor,CudaTensor,CudaTensor)]]
   private val contextProjections=
     scala.collection.mutable.HashMap.empty[Parameter,scala.collection.mutable.ArrayBuffer[(CudaTensor,CudaTensor,CudaTensor)]]
   // Query, key and value weights of a self-attention layer stacked into one matrix, by the query weight. Built on first use.
@@ -338,9 +343,24 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
           val projected=use(linear(flat,l));flat.close()
           val view=use(session.reshape(projected,Shape.from(Seq(batch,tokens,inner))));projected.close()
           view
-        val q=project(input,model.toQ,queries);val k=project(source,model.toK,keys);val v=project(source,model.toV,keys)
+        val q=project(input,model.toQ,queries)
+        val keep=context.isDefined && CudaDiffusionRuntime.contextTokensCache && plainWeight(model.toK) && plainWeight(model.toV)
+        val (k,v)=
+          if !keep then (project(source,model.toK,keys),project(source,model.toV,keys))
+          else
+            val entries=contextTokens.getOrElseUpdate(model.toK.weight,scala.collection.mutable.ArrayBuffer.empty)
+            entries.find(_._1 eq source) match
+              case Some(entry) => (entry._2,entry._3)
+              case None =>
+                // views that outlive this scope; closed when a newer context replaces them or with the runtime
+                val kk=session.reshape(project(source,model.toK,keys),Shape.from(Seq(batch,keys,inner)))
+                val vv=try session.reshape(project(source,model.toV,keys),Shape.from(Seq(batch,keys,inner)))
+                  catch case error: Throwable => { kk.close();throw error }
+                while entries.size>=2 do { val old=entries.remove(0);old._2.close();old._3.close() }
+                entries+=((source,kk,vv))
+                (kk,vv)
         val attended=use(session.attentionTokensMajor(q,k,v,model.heads))
-        q.close();k.close();v.close()
+        q.close();if !keep then { k.close();v.close() }
         val flat=use(session.reshape(attended,Shape.from(Seq(batch*queries,inner))));attended.close()
         val projected=use(outProjection(flat,model.toOut,residual,folded,use));flat.close()
         val result=use(session.reshape(projected,Shape.from(Seq(batch,queries,queryWidth))))
@@ -681,9 +701,30 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     else scope { use =>
       def h(t: CudaTensor): CudaTensor = if t.half then t else use(session.castToHalf(t))
       val residuals=control.map(c => CudaControlNetResiduals(c.down.map(h),h(c.middle)))
-      val out=use(unetCore(h(input),model,timesteps,h(context),added.map(h),residuals))
+      val out=use(unetCore(h(input),model,timesteps,keptContext(context).getOrElse(h(context)),added.map(h),residuals))
       use(session.castToFloat(out))
     }
+
+  // Float16 copies of the text contexts of this sampling, by value. The caller uploads the context again for every step; the
+  // same values give the same tensor object here, which is what the projections in `contextTokens` are kept by.
+  private val keptContexts=scala.collection.mutable.ArrayBuffer.empty[(Array[Float],CudaTensor)]
+  private def keptContext(context: CudaTensor): Option[CudaTensor] =
+    if !CudaDiffusionRuntime.contextTokensCache || context.half then None
+    else
+      val values=context.toCpu.toFloatArray
+      val dims=session.shape(context).dims
+      keptContexts.find(e => session.shape(e._2).dims==dims && java.util.Arrays.equals(e._1,values)).map(_._2).orElse {
+        while keptContexts.size>=2 do
+          val old=keptContexts.remove(0)._2
+          contextTokens.values.foreach { entries =>
+            entries.filter(_._1 eq old).foreach { e => e._2.close();e._3.close() }
+            entries.filterInPlace(e => !(e._1 eq old))
+          }
+          old.close()
+        val kept=session.castToHalf(context)
+        keptContexts+=((values,kept))
+        Some(kept)
+      }
 
   private def unetCore(input: CudaTensor,model: ConditionalUNet2d,timesteps: Tensor[Float],context: CudaTensor,
       added: Option[CudaTensor],control: Option[CudaControlNetResiduals]): CudaTensor =
@@ -981,6 +1022,8 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       mergedWeights.values.foreach(_._2.close());mergedWeights.clear()
       packedWeights.values.foreach(_.close());packedWeights.clear()
       contextProjections.values.foreach(_.foreach { v => v._2.close();v._3.close() });contextProjections.clear()
+      contextTokens.values.foreach(_.foreach { v => v._2.close();v._3.close() });contextTokens.clear()
+      keptContexts.foreach(_._2.close());keptContexts.clear()
       clearOffloadedWeights()
       host=Map.empty
       closed=true
@@ -994,6 +1037,9 @@ private[models] object CudaDiffusionRuntime:
   /** Residual adds of a transformer block folded into the projection before them, and the GEGLU bias into the GEGLU kernel;
     * `SCALATORCH_CUDA_FUSED_RESIDUAL=0` keeps the separate passes. */
   private[models] val foldedResiduals: Boolean = !sys.env.get("SCALATORCH_CUDA_FUSED_RESIDUAL").contains("0")
+  /** Key and value projections of the text context kept between steps (fused cross-attention);
+    * `SCALATORCH_CUDA_CONTEXT_TOKENS_CACHE=0` computes them in every step. */
+  private[models] val contextTokensCache: Boolean = !sys.env.get("SCALATORCH_CUDA_CONTEXT_TOKENS_CACHE").contains("0")
   private[models] val packedProjections: Boolean = sys.env.get("SCALATORCH_CUDA_PACKED_PROJECTIONS").contains("1")
   /** Keep the key and value projections of the text context between steps, only with `SCALATORCH_CUDA_CONTEXT_CACHE=1`. The images
     * are pixel-identical with and without, and so are the times (RTX 3090: SD1.5 60 steps 4.1 s, batch of 4 4.5 s, SDXL 7.5-7.6 s),
