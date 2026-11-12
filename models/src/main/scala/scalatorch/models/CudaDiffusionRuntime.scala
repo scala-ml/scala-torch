@@ -272,6 +272,25 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         projected.close()
         result
       }
+    // Plain Float16 self-attention: the fused kernels read the heads where the projections put them, without transposed copies.
+    val special=(context.isEmpty && Pag.currentSection=="mid" && (Sag.currentStore.isDefined || Incantations.currentSeg.isDefined)) ||
+      (context.isDefined && NegPip.currentSigns.isDefined)
+    if input.half && !special && session.canAttendTokensMajor(queries,keys,inner/model.heads) then
+      return scope { use =>
+        def project(value: CudaTensor,l: Linear,tokens: Long): CudaTensor =
+          val flat=use(session.reshape(value,Shape.from(Seq(batch*tokens,value.shape.dims(2)))))
+          val projected=use(linear(flat,l));flat.close()
+          val view=use(session.reshape(projected,Shape.from(Seq(batch,tokens,inner))));projected.close()
+          view
+        val q=project(input,model.toQ,queries);val k=project(source,model.toK,keys);val v=project(source,model.toV,keys)
+        val attended=use(session.attentionTokensMajor(q,k,v,model.heads))
+        q.close();k.close();v.close()
+        val flat=use(session.reshape(attended,Shape.from(Seq(batch*queries,inner))));attended.close()
+        val projected=use(linear(flat,model.toOut));flat.close()
+        val result=use(session.reshape(projected,Shape.from(Seq(batch,queries,queryWidth))))
+        projected.close()
+        result
+      }
     scope { use =>
       def heads(value: CudaTensor,l: Linear,tokens: Long): CudaTensor =
         val flat=use(session.reshape(value,Shape.from(Seq(batch*tokens,value.shape.dims(2)))))

@@ -158,7 +158,8 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   private val cublas: Option[Cublas]=Cublas.openShared(deviceIndex,stream).orElse(Cublas.open(driver.arena,stream,action => driver.cleanup(action())))
   // cuDNN is opened on first use: creating its handle is slow and most sessions (text encoders) never convolve.
   private lazy val cudnn: Option[Cudnn]=
-    try Cudnn.open(driver.arena,stream,action => driver.cleanup(action())) catch case _: Throwable => None
+    try Cudnn.openShared(deviceIndex,stream).orElse(Cudnn.open(driver.arena,stream,action => driver.cleanup(action())))
+    catch case _: Throwable => None
   def hasCudnn: Boolean = cudnn.isDefined
   private def cublasGemm(m: Int,n: Int,k: Int,a: Long,lda: Int,b: Long,ldb: Int,c: Long,ldc: Int): Boolean =
     cublas match
@@ -729,7 +730,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
         launch(batch.toLong*(qt/(16*tiles)),halfKernels(kernelName),32,32,kernelName) { arena =>
           Seq(query.address,key.address,value.address,result.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
             Seq(batch,qt,kt,d,dv).map(x => arena.allocateFrom(JAVA_INT,x)) :+
-            arena.allocateFrom(JAVA_FLOAT,(1.0/math.sqrt(d.toDouble)).toFloat)
+            arena.allocateFrom(JAVA_FLOAT,(1.0/math.sqrt(d.toDouble)).toFloat) :+ arena.allocateFrom(JAVA_INT,0)
         }
         return result
       // The score matrix never exists as a whole: heads are processed in groups and, when even one head does not fit the scratch
@@ -936,6 +937,39 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
         driver.synchronize(stream)
         record(s"half_gemm_bt[$m,$n,$k]",started)
       Some(result)
+    catch case error: Throwable =>
+      try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
+  /** True when `attentionTokensMajor` can run this shape: Float16, the fused kernels usable on this device, token counts that
+    * are multiples of 16, a head width of 40 to 80 that is a multiple of 8. */
+  def canAttendTokensMajor(queries: Long,keys: Long,headWidth: Long): Boolean =
+    CudaSession.fusedHalfAttention && cublas.isDefined && wmmaStandardLayout && queries%16==0 && keys%16==0 && queries>=16 &&
+      keys>=CudaSession.fusedHalfAttentionMinKeys && headWidth>=33 && headWidth<=80 && headWidth%8==0
+
+  /** Attention on tensors as the projections of a transformer block leave them: q [batch, queries, heads * width] and k, v
+    * [batch, keys, heads * width], result [batch, queries, heads * width]. The fused kernels read the heads in place (row stride
+    * heads * width), so the four transposed copies of the heads-major form are not made. Check `canAttendTokensMajor` first. */
+  def attentionTokensMajor(query: CudaTensor,key: CudaTensor,value: CudaTensor,heads: Int): CudaTensor =
+    validate(query);validate(key);validate(value)
+    require(query.half && key.half && value.half,"tokens-major attention is Float16 only")
+    val q=query.shape.dims;val k=key.shape.dims;val v=value.shape.dims
+    require(q.size==3 && k.size==3 && v.size==3 && q(0)==k(0) && q(0)==v(0) && k(1)==v(1) && q(2)==k(2) && q(2)==v(2) &&
+      heads>0 && q(2)%heads==0,"tokens-major attention shape mismatch")
+    val width=(q(2)/heads).toInt;val qt=q(1).toInt;val kt=k(1).toInt
+    require(canAttendTokensMajor(qt,kt,width),"shape not supported by the fused attention kernels")
+    val chunks=(width+15)/16
+    val tiles=Seq(4,2,1).find(t => t<=CudaSession.fusedHalfAttentionTiles && qt%(16*t)==0 && (t<4 || chunks<=4)).get
+    val kernelName=s"h_attention_fused_r${tiles}c$chunks"
+    val all=(q(0)*heads).toInt
+    val result=allocate(query.shape,half=true)
+    try
+      launch(all.toLong*(qt/(16*tiles)),halfKernels(kernelName),32,32,kernelName) { arena =>
+        Seq(query.address,key.address,value.address,result.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
+          Seq(all,qt,kt,width,width).map(x => arena.allocateFrom(JAVA_INT,x)) :+
+          arena.allocateFrom(JAVA_FLOAT,(1.0/math.sqrt(width.toDouble)).toFloat) :+ arena.allocateFrom(JAVA_INT,heads)
+      }
+      result
     catch case error: Throwable =>
       try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
@@ -1472,7 +1506,8 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     attempt { CudaWeightPool.releaseUsers(touchedShared) }
     if launchStats && launchCount>0 then
       System.err.println(f"[scala-torch CUDA launches] $launchCount launches, ${launchNanos/1e6}%.1f ms in cuLaunchKernel, " +
-        f"${launchPrepNanos/1e6}%.1f ms preparing arguments, session open ${(System.nanoTime()-opened)/1e6}%.1f ms")
+        f"${launchPrepNanos/1e6}%.1f ms preparing arguments, session open ${(System.nanoTime()-opened)/1e6}%.1f ms, " +
+        f"from ${(opened-CudaSession.processStart)/1e6}%.0f to ${(System.nanoTime()-CudaSession.processStart)/1e6}%.0f ms")
     if memoryLog then
       def mb(v: Long)=v/1048576
       System.err.println(s"[scala-torch CUDA memory] session closed: peak live ${mb(peakUsed)} MiB, peak chunks ${mb(peakOwned)} MiB, kept weights used ${mb(shared)} MiB; " +
@@ -1506,6 +1541,7 @@ object CudaSession:
     sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_MIN_KEYS").flatMap(_.trim.toIntOption).filter(_ >= 16).getOrElse(16)
   /** Bias folded into the Float16 matrix product of a linear layer (`SCALATORCH_CUDA_FUSED_LINEAR_BIAS=0` keeps the separate add). */
   private[ffm] val fusedLinearBias: Boolean = !sys.env.get("SCALATORCH_CUDA_FUSED_LINEAR_BIAS").contains("0")
+  private[ffm] val processStart: Long = System.nanoTime()
   /** True when cuBLAS can be loaded (search path, `SCALATORCH_CUDNN_PATH`, a CUDA Toolkit). Float16 execution needs it. */
   def cublasLoadable: Boolean = Cublas.loadable
   /** True while device memory is known to be short (see `CudaWeightPool.tight`). */

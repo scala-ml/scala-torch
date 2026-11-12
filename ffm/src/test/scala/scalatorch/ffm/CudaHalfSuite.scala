@@ -165,6 +165,30 @@ class CudaHalfSuite extends FunSuite:
     }
   }
 
+  test("tokens-major attention equals heads-major attention on transposed copies") {
+    gpu()
+    CudaSession.withDevice(maxBytes=1L<<30) { s =>
+      assume(s.hasCublas,"cuBLAS unavailable")
+      assume(s.canAttendTokensMajor(64,64,40),"fused attention is switched off or not usable on this device")
+      // (batch, heads, queries, keys, width): every kernel variant, one and several batch members
+      for (b,h,t,kt,d) <- Seq((1,8,64,64,40),(2,8,32,48,40),(3,5,16,32,64),(2,10,128,64,64),(2,4,48,160,80),(1,3,64,4096,56)) do
+        assert(s.canAttendTokensMajor(t,kt,d))
+        def tokens(count: Int,seed: Long)=s.uploadHalf(tensor(data(b*count*h*d,seed),b.toLong,count.toLong,(h*d).toLong))
+        val q=tokens(t,71);val k=tokens(kt,72);val v=tokens(kt,73)
+        def headsMajor(x: CudaTensor,count: Int): CudaTensor =
+          Using.resource(s.reshape(x,Shape.from(Seq(b.toLong,count.toLong,h.toLong,d.toLong))))(view => s.transpose(view,1,2))
+        val expected=Using.resource(headsMajor(q,t)) { qh => Using.resource(headsMajor(k,kt)) { kh => Using.resource(headsMajor(v,kt)) { vh =>
+          Using.resource(s.scaledDotProductAttention(qh,kh,vh)) { out => Using.resource(s.transpose(out,1,2))(p => s.castToFloat(p).toCpu.toFloatArray) }
+        } } }
+        val actual=Using.resource(s.attentionTokensMajor(q,k,v,h))(out => s.castToFloat(out).toCpu.toFloatArray)
+        assertEquals(actual.length,expected.length)
+        // both go through the same kernels on the same numbers in another layout: equal bit for bit
+        assert(actual.sameElements(expected),s"layouts differ for ($b,$h,$t,$kt,$d)")
+        Seq(q,k,v).foreach(_.close())
+      assert(!s.canAttendTokensMajor(64,77,40) && !s.canAttendTokensMajor(64,64,160) && !s.canAttendTokensMajor(64,64,50))
+    }
+  }
+
   test("GELU, QuickGELU and causal attention") {
     gpu()
     compare(Seq(tensor(data(5*33,26,2.0),5,33)),3e-3)((s,v) => s.geluErf(v(0)))

@@ -143,6 +143,20 @@ private[ffm] object Cudnn:
     yield file.toAbsolutePath.toString
     found.distinct
 
+  private val shared = new java.util.concurrent.ConcurrentHashMap[(Int, Thread), Cudnn]()
+
+  /** Per (device, thread) cuDNN handle that outlives the session (see [[CudaContextKeeper]]), with its convolution plans. A
+    * generation opens a session for the U-Net and one for the VAE; creating the handle for each cost about 0.1 s per session.
+    * None when keeping is disabled, so the caller opens a private handle as before. */
+  def openShared(device: Int, stream: MemorySegment): Option[Cudnn] =
+    if !CudaContextKeeper.enabled then return None
+    val key = (device, Thread.currentThread())
+    val existing = shared.get(key)
+    if existing != null then { existing.bindStream(stream); return Some(existing) }
+    val created = open(Arena.global(), stream, destroy => CudaContextKeeper.onRelease(device, () => { shared.remove(key); destroy() }))
+    created.foreach(shared.put(key, _))
+    created
+
   /** Opens cuDNN on the current context and binds it to `stream`; `register` receives the cleanup action. */
   def open(arena: Arena, stream: MemorySegment, register: (() => Unit) => Unit): Option[Cudnn] =
     if !enabled then return None

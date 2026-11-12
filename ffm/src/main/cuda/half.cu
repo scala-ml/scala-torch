@@ -261,14 +261,20 @@ __device__ __forceinline__ float att_group_sum(float v) {
 template <int R, int C>
 __device__ __forceinline__ void att_body(const __half* q, const __half* k, const __half* v, __half* out,
                                          unsigned heads, unsigned T, unsigned S, unsigned D, unsigned Dv, float scale,
-                                         float* scores, __half* tile) {
+                                         unsigned H, float* scores, __half* tile) {
   using namespace nvcuda;
+  // H == 0: heads major, q [heads, T, D] (and so on). H > 0: tokens major, q [heads / H, T, H, D], as the projections of a
+  // transformer block leave them; the fragments are then loaded with a row stride of H * D and no transposed copy is needed.
   unsigned groupsPerHead = T / (16 * R);
   unsigned head = blockIdx.x / groupsPerHead, row0 = (blockIdx.x % groupsPerHead) * 16 * R;
   if (head >= heads) return;
   unsigned lane = threadIdx.x & 31, row = lane & 15, col0 = (lane >> 4) * 8;
-  const __half* kh = k + (unsigned long long)head * S * D;
-  const __half* vh = v + (unsigned long long)head * S * Dv;
+  unsigned strideQ = H ? H * D : D, strideV = H ? H * Dv : Dv;
+  unsigned long long member = H ? head / H : 0, within = H ? head % H : 0;
+  const __half* kh = H ? k + (member * S * H + within) * D : k + (unsigned long long)head * S * D;
+  const __half* vh = H ? v + (member * S * H + within) * Dv : v + (unsigned long long)head * S * Dv;
+  const __half* qBase = H ? q + (member * T * H + within) * D : q + (unsigned long long)head * T * D;
+  __half* outBase = H ? out + (member * T * H + within) * Dv : out + (unsigned long long)head * T * Dv;
   // D and Dv both have exactly C chunks of 16 (the caller picks the kernel). Every loop over chunks and query tiles has a
   // constant bound and is unrolled, so the fragments stay in registers; with run-time bounds they were kept in local memory
   // and every variant took the same 6.5 ms whatever it did.
@@ -277,18 +283,18 @@ __device__ __forceinline__ void att_body(const __half* q, const __half* k, const
   wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> qa[R][C];
   #pragma unroll
   for (int r = 0; r < R; ++r) {
-    const __half* qh = q + ((unsigned long long)head * T + row0 + r * 16) * D;
+    const __half* qh = qBase + (unsigned long long)(row0 + r * 16) * strideQ;
     #pragma unroll
     for (int c = 0; c < C; ++c) {
       if (c == C - 1 && tail != 0) {
         for (unsigned j = 0; j < 8; ++j) {
           unsigned cc = col0 + j;
-          tile[row * 16 + cc] = cc < 16 - tail ? __float2half_rn(0.f) : qh[row * D + (D - 16) + cc];
+          tile[row * 16 + cc] = cc < 16 - tail ? __float2half_rn(0.f) : qh[row * strideQ + (D - 16) + cc];
         }
         __syncwarp();
         wmma::load_matrix_sync(qa[r][c], tile, 16);
         __syncwarp();
-      } else wmma::load_matrix_sync(qa[r][c], qh + c * 16, D);
+      } else wmma::load_matrix_sync(qa[r][c], qh + c * 16, strideQ);
     }
   }
 
@@ -310,12 +316,12 @@ __device__ __forceinline__ void att_body(const __half* q, const __half* k, const
     #pragma unroll
     for (int c = 0; c < C; ++c) {
       unsigned d0 = (c == C - 1 && tail != 0) ? D - 16 : c * 16;
-      wmma::load_matrix_sync(kb[c], kh + (unsigned long long)key0 * D + d0, D);
+      wmma::load_matrix_sync(kb[c], kh + (unsigned long long)key0 * strideQ + d0, strideQ);
     }
     #pragma unroll
     for (int c = 0; c < C; ++c) {
       unsigned e0v = (c == C - 1 && tailV != 0) ? Dv - 16 : c * 16;
-      wmma::load_matrix_sync(vb[c], vh + (unsigned long long)key0 * Dv + e0v, Dv);
+      wmma::load_matrix_sync(vb[c], vh + (unsigned long long)key0 * strideV + e0v, strideV);
     }
     #pragma unroll
     for (int r = 0; r < R; ++r) {
@@ -349,7 +355,7 @@ __device__ __forceinline__ void att_body(const __half* q, const __half* k, const
   #pragma unroll
   for (int r = 0; r < R; ++r) {
     float invLow = 1.f / att_group_sum(sumLow[r]), invHigh = 1.f / att_group_sum(sumHigh[r]);
-    __half* oh = out + ((unsigned long long)head * T + row0 + r * 16) * Dv;
+    __half* oh = outBase + (unsigned long long)(row0 + r * 16) * strideV;
     #pragma unroll
     for (int c = 0; c < C; ++c) {
       bool last = c == C - 1 && tailV != 0;
@@ -360,7 +366,7 @@ __device__ __forceinline__ void att_body(const __half* q, const __half* k, const
       __syncwarp();
       for (unsigned j = 0; j < 8; ++j) {
         unsigned cc = col0 + j;
-        if (cc >= skip) oh[row * Dv + e0v + cc] = __float2half_rn(scores[row * 16 + cc]);
+        if (cc >= skip) oh[row * strideV + e0v + cc] = __float2half_rn(scores[row * 16 + cc]);
       }
       __syncwarp();
     }
@@ -370,10 +376,10 @@ extern "C" {
 // One warp per block. Variants: query tiles per warp x largest number of 16-wide chunks (width up to 16 * chunks).
 #define ATT_KERNEL(NAME, R, C) \
   __global__ void NAME(const __half* q, const __half* k, const __half* v, __half* out, \
-                       unsigned heads, unsigned T, unsigned S, unsigned D, unsigned Dv, float scale) { \
+                       unsigned heads, unsigned T, unsigned S, unsigned D, unsigned Dv, float scale, unsigned H) { \
     __shared__ float scores[256]; \
     __shared__ __half tile[256]; \
-    att_body<R, C>(q, k, v, out, heads, T, S, D, Dv, scale, scores, tile); \
+    att_body<R, C>(q, k, v, out, heads, T, S, D, Dv, scale, H, scores, tile); \
   }
 // name: r<query tiles per warp>c<chunks>
 ATT_KERNEL(h_attention_fused_r1c3, 1, 3)
