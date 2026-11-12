@@ -21,6 +21,8 @@ class CudnnSuite extends munit.FunSuite:
       installed.resolve("cudnn64_9.dll"),complete8.resolve("cudnn64_8.dll")).map(_.toAbsolutePath.toString))
     assertEquals(Cudnn.candidates(Map("Path"->s"$frontOnly$sep$missingPart")),Seq.empty)
     assertEquals(Cudnn.candidates(Map.empty),Seq.empty)
+    assertEquals(Cudnn.candidates(Map("PROGRAMFILES"->root.resolve("pf").toString,"PATH"->complete8.toString)),
+      Seq(installed.resolve("cudnn64_9.dll"),complete8.resolve("cudnn64_8.dll")).map(_.toAbsolutePath.toString))
   }
 
   test("cuBLAS is looked for on the search path, in the cuDNN folder, in CUDA_PATH and in every Toolkit under Program Files") {
@@ -39,4 +41,7 @@ class CudnnSuite extends munit.FunSuite:
     assertEquals(Cublas.candidates(env),bare++Seq(torchLib.resolve("cublas64_12.dll"),toolkit.resolve("cublas64_12.dll"),
       newer.resolve("cublas64_12.dll"),older.resolve("cublas64_11.dll")).map(_.toAbsolutePath.toString))
     assertEquals(Cublas.candidates(Map.empty),bare)
+    // variable names in another case (a parent process may pass PROGRAMFILES)
+    assertEquals(Cublas.candidates(Map("PROGRAMFILES"->root.resolve("pf").toString,"cuda_path"->root.resolve("toolkit").toString)),
+      bare++Seq(toolkit.resolve("cublas64_12.dll"),newer.resolve("cublas64_12.dll"),older.resolve("cublas64_11.dll")).map(_.toAbsolutePath.toString))
   }

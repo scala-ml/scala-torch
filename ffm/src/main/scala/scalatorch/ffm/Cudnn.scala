@@ -109,7 +109,9 @@ private[ffm] object Cudnn:
 
   /** Complete cuDNN installations as absolute paths of the front library. A front library whose parts are missing aborts the process
     * when it is used, so a candidate counts only when its parts sit next to it; bare names from the search path are never tried. */
-  private[ffm] def candidates(env: Map[String,String]=sys.env): Seq[String] =
+  private[ffm] def candidates(variables: Map[String,String]=sys.env): Seq[String] =
+    // Windows does not distinguish the case of variable names, and a parent process may pass PROGRAMFILES or PATH in capitals.
+    val env=new scala.collection.immutable.TreeMap[String,String]()(using Ordering.by[String,String](_.toLowerCase(java.util.Locale.ROOT)))++variables
     val windows = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).startsWith("windows")
     // (front library, parts that must exist beside it)
     val layouts: Seq[(String, Seq[String])] =

@@ -74,7 +74,9 @@ private[ffm] object Cublas:
   /** Where cuBLAS is looked for: the search path first (bare names), then `SCALATORCH_CUDNN_PATH` (a PyTorch `torch/lib` holds
     * cuBLAS next to cuDNN), the CUDA Toolkit of `CUDA_PATH` / `CUDA_HOME`, and on Windows every Toolkit under Program Files. Before,
     * only the search path and `CUDA_PATH` were tried, and a PC without them had no cuBLAS at all. */
-  private[ffm] def candidates(env: Map[String,String]=sys.env): Seq[String] =
+  private[ffm] def candidates(variables: Map[String,String]=sys.env): Seq[String] =
+    // Windows does not distinguish the case of variable names, and a parent process may pass PROGRAMFILES or PATH in capitals.
+    val env=new scala.collection.immutable.TreeMap[String,String]()(using Ordering.by[String,String](_.toLowerCase(java.util.Locale.ROOT)))++variables
     val windows=System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).startsWith("windows")
     val names=if windows then Seq("cublas64_13.dll","cublas64_12.dll","cublas64_11.dll")
       else Seq("libcublas.so.13","libcublas.so.12","libcublas.so.11","libcublas.so")
@@ -107,7 +109,10 @@ private[ffm] object Cublas:
   /** True when some cuBLAS can be loaded in this process (checked once). Float16 execution needs it. */
   lazy val loadable: Boolean =
     !sys.env.get("SCALATORCH_CUDA_CUBLAS").contains("0") && candidates().exists { name =>
-      try { preloadCompanion(name,Arena.global());SymbolLookup.libraryLookup(name,Arena.global());true } catch case _: Throwable => false
+      try { preloadCompanion(name,Arena.global());SymbolLookup.libraryLookup(name,Arena.global());true }
+      catch case error: Throwable =>
+        if sys.env.get("SCALATORCH_CUDA_LIBRARY_LOG").contains("1") then System.err.println(s"[scala-torch] cuBLAS candidate $name: $error")
+        false
     }
 
   private val shared=new java.util.concurrent.ConcurrentHashMap[(Int,Thread),Cublas]()
