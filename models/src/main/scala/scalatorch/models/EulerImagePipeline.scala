@@ -94,7 +94,7 @@ object EulerImagePipeline:
     * so a feature added later is excluded until it is listed here. */
   private val batchableFields=Set("prompt","negativePrompt","width","height","seed","guidanceScale","truncatePrompt","clipSkip","sdxlSize",
     "torchCpuNoise","trainingSigmas","promptScheduleSteps","latentHookSeed","latentHookBatchSize","latentHookBatchIndex","loraStepFilter",
-    "onWarning","controlNetPaths","batchSeeds")
+    "onWarning","controlNetPaths","batchSeeds","cfgSchedule")
   private[models] def batchable(request: DiffusionImageRequest): Boolean =
     request.productElementNames.zip(request.productIterator).forall { (name,value) =>
       batchableFields(name) || (value match

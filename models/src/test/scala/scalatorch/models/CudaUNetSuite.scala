@@ -89,6 +89,24 @@ class CudaUNetSuite extends munit.FunSuite:
       assertEquals(s.allocatedBytes,0L)
     }
   }
+  test("a scheduled guidance on the batched path matches the CPU predictor; at exactly 1 it is the positive prediction alone") {
+    val cpu=loaded()
+    val positive=context(1);val negative=Tensor.fromFloats(Array.tabulate(3*32)(i => math.sin(i*.31).toFloat),Shape.from(Seq(1L,3L,32L)))
+    val sample=input(1,4,6)
+    def worst(a: Tensor[Float],b: Tensor[Float]): Double = a.toFloatArray.zip(b.toFloatArray).map((x,y) => math.abs(x.toDouble-y)).max
+    for target <- Seq(1f,3f,0.5f,7.5f) do
+      val expected=UNetExecution.Cpu.withPredictor(cpu,positive,Some(negative),() => false)(_.apply(sample,times(123f),7.5f,scheduled=Some(target)))
+      val actual=UNetExecution.Cuda().withPredictor(cpu,positive,Some(negative),() => false)(_.apply(sample,times(123f),7.5f,scheduled=Some(target)))
+      assertEquals(actual.shape,expected.shape)
+      val error=worst(actual,expected)
+      println(s"CUDA scheduled guidance target=$target maxAbsError=$error")
+      assert(error<1e-4)
+    // guidance 1 needs no negative pass: the result equals a run without a negative prompt
+    val alone=UNetExecution.Cuda().withPredictor(cpu,positive,None,() => false)(_.apply(sample,times(123f),1f))
+    val scheduled=UNetExecution.Cuda().withPredictor(cpu,positive,Some(negative),() => false)(_.apply(sample,times(123f),7.5f,scheduled=Some(1f)))
+    assert(worst(alone,scheduled)<1e-6)
+  }
+
   test("classifier-free guidance as one batch of two matches the CPU predictor") {
     val cpu=loaded()
     val positive=context(1);val negative=Tensor.fromFloats(Array.tabulate(3*32)(i => math.sin(i*.31).toFloat),Shape.from(Seq(1L,3L,32L)))
@@ -145,7 +163,10 @@ class CudaUNetSuite extends munit.FunSuite:
       // the single-image general path still serves the same step
       assert(predict(input(1,4,6),times(7.5f),7.5f,rescale=0.5f).toFloatArray.forall(_.isFinite))
     }
-    intercept[BatchedSamplingUnsupported] {
-      UNetExecution.Cuda(maxBytes=1L<<30).withPredictor(cpu,context(1),None,() => false)(_.apply(input(2,4,6),times(7.5f),1f,scheduled=Some(2f)))
-    }
+    // A CFG schedule alone does not leave the batched path (without a negative prompt it has nothing to scale).
+    val plainBatch=UNetExecution.Cuda(maxBytes=1L<<30).withPredictor(cpu,context(1),None,() => false)(_.apply(input(2,4,6),times(7.5f),1f))
+    val scheduledBatch=UNetExecution.Cuda(maxBytes=1L<<30).withPredictor(cpu,context(1),None,() => false)(
+      _.apply(input(2,4,6),times(7.5f),1f,scheduled=Some(2f)))
+    assertEquals(scheduledBatch.shape,plainBatch.shape)
+    assert(scheduledBatch.toFloatArray.zip(plainBatch.toFloatArray).forall((a,b) => a==b))
   }

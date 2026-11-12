@@ -293,14 +293,18 @@ object UNetExecution:
               def batchedPlain(): Option[Tensor[Float]] =
                 val count=if sample.shape.rank==4 then sample.shape.dims.head.toInt else 0
                 val multi=count>1 && conditional.shape.dims.head==1L && unconditional.forall(_.shape.dims.head==1L)
-                val pair=negativeContext.isDefined && guidance>1f
+                // A CFG schedule gives the guidance of this step. At exactly 1 the result is the positive prediction, so the
+                // negative pass is not needed at all (guidance limited to a part of the steps costs half on the other steps).
+                val effective=scheduled.getOrElse(guidance)
+                val positiveOnly=negativeContext.isDefined && guidance>1f && effective==1f
+                val pair=negativeContext.isDefined && guidance>1f && !positiveOnly
                 val plain=sample.shape.rank==4 && controls.isEmpty &&
                   detail.isEmpty && cads.isEmpty && refStep.isEmpty && chgState.isEmpty && multiDiffusion.isEmpty && pag.isEmpty && sagStep.isEmpty &&
                   neutralPlan.isEmpty && segUncond.isEmpty && positiveSigns.isEmpty && negativeSigns.isEmpty && conditionalOverride.isEmpty &&
                   unconditionalOverride.isEmpty && positiveAddedOverride.isEmpty && negativeAddedOverride.isEmpty && kohyaHrFix.isEmpty &&
-                  tokenDownsampling.isEmpty && guidanceHook.isEmpty && dynamicThresholding.isEmpty && scheduled.isEmpty && rescale==0f &&
+                  tokenDownsampling.isEmpty && guidanceHook.isEmpty && dynamicThresholding.isEmpty && rescale==0f &&
                   (!pair || positiveAddition.isDefined==negativeAddition.isDefined) && CudaUNet.batchedGuidance
-                val eligible=plain && (if multi then pair || negativeContext.isEmpty else count==1 && pair)
+                val eligible=plain && (if multi then pair || positiveOnly || negativeContext.isEmpty else count==1 && (pair || positiveOnly))
                 if !eligible then
                   // One context cannot serve N samples on the general path: the caller samples the images one by one instead.
                   if multi then throw new BatchedSamplingUnsupported("this step cannot run as one U-Net batch")
@@ -313,6 +317,7 @@ object UNetExecution:
                         if multi then
                           val (c,a)=repeatedConditioning(count,pair)
                           (if pair then temporary(session.cat(Seq(input,input),0)) else input,c,a)
+                        else if !pair then (input,positiveContext,positiveAddition)
                         else (temporary(session.cat(Seq(input,input),0)),
                           temporary(session.cat(Seq(negativeContext.get,positiveContext),0)),
                           positiveAddition.map(p => temporary(session.cat(Seq(negativeAddition.get,p),0))))
@@ -326,7 +331,7 @@ object UNetExecution:
                         // same operation order as the two-pass path: negative+(positive+(-negative))*guidance
                         val guided=Array.tabulate(half) { i =>
                           val n=values(i);val p=values(half+i)
-                          n+(p+(-n))*guidance
+                          n+(p+(-n))*effective
                         }
                         Some(Tensor.fromFloats(guided,Shape.from(Seq(count.toLong)++both.shape.dims.drop(1))))
                     }.get
