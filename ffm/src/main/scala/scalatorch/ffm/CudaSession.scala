@@ -1506,6 +1506,8 @@ object CudaSession:
     sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_MIN_KEYS").flatMap(_.trim.toIntOption).filter(_ >= 16).getOrElse(16)
   /** Bias folded into the Float16 matrix product of a linear layer (`SCALATORCH_CUDA_FUSED_LINEAR_BIAS=0` keeps the separate add). */
   private[ffm] val fusedLinearBias: Boolean = !sys.env.get("SCALATORCH_CUDA_FUSED_LINEAR_BIAS").contains("0")
+  /** True when cuBLAS can be loaded (search path, `SCALATORCH_CUDNN_PATH`, a CUDA Toolkit). Float16 execution needs it. */
+  def cublasLoadable: Boolean = Cublas.loadable
   /** True while device memory is known to be short (see `CudaWeightPool.tight`). */
   def memoryTight: Boolean = CudaWeightPool.tight
   /** Records that a model did not fit the device. */

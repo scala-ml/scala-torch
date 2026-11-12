@@ -22,3 +22,21 @@ class CudnnSuite extends munit.FunSuite:
     assertEquals(Cudnn.candidates(Map("Path"->s"$frontOnly$sep$missingPart")),Seq.empty)
     assertEquals(Cudnn.candidates(Map.empty),Seq.empty)
   }
+
+  test("cuBLAS is looked for on the search path, in the cuDNN folder, in CUDA_PATH and in every Toolkit under Program Files") {
+    assume(System.getProperty("os.name").toLowerCase.startsWith("windows"),"Windows library names")
+    val root=Files.createTempDirectory("cublas-candidates")
+    def dir(name: String,files: String*) =
+      val d=Files.createDirectories(root.resolve(name));files.foreach(f => Files.write(d.resolve(f),Array[Byte](0)));d
+    val torchLib=dir("torch-lib","cublas64_12.dll","cublasLt64_12.dll")
+    val toolkit=dir("toolkit/bin","cublas64_12.dll")
+    val older=dir("pf/NVIDIA GPU Computing Toolkit/CUDA/v11.8/bin","cublas64_11.dll")
+    val newer=dir("pf/NVIDIA GPU Computing Toolkit/CUDA/v12.6/bin","cublas64_12.dll")
+    dir("pf/NVIDIA GPU Computing Toolkit/CUDA/v12.0/bin")
+    val bare=Seq("cublas64_13.dll","cublas64_12.dll","cublas64_11.dll")
+    val env=Map("SCALATORCH_CUDNN_PATH"->torchLib.toString,"CUDA_PATH"->root.resolve("toolkit").toString,"ProgramFiles"->root.resolve("pf").toString)
+    // bare names first (the search path), then absolute paths: explicit folder, CUDA_PATH, newest Toolkit first
+    assertEquals(Cublas.candidates(env),bare++Seq(torchLib.resolve("cublas64_12.dll"),toolkit.resolve("cublas64_12.dll"),
+      newer.resolve("cublas64_12.dll"),older.resolve("cublas64_11.dll")).map(_.toAbsolutePath.toString))
+    assertEquals(Cublas.candidates(Map.empty),bare)
+  }

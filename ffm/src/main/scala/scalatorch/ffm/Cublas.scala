@@ -71,14 +71,44 @@ private[ffm] final class Cublas private (handle: MemorySegment,sgemmHandle: Meth
     finally alpha.set(JAVA_FLOAT,0,1f)
 
 private[ffm] object Cublas:
-  private def candidates: Seq[String] =
-    val os=System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT)
-    val names=if os.startsWith("windows") then Seq("cublas64_13.dll","cublas64_12.dll","cublas64_11.dll")
+  /** Where cuBLAS is looked for: the search path first (bare names), then `SCALATORCH_CUDNN_PATH` (a PyTorch `torch/lib` holds
+    * cuBLAS next to cuDNN), the CUDA Toolkit of `CUDA_PATH` / `CUDA_HOME`, and on Windows every Toolkit under Program Files. Before,
+    * only the search path and `CUDA_PATH` were tried, and a PC without them had no cuBLAS at all. */
+  private[ffm] def candidates(env: Map[String,String]=sys.env): Seq[String] =
+    val windows=System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).startsWith("windows")
+    val names=if windows then Seq("cublas64_13.dll","cublas64_12.dll","cublas64_11.dll")
       else Seq("libcublas.so.13","libcublas.so.12","libcublas.so.11","libcublas.so")
-    val dirs=(sys.env.get("CUDA_PATH").toSeq ++ sys.env.get("CUDA_HOME").toSeq).flatMap { root =>
-      Seq(Paths.get(root,"bin"),Paths.get(root,"bin","x64"),Paths.get(root,"lib64")) }
-    val full=for dir <- dirs; name <- names; p=dir.resolve(name) if Files.exists(p) yield p.toString
-    names ++ full
+    def path(text: String): Option[Path] = try Some(Paths.get(text.trim)) catch case _: Throwable => None
+    def children(dir: Path): Seq[Path] =
+      try
+        val stream=Files.list(dir)
+        try { val b=Seq.newBuilder[Path];stream.forEach(p => b+=p);b.result().sortBy(_.toString).reverse } finally stream.close()
+      catch case _: Throwable => Seq.empty
+    val explicit=env.get("SCALATORCH_CUDNN_PATH").toSeq.flatMap(path)
+    val toolkit=(env.get("CUDA_PATH").toSeq ++ env.get("CUDA_HOME").toSeq).flatMap(path)
+      .flatMap(r => Seq(r.resolve("bin"),r.resolve("bin").resolve("x64"),r.resolve("lib64")))
+    val installed=if !windows then Seq.empty else env.get("ProgramFiles").toSeq.flatMap(path)
+      .flatMap(r => children(r.resolve("NVIDIA GPU Computing Toolkit").resolve("CUDA"))).map(_.resolve("bin"))
+    val full=for dir <- (explicit++toolkit++installed).distinct; name <- names; p=dir.resolve(name)
+      if (try Files.isRegularFile(p) catch case _: Throwable => false) yield p.toAbsolutePath.toString
+    names ++ full.distinct
+
+  /** Loads the companion library of an absolute cuBLAS path first: cuBLAS needs cublasLt, and Windows does not search the
+    * directory of a library that was loaded by its full path. */
+  private def preloadCompanion(name: String,arena: Arena): Unit =
+    try
+      val file=Paths.get(name)
+      if file.isAbsolute then
+        val base=file.getFileName.toString
+        val companion=file.resolveSibling(base.replace("cublas64_","cublasLt64_").replace("libcublas.so","libcublasLt.so"))
+        if companion!=file && Files.isRegularFile(companion) then SymbolLookup.libraryLookup(companion.toString,arena)
+    catch case _: Throwable => ()
+
+  /** True when some cuBLAS can be loaded in this process (checked once). Float16 execution needs it. */
+  lazy val loadable: Boolean =
+    !sys.env.get("SCALATORCH_CUDA_CUBLAS").contains("0") && candidates().exists { name =>
+      try { preloadCompanion(name,Arena.global());SymbolLookup.libraryLookup(name,Arena.global());true } catch case _: Throwable => false
+    }
 
   private val shared=new java.util.concurrent.ConcurrentHashMap[(Int,Thread),Cublas]()
 
@@ -97,8 +127,9 @@ private[ffm] object Cublas:
   def open(arena: Arena,stream: MemorySegment,register: (() => Unit) => Unit): Option[Cublas] =
     if sys.env.get("SCALATORCH_CUDA_CUBLAS").contains("0") then return None
     val linker=Linker.nativeLinker()
-    candidates.iterator.map { name =>
+    candidates().iterator.map { name =>
       try
+        preloadCompanion(name,arena)
         val lookup=SymbolLookup.libraryLookup(name,arena)
         def down(symbol: String,descriptor: FunctionDescriptor): MethodHandle =
           linker.downcallHandle(lookup.find(symbol).orElseThrow(() => UnsatisfiedLinkError(symbol)),descriptor)

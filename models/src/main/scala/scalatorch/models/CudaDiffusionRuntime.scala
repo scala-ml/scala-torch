@@ -849,7 +849,15 @@ private[models] object CudaDiffusionRuntime:
   private[models] def setHalfPrecision(value: Option[Boolean]): Unit = precisionOverride=value
   /** Float16 U-Net / VAE / CLIP (weights, activations, tensor-core GEMM): the dtype of the loaded model (`load_model`), else
     * Float16 unless `SCALATORCH_CUDA_FP16=0`. CPU execution is always Float32. */
-  private[models] def fp16Default: Boolean = precisionOverride.getOrElse(environmentFp16)
+  private[models] def fp16Default: Boolean = precisionOverride.getOrElse(environmentFp16) && halfPossible
+  /** Float16 needs cuBLAS. Without it the request used to fail in the middle ("broadcast add needs one element type"); now the
+    * model runs in Float32 and says once what is missing. */
+  private lazy val halfPossible: Boolean =
+    val found=CudaSession.cublasLoadable
+    if !found then System.err.println("[scala-torch] cuBLAS (cublas64_12.dll) was not found, so Float16 is not available: running in " +
+      "Float32, which is slower and needs more memory. Install the CUDA Toolkit, or point SCALATORCH_CUDNN_PATH (Settings > scala-torch " +
+      "cuDNN folder) at a folder that holds cuBLAS, for example a PyTorch torch\\lib folder.")
+    found
   private[models] def offloadedWeightLimit(sessionMaxBytes: Long): Long =
     require(sessionMaxBytes>=0,"negative CUDA session budget")
     math.min(sessionMaxBytes/4,MaximumOffloadedWeightBytes)
