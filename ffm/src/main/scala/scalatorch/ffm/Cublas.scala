@@ -51,9 +51,9 @@ private[ffm] final class Cublas private (handle: MemorySegment,sgemmHandle: Meth
     if status!=0 then throw IllegalStateException(s"cublasGemmEx (half) failed with status $status")
 
   /** Row-major C[m,n] = A[m,k] * W[n,k]^T, all Float16, Float32 accumulation. */
-  def gemmHalfRowMajorBT(m: Int,n: Int,k: Int,a: Long,w: Long,c: Long): Unit =
+  def gemmHalfRowMajorBT(m: Int,n: Int,k: Int,a: Long,w: Long,c: Long,accumulate: Boolean=false): Unit =
     val status=gemmExHandle.invokeWithArguments(handle,Int.box(1),Int.box(0),Int.box(n),Int.box(m),Int.box(k),alpha,
-      MemorySegment.ofAddress(w),Int.box(2),Int.box(k),MemorySegment.ofAddress(a),Int.box(2),Int.box(k),beta,
+      MemorySegment.ofAddress(w),Int.box(2),Int.box(k),MemorySegment.ofAddress(a),Int.box(2),Int.box(k),if accumulate then alpha else beta,
       MemorySegment.ofAddress(c),Int.box(2),Int.box(n),Int.box(68),Int.box(99)).asInstanceOf[Integer].intValue()
     if status!=0 then throw IllegalStateException(s"cublasGemmEx (half, transposed) failed with status $status")
 

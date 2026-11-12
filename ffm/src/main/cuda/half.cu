@@ -44,6 +44,11 @@ __global__ void h_fill(__half* out, unsigned n, float value) {
   GRID_INDEX(i, n) out[i] = __float2half_rn(value);
 }
 
+// out [rows, width] = bias [width] in every row; the matrix product is then accumulated on top (see linearWithBias).
+__global__ void h_fill_rows(const __half* bias, __half* out, unsigned n, unsigned width) {
+  GRID_INDEX(i, n) out[i] = bias[i % width];
+}
+
 __global__ void h_add(const __half* a, const __half* b, __half* out, unsigned n) {
   GRID_INDEX(i, n) st(out, i, ld(a, i) + ld(b, i));
 }

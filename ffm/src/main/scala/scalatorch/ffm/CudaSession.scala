@@ -150,7 +150,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),loaded) }
     loaded
   private lazy val halfKernels=Seq("h_f32_to_f16","h_f16_to_f32","h_fill","h_add","h_add5","h_scale","h_silu","h_geglu","h_transpose5",
-      "h_concat","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_im2col","h_im2col_batch","h_attention_fused","h_softmax","h_gelu_erf","h_quick_gelu","h_softmax_causal").map { name =>
+      "h_concat","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_im2col","h_im2col_batch","h_attention_fused","h_fill_rows","h_softmax","h_gelu_erf","h_quick_gelu","h_softmax_causal").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),halfModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -911,6 +911,30 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
 
+  /** Float16 `x [m,k] * w [n,k]^T + bias [n]` as one pass over the output: the rows are filled with the bias and cuBLAS accumulates
+    * the product on top (Float32 accumulation, one rounding). A separate broadcast add read the product and wrote it again.
+    * None when this does not apply (not Float16, no cuBLAS, other shapes); the caller then multiplies and adds. */
+  def linearWithBias(x: CudaTensor,w: CudaTensor,bias: CudaTensor): Option[CudaTensor] =
+    validate(x);validate(w);validate(bias)
+    if !(CudaSession.fusedLinearBias && cublas.isDefined && x.half && w.half && bias.half && x.shape.rank==2 && w.shape.rank==2 &&
+        x.shape.dims(1)==w.shape.dims(1) && bias.shape.rank==1 && bias.shape.dims(0)==w.shape.dims(0)) then return None
+    val m=x.shape.dims(0).toInt;val k=x.shape.dims(1).toInt;val n=w.shape.dims(0).toInt
+    if m<=0 || n<=0 || k<=0 || m.toLong*n>Int.MaxValue then return None
+    val result=allocate(Shape.from(Seq(m.toLong,n.toLong)),half=true)
+    try
+      launch(m.toLong*n,halfKernels("h_fill_rows"),label="h_fill_rows",threadsPerBlock=256) { arena =>
+        Seq(bias.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++ Seq(m*n,n).map(v => arena.allocateFrom(JAVA_INT,v))
+      }
+      val started=if profileEnabled then System.nanoTime() else 0L
+      cublas.get.gemmHalfRowMajorBT(m,n,k,x.address,w.address,result.address,accumulate=true)
+      if profileEnabled then
+        driver.synchronize(stream)
+        record(s"half_gemm_bt[$m,$n,$k]",started)
+      Some(result)
+    catch case error: Throwable =>
+      try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
   /** Opaque Float16 copy of a Float32 tensor (2 bytes per element). Only matmulTransposedBHalf may read it. */
   def toHalf(value: CudaTensor): CudaTensor =
     validate(value)
@@ -1445,12 +1469,15 @@ object CudaSession:
   /** Float16 convolution of a batch as one GEMM (`SCALATORCH_CUDA_MERGED_CONV=0` keeps one GEMM per sample). */
   private[ffm] val mergedConvolution: Boolean = !sys.env.get("SCALATORCH_CUDA_MERGED_CONV").contains("0")
   /** Float16 attention through the fused tensor-core kernel, only with `SCALATORCH_CUDA_FUSED_ATTENTION_HALF=1`. It is correct but
-    * slower than the cuBLAS path (RTX 3090, [20,4096,64]: 17.0 ms against 4.5 ms; [16,4096,40]: 6.2 against 3.5): 16x16 tiles loaded
-    * from device memory cannot keep the tensor cores busy. Kept for measurement. */
+    * slower than the cuBLAS path (RTX 3090, [20,4096,64]: 17.0 ms against 3.9 ms; [16,4096,40]: 6.2 against 3.1). A second version
+    * that shared the key and value tiles between eight warps of a block was slower still (21.3 and 10.4 ms): the limit is the
+    * per-tile trip through shared memory for the exponentials, not memory traffic. Kept for measurement. */
   private[ffm] val fusedHalfAttention: Boolean = sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_HALF").contains("1")
   /** Fewest keys for the fused kernel (`SCALATORCH_CUDA_FUSED_ATTENTION_MIN_KEYS`). */
   private[ffm] val fusedHalfAttentionMinKeys: Int =
     sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_MIN_KEYS").flatMap(_.trim.toIntOption).filter(_ >= 16).getOrElse(16)
+  /** Bias folded into the Float16 matrix product of a linear layer (`SCALATORCH_CUDA_FUSED_LINEAR_BIAS=0` keeps the separate add). */
+  private[ffm] val fusedLinearBias: Boolean = !sys.env.get("SCALATORCH_CUDA_FUSED_LINEAR_BIAS").contains("0")
   /** True while device memory is known to be short (see `CudaWeightPool.tight`). */
   def memoryTight: Boolean = CudaWeightPool.tight
   /** Records that a model did not fit the device. */

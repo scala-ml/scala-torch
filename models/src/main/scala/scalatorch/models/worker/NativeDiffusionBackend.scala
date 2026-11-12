@@ -2167,10 +2167,24 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         // Batched sampling: the `batch_size` images of one group share every U-Net pass (one batch of 2N with guidance) instead of
         // being sampled one after another. Only for the plain requests parallel count may split, with nothing per image but the seed.
         val batchedGroups=batchSize>1 && CudaUNet.batchedSampling && generationPipeline.unetExecution.isInstanceOf[UNetExecution.Cuda] &&
-          NativeParallelCount.plainTxt2img(request,keywordInert) && !img2img && source.isEmpty && hires.isEmpty && hiresFix.isEmpty &&
+          // DeepCache works on the whole U-Net batch (its state is per thread, so it stays off the parallel-count path only).
+          NativeParallelCount.plainTxt2img(request,keywordInert,Set("deepcache")) && !img2img && source.isEmpty && hires.isEmpty && hiresFix.isEmpty &&
           keywordPlan.forall(_.prompts.forall(_==imageRequest.prompt)) && requestedLoras.isEmpty && manualLoras.isEmpty && controlNet.isEmpty &&
-          intermediateSession.isEmpty && variationStrength==0 && freeU.isEmpty && deepCache.isEmpty && temperatureGuard.isEmpty &&
+          intermediateSession.isEmpty && variationStrength==0 && freeU.isEmpty && temperatureGuard.isEmpty &&
           hardware.isEmpty && !altActive && sonarHook.isEmpty && adetailerUnits.isEmpty && EulerImagePipeline.batchable(imageRequest)
+        if batchSize>1 && !batchedGroups && sys.env.get("SCALATORCH_BATCHED_SAMPLING_LOG").contains("1") then
+          System.err.println("[scala-torch] batched sampling not used: "+Seq(
+            "switch"->CudaUNet.batchedSampling,"cuda"->generationPipeline.unetExecution.isInstanceOf[UNetExecution.Cuda],
+            "plain"->NativeParallelCount.plainTxt2img(request,keywordInert,Set("deepcache")),"txt2img"->(!img2img && source.isEmpty),
+            "noHires"->(hires.isEmpty && hiresFix.isEmpty),"samePrompt"->keywordPlan.forall(_.prompts.forall(_==imageRequest.prompt)),
+            "noLora"->(requestedLoras.isEmpty && manualLoras.isEmpty),"noControlNet"->controlNet.isEmpty,
+            "noRecorder"->intermediateSession.isEmpty,"noVariation"->(variationStrength==0),"noFreeU"->freeU.isEmpty,
+            "noGuard"->temperatureGuard.isEmpty,"noHardware"->hardware.isEmpty,"noAlt"->(!altActive),"noSonar"->sonarHook.isEmpty,
+            "noAdetailer"->adetailerUnits.isEmpty,"pipeline"->EulerImagePipeline.batchable(imageRequest)).filterNot(_._2).map(_._1).mkString(", "))
+          System.err.println("[scala-torch] outer keys: "+request.params.map((k,v) => k+"="+v.toString.take(60)).mkString(" ; ")+" extra="+g.get("extra").map(_.toString.take(300)))
+          System.err.println("[scala-torch] request keys: "+g.keySet.toVector.sorted.mkString(",")+" | hooks: "+(g.get("hooks") match
+            case Some(Obj(h)) => h.map((k,v) => k+"="+v.toString.take(160)).mkString(" ; ")
+            case other => other.toString))
         val batchedLatents=scala.collection.mutable.HashMap.empty[Int,scalatorch.Tensor[Float]]
         try
           val images=Vector.tabulate(iterations) { index =>

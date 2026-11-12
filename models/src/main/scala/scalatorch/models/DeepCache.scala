@@ -24,6 +24,12 @@ final class DeepCacheState(val config: DeepCacheConfig) extends AutoCloseable:
 
   /** Registers one U-Net call; returns (slot, reuse). */
   def beginCall(timestep: Float,inputDims: Seq[Long]): (Int,Boolean) =
+    // A timestep that rises means a new sampling (the next image of a batch, a second pass): its tensors belong to another
+    // session, so the recorded features must not be used ("tensor belongs to another CUDA session" for every image after the first).
+    if !lastTimestep.isNaN && timestep>lastTimestep then
+      features.values.foreach(v => if v._2!=null then try v._2.close() catch case _: Throwable => ())
+      features.clear()
+      step= -1
     if timestep!=lastTimestep then { step+=1;slot=0;lastTimestep=timestep } else slot+=1
     val full=step<config.fullFirst || (step-config.fullFirst)%config.interval==0 ||
       !features.get(slot).exists(_._1==inputDims)

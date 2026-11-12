@@ -128,6 +128,27 @@ class CudaHalfSuite extends FunSuite:
       compare(Seq(q,k,v),2e-2)((s,x) => s.scaledDotProductAttention(x(0),x(1),x(2)))
   }
 
+  test("linear layer with the bias folded into the product equals product plus broadcast add") {
+    gpu()
+    for (m,k,n) <- Seq((37,129,70),(1,16,5),(300,64,64)) do
+      CudaSession.withDevice(maxBytes=1L<<30) { s =>
+        assume(s.hasCublas,"cuBLAS unavailable")
+        val x=s.uploadHalf(tensor(data(m*k,61),m.toLong,k.toLong));val w=s.uploadHalf(tensor(data(n*k,62,0.2),n.toLong,k.toLong))
+        val bias=s.uploadHalf(tensor(data(n,63,3.0),n.toLong))
+        val product=s.matmulTransposedB(x,w);val expected=s.addBroadcast(product,bias)
+        val fused=s.linearWithBias(x,w,bias).getOrElse(fail("the fused path did not apply"))
+        assertEquals(fused.shape,expected.shape)
+        val a=s.castToFloat(expected).toCpu.toFloatArray;val b=s.castToFloat(fused).toCpu.toFloatArray
+        var worst=0.0
+        for i <- a.indices do worst=math.max(worst,math.abs(a(i)-b(i))/(1.0+math.abs(a(i))))
+        assert(worst<4e-3,s"max relative error $worst")
+        // Float32 inputs are not handled here
+        val full=s.upload(tensor(data(m*k,61),m.toLong,k.toLong))
+        assertEquals(s.linearWithBias(full,w,bias),None)
+        Seq(x,w,bias,product,expected,fused,full).foreach(_.close())
+      }
+  }
+
   test("GELU, QuickGELU and causal attention") {
     gpu()
     compare(Seq(tensor(data(5*33,26,2.0),5,33)),3e-3)((s,v) => s.geluErf(v(0)))

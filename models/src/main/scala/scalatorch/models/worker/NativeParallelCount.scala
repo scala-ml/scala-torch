@@ -47,24 +47,31 @@ private[worker] object NativeParallelCount:
     case _ => true
 
   /** No LoRA, no prompt tag, no hook that does anything, no parameter this class does not know. */
-  private def plainParams(g: Map[String,NativeJson],keywordInert: (Option[NativeJson],String,Int) => Boolean): Boolean=
+  private def plainParams(g: Map[String,NativeJson],keywordInert: (Option[NativeJson],String,Int) => Boolean,
+      allowedHooks: Set[String]=Set.empty): Boolean=
     val n=num(g,"n_iter").map(_.toInt).getOrElse(1)
     val b=num(g,"batch_size").map(_.toInt).getOrElse(1)
     val prompts=text(g,"prompt")+" "+text(g,"negative_prompt")
     val activeHooks=g.get("hooks") match
       case Some(Obj(h)) => h.filter((_,v) => hookEnabled(v)).keySet
       case _ => Set.empty[String]
+    // The keyword check refuses requests with other hooks: it sees the hooks without the allowed ones.
+    val keywordHooks=g.get("hooks").map {
+      case Obj(h) => Obj(h--allowedHooks)
+      case other => other
+    }
     // The model keyword hook is always sent; it only matters when it changes a prompt or the keyword state.
-    val hooksPlain=(activeHooks-"model_keyword").isEmpty && (!activeHooks.contains("model_keyword") || keywordInert(g.get("hooks"),text(g,"prompt"),n*b))
+    val hooksPlain=(activeHooks-"model_keyword"--allowedHooks).isEmpty && (!activeHooks.contains("model_keyword") || keywordInert(keywordHooks,text(g,"prompt"),n*b))
     g.forall((k,v) => knownParams(k) || emptyish(v)) && g.get("loras").forall(emptyish) && hooksPlain &&
       !prompts.contains("<lora:") && !prompts.contains("<lyco:") && !prompts.contains("<hypernet:") && !prompts.contains("<")
 
   /** The plain txt2img requests that parallel count may split are also the ones whose batch may be sampled as one U-Net batch
     * (`batch_size` images per step); the backend adds its own conditions on top. */
-  def plainTxt2img(request: NativeRequest,keywordInert: (Option[NativeJson],String,Int) => Boolean): Boolean=
+  def plainTxt2img(request: NativeRequest,keywordInert: (Option[NativeJson],String,Int) => Boolean,
+      allowedHooks: Set[String]=Set.empty): Boolean=
     request.kind=="txt2img" && !request.params.exists((k,v) => !knownOuter(k) && !catalogs(k) && !emptyish(v)) &&
       (request.params.get("params") match
-        case Some(Obj(g)) => plainParams(g,keywordInert)
+        case Some(Obj(g)) => plainParams(g,keywordInert,allowedHooks)
         case _ => false)
 
   private def plan(request: NativeRequest,usesCuda: Boolean,keywordInert: (Option[NativeJson],String,Int) => Boolean): Option[(Int,Int,Map[String,NativeJson])]=

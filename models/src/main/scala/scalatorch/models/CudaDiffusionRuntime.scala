@@ -171,16 +171,28 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         weightShape(l.weight).rank==2 && weights.contains(l.weight) && adapters.forall((a,_)=>weights.contains(a.a) && weights.contains(a.b)) then
       scope { use =>
         val merged=mergedWeight(l,adapters)
-        val out=use(session.matmulTransposedB(x,merged))
-        l.bias.fold(out) { p =>
+        val fused=l.bias.flatMap(p => session.linearWithBias(x,merged,weight(p,use)))
+        if fused.nonEmpty then use(fused.get)
+        else
+         val out=use(session.matmulTransposedB(x,merged))
+         l.bias.fold(out) { p =>
           val withBias=use(session.addBroadcast(out,weight(p,use)))
           out.close()
           withBias
-        }
+         }
       }
     else linearPlain(x,l)
 
   private def linearPlain(x: CudaTensor,l: Linear): CudaTensor = scope { use =>
+    // no adapter: product and bias in one pass over the output
+    val direct=
+      if l.lora.isEmpty && l.bias.nonEmpty && session.hasCublas && weightShape(l.weight).rank==2 && session.shape(x).rank==2 &&
+          LinearAdapterScope.forWeight(l.weight).isEmpty then session.linearWithBias(x,weight(l.weight,use),weight(l.bias.get,use))
+      else None
+    if direct.nonEmpty then use(direct.get) else linearRest(x,l,use)
+  }
+
+  private def linearRest(x: CudaTensor,l: Linear,use: Using.Manager): CudaTensor =
     val base=use(project(x,l.weight))
     val attached=l.lora.fold(base) { a =>
       val first=use(project(x,a.a));val second=use(project(first,a.b))
@@ -205,7 +217,6 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       adapted.close()
       out
     }
-  }
 
   def resnet(input: CudaTensor,model: DiffusionResnet2d,timeEmbedding: Option[CudaTensor]): CudaTensor =
     check()
