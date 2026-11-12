@@ -118,11 +118,15 @@ class CudaHalfSuite extends FunSuite:
 
   test("fused attention: widths 16 to 160 (also not multiples of 16), different key and query counts, value width, large scores") {
     gpu()
-    // The fused kernel is opt-in; without the switch this compares the cuBLAS path on the same shapes.
-    println(s"fused attention kernel under test: ${sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_HALF").contains("1")}")
+    // With SCALATORCH_CUDA_FUSED_ATTENTION_HALF=0 this compares the cuBLAS path on the same shapes.
+    println(s"fused attention kernel under test: ${!sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_HALF").contains("0")}")
     // (heads, queries, keys, width, value width, score scale)
     for (h,t,kt,d,dv,scale) <- Seq((3,16,16,16,16,1.0),(2,32,48,40,40,1.0),(5,64,64,64,64,1.0),(2,48,160,80,80,1.0),
-        (1,16,32,160,160,1.0),(3,32,64,24,56,1.0),(2,64,256,40,40,4.0),(2,16,1024,64,64,2.0)) do
+        (1,16,32,160,160,1.0),(3,32,64,24,56,1.0),(2,64,256,40,40,4.0),(2,16,1024,64,64,2.0),
+        // every kernel variant: 1 / 2 / 4 query tiles per warp x 3 / 4 / 5 chunks, with and without a width remainder
+        // (widths 33 and 50 are not multiples of 8: they must take the cuBLAS path, a fragment load there would be misaligned)
+        (3,16,64,48,48,1.0),(3,32,64,33,33,1.0),(2,64,128,48,48,3.0),(3,16,48,50,50,1.0),(2,32,96,64,64,1.0),(2,128,64,56,56,1.0),
+        (3,16,32,80,80,1.0),(2,32,64,72,72,2.0),(2,64,64,80,80,1.0),(7,96,4096,40,40,1.0)) do
       val q=tensor(data(h*t*d,51,scale),1,h.toLong,t.toLong,d.toLong);val k=tensor(data(h*kt*d,52,scale),1,h.toLong,kt.toLong,d.toLong)
       val v=tensor(data(h*kt*dv,53),1,h.toLong,kt.toLong,dv.toLong)
       compare(Seq(q,k,v),2e-2)((s,x) => s.scaledDotProductAttention(x(0),x(1),x(2)))
@@ -147,6 +151,18 @@ class CudaHalfSuite extends FunSuite:
         assertEquals(s.linearWithBias(full,w,bias),None)
         Seq(x,w,bias,product,expected,fused,full).foreach(_.close())
       }
+  }
+
+  test("tensor-core fragment layout of this device") {
+    gpu()
+    CudaSession.withDevice(maxBytes=1L<<28) { s =>
+      val layout=s.wmmaLayout()
+      for (kind,name) <- Seq(0->"accumulator",1->"matrix_a",2->"matrix_b col",3->"matrix_b row") do
+        val part=layout.slice(kind*256,kind*256+256)
+        assertEquals(part.sorted.toSeq,(0 until 256).toSeq,s"$name does not cover the matrix")
+        println(s"[wmma] $name: "+(0 until 6).map(lane => s"lane $lane: "+part.slice(lane*8,lane*8+8).map(v => s"(${v/16},${v%16})").mkString("")).mkString(" | "))
+      println("[wmma] matrix_a equals accumulator: "+(layout.slice(0,256).toSeq==layout.slice(256,512).toSeq))
+    }
   }
 
   test("GELU, QuickGELU and causal attention") {

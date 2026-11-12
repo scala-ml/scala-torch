@@ -236,105 +236,176 @@ __global__ void h_quick_gelu(const __half* a, __half* out, unsigned n) {
   GRID_INDEX(i, n) { float x = ld(a, i); st(out, i, x / (1.f + __expf(-1.702f * x))); }
 }
 
-// Attention without a score matrix in device memory (tensor cores, one warp per head and 16 query rows).
-// q [heads, T, D], k [heads, S, D], v [heads, S, Dv], out [heads, T, Dv]; T and S are multiples of 16, 16 <= D, Dv <= 160.
-// The keys are visited twice in tiles of 16: first for the row maximum, then the scores are computed again, turned into
-// exponentials relative to that maximum and multiplied with the values; the division by the row sum comes last. Scores live in shared memory only; the keys and
-// values of one head fit the L2 cache, so nothing of the size T x S is ever written to or read from device memory.
-// A width that is not a multiple of 16 takes its last chunk from the last 16 columns; the columns that an earlier chunk
-// already covered are zeroed on the query side (scores) or not written (output).
-#define ATT_MAX_CHUNKS 10
-__global__ void h_attention_fused(const __half* q, const __half* k, const __half* v, __half* out,
-                                  unsigned heads, unsigned T, unsigned S, unsigned D, unsigned Dv, float scale) {
+// Attention without a score matrix in device memory (tensor cores, one pass over the keys, everything in registers).
+// q [heads, T, D], k [heads, S, D], v [heads, S, Dv], out [heads, T, Dv]; S is a multiple of 16, T of 16 * R, 16 <= D, Dv.
+// A warp takes R tiles of 16 query rows of one head and visits the keys once, in tiles of 16. For every key tile the key and
+// value fragments are loaded once and used for all R query tiles: scores = Q K^T (tensor cores), then an online softmax (the
+// running row maximum is raised, the sums and results gathered so far are scaled down by exp(old - new), the scores become
+// exponentials relative to the maximum) and the product with the values (tensor cores). The division by the row sum comes last.
+// Reading the keys and values is what limits this kernel, so R query tiles per read cut its cost by R.
+//
+// This relies on where the 16x16 fragments keep their elements (measured by h_wmma_layout and checked by the caller before this
+// kernel is used): accumulator and matrix_a use the same positions; lane L holds, with g = L / 4 and t = L % 4, row g in slots
+// 0, 1, 4, 5 and row g + 8 in slots 2, 3, 6, 7 (columns 2t, 2t+1, 2t+8, 2t+9).
+// A width that is not a multiple of 16 takes its last chunk from the last 16 columns; the columns that an earlier chunk already
+// covered are zeroed on the query side (scores) or not written (output).
+} // extern "C": the template below needs C++ linkage
+__device__ __forceinline__ float att_group_max(float v) {
+  v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, 1));
+  return fmaxf(v, __shfl_xor_sync(0xffffffffu, v, 2));
+}
+__device__ __forceinline__ float att_group_sum(float v) {
+  v += __shfl_xor_sync(0xffffffffu, v, 1);
+  return v + __shfl_xor_sync(0xffffffffu, v, 2);
+}
+template <int R, int C>
+__device__ __forceinline__ void att_body(const __half* q, const __half* k, const __half* v, __half* out,
+                                         unsigned heads, unsigned T, unsigned S, unsigned D, unsigned Dv, float scale,
+                                         float* scores, __half* tile) {
   using namespace nvcuda;
-  __shared__ float scores[256];
-  __shared__ __half tile[256];
-  unsigned tilesPerHead = T / 16;
-  unsigned head = blockIdx.x / tilesPerHead, row0 = (blockIdx.x % tilesPerHead) * 16;
+  unsigned groupsPerHead = T / (16 * R);
+  unsigned head = blockIdx.x / groupsPerHead, row0 = (blockIdx.x % groupsPerHead) * 16 * R;
   if (head >= heads) return;
-  unsigned lane = threadIdx.x, row = lane & 15, col0 = (lane >> 4) * 8;
-  const __half* qh = q + ((unsigned long long)head * T + row0) * D;
+  unsigned lane = threadIdx.x & 31, row = lane & 15, col0 = (lane >> 4) * 8;
   const __half* kh = k + (unsigned long long)head * S * D;
   const __half* vh = v + (unsigned long long)head * S * Dv;
-  unsigned chunks = (D + 15) / 16, tail = D % 16;
-  unsigned chunksV = (Dv + 15) / 16, tailV = Dv % 16;
+  // D and Dv both have exactly C chunks of 16 (the caller picks the kernel). Every loop over chunks and query tiles has a
+  // constant bound and is unrolled, so the fragments stay in registers; with run-time bounds they were kept in local memory
+  // and every variant took the same 6.5 ms whatever it did.
+  unsigned tail = D % 16, tailV = Dv % 16;
 
-  wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> qa[ATT_MAX_CHUNKS];
-  for (unsigned c = 0; c < chunks; ++c) {
-    if (c == chunks - 1 && tail != 0) {
-      // last 16 columns, with the columns of the previous chunk set to zero
+  wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> qa[R][C];
+  #pragma unroll
+  for (int r = 0; r < R; ++r) {
+    const __half* qh = q + ((unsigned long long)head * T + row0 + r * 16) * D;
+    #pragma unroll
+    for (int c = 0; c < C; ++c) {
+      if (c == C - 1 && tail != 0) {
+        for (unsigned j = 0; j < 8; ++j) {
+          unsigned cc = col0 + j;
+          tile[row * 16 + cc] = cc < 16 - tail ? __float2half_rn(0.f) : qh[row * D + (D - 16) + cc];
+        }
+        __syncwarp();
+        wmma::load_matrix_sync(qa[r][c], tile, 16);
+        __syncwarp();
+      } else wmma::load_matrix_sync(qa[r][c], qh + c * 16, D);
+    }
+  }
+
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> kb[C];
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> vb[C];
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
+  wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> pa;
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> result[R][C];
+  // "low" = the row of slots 0, 1, 4, 5; "high" = the row of slots 2, 3, 6, 7
+  float maxLow[R], maxHigh[R], sumLow[R], sumHigh[R];
+  #pragma unroll
+  for (int r = 0; r < R; ++r) {
+    #pragma unroll
+    for (int c = 0; c < C; ++c) wmma::fill_fragment(result[r][c], 0.f);
+    maxLow[r] = -3.402823466e+38f; maxHigh[r] = -3.402823466e+38f; sumLow[r] = 0.f; sumHigh[r] = 0.f;
+  }
+
+  for (unsigned key0 = 0; key0 < S; key0 += 16) {
+    #pragma unroll
+    for (int c = 0; c < C; ++c) {
+      unsigned d0 = (c == C - 1 && tail != 0) ? D - 16 : c * 16;
+      wmma::load_matrix_sync(kb[c], kh + (unsigned long long)key0 * D + d0, D);
+    }
+    #pragma unroll
+    for (int c = 0; c < C; ++c) {
+      unsigned e0v = (c == C - 1 && tailV != 0) ? Dv - 16 : c * 16;
+      wmma::load_matrix_sync(vb[c], vh + (unsigned long long)key0 * Dv + e0v, Dv);
+    }
+    #pragma unroll
+    for (int r = 0; r < R; ++r) {
+      wmma::fill_fragment(acc, 0.f);
+      #pragma unroll
+      for (int c = 0; c < C; ++c) wmma::mma_sync(acc, qa[r][c], kb[c], acc);
+      float s0 = acc.x[0] * scale, s1 = acc.x[1] * scale, s2 = acc.x[2] * scale, s3 = acc.x[3] * scale;
+      float s4 = acc.x[4] * scale, s5 = acc.x[5] * scale, s6 = acc.x[6] * scale, s7 = acc.x[7] * scale;
+      float newLow = fmaxf(maxLow[r], att_group_max(fmaxf(fmaxf(s0, s1), fmaxf(s4, s5))));
+      float newHigh = fmaxf(maxHigh[r], att_group_max(fmaxf(fmaxf(s2, s3), fmaxf(s6, s7))));
+      float downLow = __expf(maxLow[r] - newLow), downHigh = __expf(maxHigh[r] - newHigh);
+      maxLow[r] = newLow; maxHigh[r] = newHigh;
+      sumLow[r] *= downLow; sumHigh[r] *= downHigh;
+      #pragma unroll
+      for (int c = 0; c < C; ++c) {
+        result[r][c].x[0] *= downLow; result[r][c].x[1] *= downLow; result[r][c].x[4] *= downLow; result[r][c].x[5] *= downLow;
+        result[r][c].x[2] *= downHigh; result[r][c].x[3] *= downHigh; result[r][c].x[6] *= downHigh; result[r][c].x[7] *= downHigh;
+      }
+      __half e0 = __float2half_rn(__expf(s0 - newLow)), e1 = __float2half_rn(__expf(s1 - newLow));
+      __half e4 = __float2half_rn(__expf(s4 - newLow)), e5 = __float2half_rn(__expf(s5 - newLow));
+      __half e2 = __float2half_rn(__expf(s2 - newHigh)), e3 = __float2half_rn(__expf(s3 - newHigh));
+      __half e6 = __float2half_rn(__expf(s6 - newHigh)), e7 = __float2half_rn(__expf(s7 - newHigh));
+      pa.x[0] = e0; pa.x[1] = e1; pa.x[2] = e2; pa.x[3] = e3; pa.x[4] = e4; pa.x[5] = e5; pa.x[6] = e6; pa.x[7] = e7;
+      sumLow[r] += __half2float(e0) + __half2float(e1) + __half2float(e4) + __half2float(e5);
+      sumHigh[r] += __half2float(e2) + __half2float(e3) + __half2float(e6) + __half2float(e7);
+      #pragma unroll
+      for (int c = 0; c < C; ++c) wmma::mma_sync(result[r][c], pa, vb[c], result[r][c]);
+    }
+  }
+
+  #pragma unroll
+  for (int r = 0; r < R; ++r) {
+    float invLow = 1.f / att_group_sum(sumLow[r]), invHigh = 1.f / att_group_sum(sumHigh[r]);
+    __half* oh = out + ((unsigned long long)head * T + row0 + r * 16) * Dv;
+    #pragma unroll
+    for (int c = 0; c < C; ++c) {
+      bool last = c == C - 1 && tailV != 0;
+      unsigned e0v = last ? Dv - 16 : c * 16, skip = last ? 16 - tailV : 0;
+      result[r][c].x[0] *= invLow; result[r][c].x[1] *= invLow; result[r][c].x[4] *= invLow; result[r][c].x[5] *= invLow;
+      result[r][c].x[2] *= invHigh; result[r][c].x[3] *= invHigh; result[r][c].x[6] *= invHigh; result[r][c].x[7] *= invHigh;
+      wmma::store_matrix_sync(scores, result[r][c], 16, wmma::mem_row_major);
+      __syncwarp();
       for (unsigned j = 0; j < 8; ++j) {
         unsigned cc = col0 + j;
-        tile[row * 16 + cc] = cc < 16 - tail ? __float2half_rn(0.f) : qh[row * D + (D - 16) + cc];
+        if (cc >= skip) oh[row * Dv + e0v + cc] = __float2half_rn(scores[row * 16 + cc]);
       }
       __syncwarp();
-      wmma::load_matrix_sync(qa[c], tile, 16);
-      __syncwarp();
-    } else wmma::load_matrix_sync(qa[c], qh + c * 16, D);
+    }
   }
-
-  wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> kb;
-  wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
-
-  // pass 1: running maximum and sum of exponentials for this lane's half of its row
-  float m = -3.402823466e+38f;
-  for (unsigned key0 = 0; key0 < S; key0 += 16) {
-    wmma::fill_fragment(acc, 0.f);
-    for (unsigned c = 0; c < chunks; ++c) {
-      unsigned d0 = (c == chunks - 1 && tail != 0) ? D - 16 : c * 16;
-      wmma::load_matrix_sync(kb, kh + (unsigned long long)key0 * D + d0, D);
-      wmma::mma_sync(acc, qa[c], kb, acc);
-    }
-    wmma::store_matrix_sync(scores, acc, 16, wmma::mem_row_major);
-    __syncwarp();
-    for (unsigned j = 0; j < 8; ++j) m = fmaxf(m, scores[row * 16 + col0 + j]);
-    __syncwarp();
+}
+extern "C" {
+// One warp per block. Variants: query tiles per warp x largest number of 16-wide chunks (width up to 16 * chunks).
+#define ATT_KERNEL(NAME, R, C) \
+  __global__ void NAME(const __half* q, const __half* k, const __half* v, __half* out, \
+                       unsigned heads, unsigned T, unsigned S, unsigned D, unsigned Dv, float scale) { \
+    __shared__ float scores[256]; \
+    __shared__ __half tile[256]; \
+    att_body<R, C>(q, k, v, out, heads, T, S, D, Dv, scale, scores, tile); \
   }
-  float rowMax = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 16)) * scale;
-  float sum = 0.f;
+// name: r<query tiles per warp>c<chunks>
+ATT_KERNEL(h_attention_fused_r1c3, 1, 3)
+ATT_KERNEL(h_attention_fused_r2c3, 2, 3)
+ATT_KERNEL(h_attention_fused_r4c3, 4, 3)
+ATT_KERNEL(h_attention_fused_r1c4, 1, 4)
+ATT_KERNEL(h_attention_fused_r2c4, 2, 4)
+ATT_KERNEL(h_attention_fused_r4c4, 4, 4)
+ATT_KERNEL(h_attention_fused_r1c5, 1, 5)
+ATT_KERNEL(h_attention_fused_r2c5, 2, 5)
 
-  // pass 2: probabilities times values
-  wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> pa;
-  wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> vb;
-  wmma::fragment<wmma::accumulator, 16, 16, 16, float> result[ATT_MAX_CHUNKS];
-  for (unsigned c = 0; c < chunksV; ++c) wmma::fill_fragment(result[c], 0.f);
-  for (unsigned key0 = 0; key0 < S; key0 += 16) {
-    wmma::fill_fragment(acc, 0.f);
-    for (unsigned c = 0; c < chunks; ++c) {
-      unsigned d0 = (c == chunks - 1 && tail != 0) ? D - 16 : c * 16;
-      wmma::load_matrix_sync(kb, kh + (unsigned long long)key0 * D + d0, D);
-      wmma::mma_sync(acc, qa[c], kb, acc);
-    }
-    wmma::store_matrix_sync(scores, acc, 16, wmma::mem_row_major);
-    __syncwarp();
-    for (unsigned j = 0; j < 8; ++j) {
-      unsigned at = row * 16 + col0 + j;
-      __half e = __float2half_rn(__expf(scores[at] * scale - rowMax));
-      tile[at] = e;
-      sum += __half2float(e);
-    }
-    __syncwarp();
-    wmma::load_matrix_sync(pa, tile, 16);
-    for (unsigned c = 0; c < chunksV; ++c) {
-      unsigned e0 = (c == chunksV - 1 && tailV != 0) ? Dv - 16 : c * 16;
-      wmma::load_matrix_sync(vb, vh + (unsigned long long)key0 * Dv + e0, Dv);
-      wmma::mma_sync(result[c], pa, vb, result[c]);
-    }
-    __syncwarp();
-  }
-
-  float inv = 1.f / (sum + __shfl_xor_sync(0xffffffffu, sum, 16));
-  __half* oh = out + ((unsigned long long)head * T + row0) * Dv;
-  for (unsigned c = 0; c < chunksV; ++c) {
-    bool last = c == chunksV - 1 && tailV != 0;
-    unsigned e0 = last ? Dv - 16 : c * 16, skip = last ? 16 - tailV : 0;
-    wmma::store_matrix_sync(scores, result[c], 16, wmma::mem_row_major);
-    __syncwarp();
-    for (unsigned j = 0; j < 8; ++j) {
-      unsigned cc = col0 + j;
-      if (cc >= skip) oh[row * Dv + e0 + cc] = __float2half_rn(scores[row * 16 + cc] * inv);
-    }
-    __syncwarp();
+// Where the elements of 16x16 fragments live: out[kind * 256 + lane * 8 + slot] = row * 16 + column, for kind 0 = accumulator
+// (float), 1 = matrix_a (half, row major), 2 = matrix_b (half, column major), 3 = matrix_b (half, row major). One warp.
+__global__ void h_wmma_layout(float* out) {
+  using namespace nvcuda;
+  __shared__ float indexF[256];
+  __shared__ __half indexH[256];
+  for (unsigned i = threadIdx.x; i < 256; i += 32) { indexF[i] = (float)i; indexH[i] = __float2half_rn((float)i); }
+  __syncwarp();
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> c;
+  wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a;
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> bc;
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> br;
+  wmma::load_matrix_sync(c, indexF, 16, wmma::mem_row_major);
+  wmma::load_matrix_sync(a, indexH, 16);
+  wmma::load_matrix_sync(bc, indexH, 16);
+  wmma::load_matrix_sync(br, indexH, 16);
+  for (unsigned i = 0; i < 8; ++i) {
+    out[0 * 256 + threadIdx.x * 8 + i] = c.x[i];
+    out[1 * 256 + threadIdx.x * 8 + i] = __half2float(a.x[i]);
+    out[2 * 256 + threadIdx.x * 8 + i] = __half2float(bc.x[i]);
+    out[3 * 256 + threadIdx.x * 8 + i] = __half2float(br.x[i]);
   }
 }
 

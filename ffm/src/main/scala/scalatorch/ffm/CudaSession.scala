@@ -150,7 +150,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),loaded) }
     loaded
   private lazy val halfKernels=Seq("h_f32_to_f16","h_f16_to_f32","h_fill","h_add","h_add5","h_scale","h_silu","h_geglu","h_transpose5",
-      "h_concat","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_im2col","h_im2col_batch","h_attention_fused","h_fill_rows","h_softmax","h_gelu_erf","h_quick_gelu","h_softmax_causal").map { name =>
+      "h_concat","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_im2col","h_im2col_batch","h_attention_fused_r1c3","h_attention_fused_r2c3","h_attention_fused_r4c3","h_attention_fused_r1c4","h_attention_fused_r2c4","h_attention_fused_r4c4","h_attention_fused_r1c5","h_attention_fused_r2c5","h_fill_rows","h_wmma_layout","h_softmax","h_gelu_erf","h_quick_gelu","h_softmax_causal").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),halfModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -718,10 +718,15 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val result=allocate(output,half=true)
     try
       // Tensor-core kernel that keeps the scores in shared memory (see h_attention_fused): no score matrix in device memory at all.
-      if !causal && CudaSession.fusedHalfAttention && qt%16==0 && kt%16==0 && qt>=16 && kt>=CudaSession.fusedHalfAttentionMinKeys &&
-          d>=16 && d<=160 && dv>=16 && dv<=160 then
+      // one kernel per number of 16-wide chunks (3 = width 33..48, 4 = 49..64, 5 = 65..80); other widths use cuBLAS
+      val fusedChunks=(d+15)/16
+      if !causal && CudaSession.fusedHalfAttention && wmmaStandardLayout && qt%16==0 && kt%16==0 && qt>=16 && kt>=CudaSession.fusedHalfAttentionMinKeys &&
+          d>=33 && d<=80 && (dv+15)/16==fusedChunks && d%8==0 && dv%8==0 then // fragment loads need 16-byte aligned rows
         val started=if profileEnabled then System.nanoTime() else 0L
-        launch(batch.toLong*(qt/16),halfKernels("h_attention_fused"),32,32,"h_attention_fused") { arena =>
+        // query tiles per warp: more of them per read of the keys and values, as far as the width leaves registers for
+        val tiles=Seq(4,2,1).find(t => t<=CudaSession.fusedHalfAttentionTiles && qt%(16*t)==0 && (t<4 || fusedChunks<=4)).get
+        val kernelName=s"h_attention_fused_r${tiles}c$fusedChunks"
+        launch(batch.toLong*(qt/(16*tiles)),halfKernels(kernelName),32,32,kernelName) { arena =>
           Seq(query.address,key.address,value.address,result.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
             Seq(batch,qt,kt,d,dv).map(x => arena.allocateFrom(JAVA_INT,x)) :+
             arena.allocateFrom(JAVA_FLOAT,(1.0/math.sqrt(d.toDouble)).toFloat)
@@ -934,6 +939,28 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     catch case error: Throwable =>
       try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
+
+  /** True when the fragments of this device have the element positions h_attention_fused is written for: accumulator and matrix_a
+    * alike, lane L (g = L / 4, t = L % 4) holding row g in slots 0, 1, 4, 5 and row g + 8 in slots 2, 3, 6, 7, columns
+    * 2t, 2t+1, 2t+8, 2t+9. Measured once per session; the kernel is not used otherwise. */
+  private lazy val wmmaStandardLayout: Boolean =
+    try
+      val layout=wmmaLayout()
+      (0 until 2).forall { kind => (0 until 32).forall { lane => (0 until 8).forall { slot =>
+        val g=lane/4;val t=lane%4
+        val row=if Set(0,1,4,5)(slot) then g else g+8
+        val column=2*t+(slot&1)+(if slot>=4 then 8 else 0)
+        layout((kind*32+lane)*8+slot)==row*16+column
+      } } }
+    catch case _: Throwable => false
+
+  /** Element positions (row * 16 + column) of the 16x16 tensor-core fragments on this device, per kind, lane and slot:
+    * `(kind * 32 + lane) * 8 + slot` with kind 0 accumulator, 1 matrix_a, 2 matrix_b column major, 3 matrix_b row major. */
+  private[ffm] def wmmaLayout(): Array[Int] =
+    Using.resource(allocate(Shape.from(Seq(1024L)))) { out =>
+      launch(1,halfKernels("h_wmma_layout"),32,32,"h_wmma_layout") { arena => Seq(arena.allocateFrom(JAVA_LONG,out.address)) }
+      download(out).toFloatArray.map(_.round)
+    }
 
   /** Opaque Float16 copy of a Float32 tensor (2 bytes per element). Only matmulTransposedBHalf may read it. */
   def toHalf(value: CudaTensor): CudaTensor =
@@ -1468,11 +1495,12 @@ object CudaSession:
     sys.env.get("SCALATORCH_CUDA_CHUNK_MB").flatMap(_.trim.toLongOption).filter(_ > 0).getOrElse(128L)*1024L*1024L
   /** Float16 convolution of a batch as one GEMM (`SCALATORCH_CUDA_MERGED_CONV=0` keeps one GEMM per sample). */
   private[ffm] val mergedConvolution: Boolean = !sys.env.get("SCALATORCH_CUDA_MERGED_CONV").contains("0")
-  /** Float16 attention through the fused tensor-core kernel, only with `SCALATORCH_CUDA_FUSED_ATTENTION_HALF=1`. It is correct but
-    * slower than the cuBLAS path (RTX 3090, [20,4096,64]: 17.0 ms against 3.9 ms; [16,4096,40]: 6.2 against 3.1). A second version
-    * that shared the key and value tiles between eight warps of a block was slower still (21.3 and 10.4 ms): the limit is the
-    * per-tile trip through shared memory for the exponentials, not memory traffic. Kept for measurement. */
-  private[ffm] val fusedHalfAttention: Boolean = sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_HALF").contains("1")
+  /** Float16 self-attention through the fused tensor-core kernels (h_attention_fused_*): no score matrix in device memory.
+    * RTX 3090: [16,4096,40] 3.08 -> 1.09 ms, [64,4096,40] 12.4 -> 3.95 ms, [20,4096,64] 3.86 -> 1.83 ms against the cuBLAS path.
+    * Used when the fragment layout of the device is the expected one; `SCALATORCH_CUDA_FUSED_ATTENTION_HALF=0` keeps cuBLAS. */
+  private[ffm] val fusedHalfAttention: Boolean = !sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_HALF").contains("0")
+  private[ffm] val fusedHalfAttentionTiles: Int =
+    sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_TILES").flatMap(_.trim.toIntOption).filter(_ >= 1).getOrElse(2)
   /** Fewest keys for the fused kernel (`SCALATORCH_CUDA_FUSED_ATTENTION_MIN_KEYS`). */
   private[ffm] val fusedHalfAttentionMinKeys: Int =
     sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_MIN_KEYS").flatMap(_.trim.toIntOption).filter(_ >= 16).getOrElse(16)
