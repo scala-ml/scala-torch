@@ -53,18 +53,25 @@ private[ffm] final class Cudnn private (handle: MemorySegment, arena: Arena, h: 
         // times slower on some shapes (16 x 1280 x 32 x 32: 16 ms, a convolution to 4 channels: 5.8 ms). Entries are 48 bytes:
         // algo, status, time, memory (at 16), determinism, mathType (at 28), reserved.
         val ranked =
-          try
+          if Cudnn.measure && Cudnn.measuredChoices.containsKey(key) then Seq.empty
+          else try
             val entries = 8
             val perf = arena.allocate(48L * entries, 8)
             val returned = arena.allocate(JAVA_INT)
-            val status = h.ranking.invokeWithArguments(handle, x, w, conv, y, Int.box(entries), returned, perf).asInstanceOf[Integer].intValue()
+            // Measured ranking (cuDNN runs every algorithm once on this shape) or the heuristic one. The measurement is kept per
+            // shape for the whole process, so only the first generation pays for it.
+            val status = (if Cudnn.measure then h.measured else h.ranking)
+              .invokeWithArguments(handle, x, w, conv, y, Int.box(entries), returned, perf).asInstanceOf[Integer].intValue()
             if status != 0 then Seq.empty
             else (0 until returned.get(JAVA_INT, 0L)).map { i =>
               val at = 48L * i
               (perf.get(JAVA_INT, at), perf.get(JAVA_INT, at + 4), perf.get(JAVA_LONG, at + 16), perf.get(JAVA_INT, at + 28))
             }.collect { case (algo, 0, memory, math) => (algo, memory, math) }
           catch case _: Throwable => Seq.empty
-        ranked.find(_._2 <= workspaceLimit) match
+        val remembered = if Cudnn.measure then Option(Cudnn.measuredChoices.get(key)).filter(_._2 <= workspaceLimit) else None
+        val usable = remembered.orElse(ranked.find(_._2 <= workspaceLimit))
+        if Cudnn.measure then usable.foreach(choice => Cudnn.measuredChoices.put(key, choice))
+        usable match
           case Some((algo, memory, math)) =>
             check(h.setMath.invokeWithArguments(conv, Int.box(math)), "cudnnSetConvolutionMathType")
             new Plan(x, w, conv, y, algo, memory)
@@ -90,9 +97,15 @@ private[ffm] object Cudnn:
   final class Plan(val x: MemorySegment, val w: MemorySegment, val conv: MemorySegment, val y: MemorySegment, val algo: Int, val workspace: Long)
   final class Handles(val setStream: MethodHandle, val createTensor: MethodHandle, val setTensor: MethodHandle, val createFilter: MethodHandle,
       val setFilter: MethodHandle, val createConv: MethodHandle, val setConv: MethodHandle, val setMath: MethodHandle, val setGroups: MethodHandle,
-      val workspace: MethodHandle, val forward: MethodHandle, val destroy: MethodHandle, val ranking: MethodHandle)
+      val workspace: MethodHandle, val forward: MethodHandle, val destroy: MethodHandle, val ranking: MethodHandle, val measured: MethodHandle)
 
   val enabled: Boolean = !sys.env.get("SCALATORCH_CUDNN").contains("0")
+  /** Choose the algorithm by measurement instead of cuDNN's heuristic, only with `SCALATORCH_CUDNN_MEASURE=1`. Measured on an
+    * RTX 3090: the same generation time (SD1.5 40 steps 3.3-3.4 s, SDXL 9.0-9.5 s either way) and 2.5 to 3 s more for the first
+    * generation, so it is off. */
+  val measure: Boolean = sys.env.get("SCALATORCH_CUDNN_MEASURE").contains("1")
+  /** Measured choice per geometry: (algorithm, workspace bytes, math type). Shared by all sessions of the process. */
+  private[ffm] val measuredChoices = new java.util.concurrent.ConcurrentHashMap[Seq[Int], (Int, Long, Int)]()
 
   /** Complete cuDNN installations as absolute paths of the front library. A front library whose parts are missing aborts the process
     * when it is used, so a candidate counts only when its parts sit next to it; bare names from the search path are never tried. */
@@ -163,7 +176,8 @@ private[ffm] object Cudnn:
           down("cudnnGetConvolutionForwardWorkspaceSize", ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_INT, ADDRESS),
           down("cudnnConvolutionForward", ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_INT, ADDRESS, JAVA_LONG, ADDRESS, ADDRESS, ADDRESS),
           down("cudnnDestroy", ADDRESS),
-          down("cudnnGetConvolutionForwardAlgorithm_v7", ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_INT, ADDRESS, ADDRESS))
+          down("cudnnGetConvolutionForwardAlgorithm_v7", ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_INT, ADDRESS, ADDRESS),
+          down("cudnnFindConvolutionForwardAlgorithm", ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_INT, ADDRESS, ADDRESS))
         val out = arena.allocate(ADDRESS)
         if create.invokeWithArguments(out).asInstanceOf[Integer].intValue() != 0 then null
         else
