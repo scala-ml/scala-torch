@@ -141,6 +141,9 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
   // LoRA merged into a private copy of the Float16 weight: one GEMM per step instead of five kernels. Rebuilt whenever
   // the adapter set or a multiplier changes (per-step LoRA schedules), and disabled with SCALATORCH_LORA_MERGE=0.
   private val mergedWeights=scala.collection.mutable.HashMap.empty[Parameter,(Vector[(AnyRef,Float)],CudaTensor)]
+  // Key and value projections of the text context per cross-attention layer (by the key weight): (context, keys, values).
+  private val contextProjections=
+    scala.collection.mutable.HashMap.empty[Parameter,scala.collection.mutable.ArrayBuffer[(CudaTensor,CudaTensor,CudaTensor)]]
   // Query, key and value weights of a self-attention layer stacked into one matrix, by the query weight. Built on first use.
   private val packedWeights=scala.collection.mutable.HashMap.empty[Parameter,CudaTensor]
   private val mergeEnabled= !sys.env.get("SCALATORCH_LORA_MERGE").contains("0")
@@ -321,7 +324,13 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         projected.close()
         val out=use(session.transpose(view,1,2));view.close()
         out
-      val qRaw=heads(input,model.toQ,queries);val k=heads(source,model.toK,keys)
+      // Cross-attention: keys and values are projections of the text context, which does not change between the steps of a
+      // sampling. They are computed once per context tensor and layer and kept (two matrix products and two transposes less per
+      // layer and step). Only for plain resident weights, so a LoRA that changes between steps is never served from here.
+      val keepContext=context.isDefined && !special && CudaDiffusionRuntime.contextProjectionCache &&
+        plainWeight(model.toK) && plainWeight(model.toV)
+      val kept=if keepContext then contextProjections.get(model.toK.weight).flatMap(_.find(_._1 eq source)) else None
+      val qRaw=heads(input,model.toQ,queries);val k=kept.fold(heads(source,model.toK,keys))(_._2)
       val q=if context.isEmpty && Pag.currentSection=="mid" then
         if Sag.currentStore.isDefined then Sag.recordFromQK(qRaw.toCpu,k.toCpu)
         Incantations.currentSeg match
@@ -330,7 +339,13 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
             qRaw.close();blurred
           case None => qRaw
       else qRaw
-      val vRaw=heads(source,model.toV,keys)
+      val vRaw=kept.fold(heads(source,model.toV,keys))(_._3)
+      if keepContext && kept.isEmpty then
+        // Up to three contexts per layer (a two-pass step alternates between the negative and the positive one); the oldest goes.
+        val entries=contextProjections.getOrElseUpdate(model.toK.weight,scala.collection.mutable.ArrayBuffer.empty)
+        while entries.size>=3 do { val old=entries.remove(0);old._2.close();old._3.close() }
+        // own handles on the same memory: the scope closes its handles when it ends
+        entries+=((source,session.reshape(k,k.shape),session.reshape(vRaw,vRaw.shape)))
       val v=if context.isDefined then NegPip.currentSigns match
         case Some(signs) =>
           val signed=use(up(NegPip.applySigns(vRaw.toCpu,signs)))
@@ -341,7 +356,8 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       // diffusion images. CudaSession still caps scratch to its available
       // allocation budget, so low-memory sessions retain automatic slicing.
       val attended=use(session.scaledDotProductAttention(q,k,v,model.maxScoreElements,maxWorkspaceBytes=64L*1024*1024))
-      q.close();k.close();v.close()
+      q.close()
+      if kept.isEmpty then { k.close();v.close() }
       val packed=use(session.transpose(attended,1,2));attended.close()
       val flat=use(session.reshape(packed,Shape.from(Seq(batch*queries,inner))));packed.close()
       val projected=use(linear(flat,model.toOut));flat.close()
@@ -879,6 +895,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       weights.values.foreach(_.close())
       mergedWeights.values.foreach(_._2.close());mergedWeights.clear()
       packedWeights.values.foreach(_.close());packedWeights.clear()
+      contextProjections.values.foreach(_.foreach { v => v._2.close();v._3.close() });contextProjections.clear()
       clearOffloadedWeights()
       host=Map.empty
       closed=true
@@ -890,6 +907,10 @@ private[models] object CudaDiffusionRuntime:
   /** Self-attention projections as one matrix product, only with `SCALATORCH_CUDA_PACKED_PROJECTIONS=1`. Measured on an RTX 3090:
     * no gain (SD1.5 1.6 s and 4.1 s for 20 and 60 steps either way, SDXL 7.5 s) and more memory for the stacked weights, so off. */
   private[models] val packedProjections: Boolean = sys.env.get("SCALATORCH_CUDA_PACKED_PROJECTIONS").contains("1")
+  /** Keep the key and value projections of the text context between steps, only with `SCALATORCH_CUDA_CONTEXT_CACHE=1`. The images
+    * are pixel-identical with and without, and so are the times (RTX 3090: SD1.5 60 steps 4.1 s, batch of 4 4.5 s, SDXL 7.5-7.6 s),
+    * so it is off. */
+  private[models] val contextProjectionCache: Boolean = sys.env.get("SCALATORCH_CUDA_CONTEXT_CACHE").contains("1")
   private[models] def environmentFp16: Boolean = !sys.env.get("SCALATORCH_CUDA_FP16").contains("0")
   private[models] def setHalfPrecision(value: Option[Boolean]): Unit = precisionOverride=value
   /** Float16 U-Net / VAE / CLIP (weights, activations, tensor-core GEMM): the dtype of the loaded model (`load_model`), else

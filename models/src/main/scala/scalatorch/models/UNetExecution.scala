@@ -318,9 +318,11 @@ object UNetExecution:
                           val (c,a)=repeatedConditioning(count,pair)
                           (if pair then temporary(session.cat(Seq(input,input),0)) else input,c,a)
                         else if !pair then (input,positiveContext,positiveAddition)
-                        else (temporary(session.cat(Seq(input,input),0)),
-                          temporary(session.cat(Seq(negativeContext.get,positiveContext),0)),
-                          positiveAddition.map(p => temporary(session.cat(Seq(negativeAddition.get,p),0))))
+                        else
+                          // the stacked [negative; positive] context is built once and kept between steps (it also lets the
+                          // U-Net keep what it derives from it)
+                          val (c,a)=repeatedConditioning(1,true)
+                          (temporary(session.cat(Seq(input,input),0)),c,a)
                       val output=temporary(unet.applyPrepared(stacked,timesteps,context,addition,None))
                       VaeExecution.checkCancelled(cancelled)
                       val both=output.toCpu
