@@ -32,7 +32,7 @@ private[ffm] final class Cudnn private (handle: MemorySegment, arena: Arena, h: 
 
   /** The plan for a Float16 NCHW cross-correlation, or None when cuDNN has no usable algorithm for it. */
   def plan(n: Int, ci: Int, hh: Int, ww: Int, co: Int, cg: Int, kh: Int, kw: Int, oh: Int, ow: Int,
-      stride: (Int, Int), padding: (Int, Int), dilation: (Int, Int), groups: Int): Option[Plan] =
+      stride: (Int, Int), padding: (Int, Int), dilation: (Int, Int), groups: Int, workspaceLimit: Long = Long.MaxValue): Option[Plan] =
     val key = Seq(n, ci, hh, ww, co, cg, kh, kw, oh, ow, stride._1, stride._2, padding._1, padding._2, dilation._1, dilation._2, groups)
     val known = plans.get(key)
     if known != null then return Option(known).filter(_.algo >= 0)
@@ -49,11 +49,31 @@ private[ffm] final class Cudnn private (handle: MemorySegment, arena: Arena, h: 
           Int.box(dilation._1), Int.box(dilation._2), Int.box(1), Int.box(2)), "cudnnSetConvolution2dDescriptor")
         check(h.setMath.invokeWithArguments(conv, Int.box(1)), "cudnnSetConvolutionMathType")
         if groups != 1 then check(h.setGroups.invokeWithArguments(conv, Int.box(groups)), "cudnnSetConvolutionGroupCount")
-        // IMPLICIT_PRECOMP_GEMM (1) uses the tensor cores; IMPLICIT_GEMM (0) needs no workspace and always exists.
-        Seq(1, 0).iterator.map { algo =>
-          val status = h.workspace.invokeWithArguments(handle, x, w, conv, y, Int.box(algo), sizeCell).asInstanceOf[Integer].intValue()
-          if status == 0 then new Plan(x, w, conv, y, algo, sizeCell.get(JAVA_LONG, 0L)) else null
-        }.find(_ != null).getOrElse(new Plan(x, w, conv, y, -1, 0L))
+        // cuDNN's own ranking for this geometry (the heuristic PyTorch uses without benchmarking). One fixed algorithm was up to ten
+        // times slower on some shapes (16 x 1280 x 32 x 32: 16 ms, a convolution to 4 channels: 5.8 ms). Entries are 48 bytes:
+        // algo, status, time, memory (at 16), determinism, mathType (at 28), reserved.
+        val ranked =
+          try
+            val entries = 8
+            val perf = arena.allocate(48L * entries, 8)
+            val returned = arena.allocate(JAVA_INT)
+            val status = h.ranking.invokeWithArguments(handle, x, w, conv, y, Int.box(entries), returned, perf).asInstanceOf[Integer].intValue()
+            if status != 0 then Seq.empty
+            else (0 until returned.get(JAVA_INT, 0L)).map { i =>
+              val at = 48L * i
+              (perf.get(JAVA_INT, at), perf.get(JAVA_INT, at + 4), perf.get(JAVA_LONG, at + 16), perf.get(JAVA_INT, at + 28))
+            }.collect { case (algo, 0, memory, math) => (algo, memory, math) }
+          catch case _: Throwable => Seq.empty
+        ranked.find(_._2 <= workspaceLimit) match
+          case Some((algo, memory, math)) =>
+            check(h.setMath.invokeWithArguments(conv, Int.box(math)), "cudnnSetConvolutionMathType")
+            new Plan(x, w, conv, y, algo, memory)
+          case None =>
+            // IMPLICIT_PRECOMP_GEMM (1) uses the tensor cores; IMPLICIT_GEMM (0) needs no workspace and always exists.
+            Seq(1, 0).iterator.map { algo =>
+              val status = h.workspace.invokeWithArguments(handle, x, w, conv, y, Int.box(algo), sizeCell).asInstanceOf[Integer].intValue()
+              if status == 0 && sizeCell.get(JAVA_LONG, 0L) <= workspaceLimit then new Plan(x, w, conv, y, algo, sizeCell.get(JAVA_LONG, 0L)) else null
+            }.find(_ != null).getOrElse(new Plan(x, w, conv, y, -1, 0L))
       catch case _: Throwable => new Plan(MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL, -1, 0L)
     plans.put(key, built)
     Option(built).filter(_.algo >= 0)
@@ -70,7 +90,7 @@ private[ffm] object Cudnn:
   final class Plan(val x: MemorySegment, val w: MemorySegment, val conv: MemorySegment, val y: MemorySegment, val algo: Int, val workspace: Long)
   final class Handles(val setStream: MethodHandle, val createTensor: MethodHandle, val setTensor: MethodHandle, val createFilter: MethodHandle,
       val setFilter: MethodHandle, val createConv: MethodHandle, val setConv: MethodHandle, val setMath: MethodHandle, val setGroups: MethodHandle,
-      val workspace: MethodHandle, val forward: MethodHandle, val destroy: MethodHandle)
+      val workspace: MethodHandle, val forward: MethodHandle, val destroy: MethodHandle, val ranking: MethodHandle)
 
   val enabled: Boolean = !sys.env.get("SCALATORCH_CUDNN").contains("0")
 
@@ -142,7 +162,8 @@ private[ffm] object Cudnn:
           down("cudnnSetConvolutionGroupCount", ADDRESS, JAVA_INT),
           down("cudnnGetConvolutionForwardWorkspaceSize", ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_INT, ADDRESS),
           down("cudnnConvolutionForward", ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_INT, ADDRESS, JAVA_LONG, ADDRESS, ADDRESS, ADDRESS),
-          down("cudnnDestroy", ADDRESS))
+          down("cudnnDestroy", ADDRESS),
+          down("cudnnGetConvolutionForwardAlgorithm_v7", ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_INT, ADDRESS, ADDRESS))
         val out = arena.allocate(ADDRESS)
         if create.invokeWithArguments(out).asInstanceOf[Integer].intValue() != 0 then null
         else

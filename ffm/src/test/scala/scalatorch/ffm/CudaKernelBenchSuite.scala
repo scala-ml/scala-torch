@@ -24,6 +24,10 @@ class CudaKernelBenchSuite extends munit.FunSuite:
         run(20)
         val micros=Seq.fill(7)(run(rounds)).min // the GPU is shared with the desktop: the fastest of several runs
         println(f"[bench] $label%-46s $micros%8.1f us")
+      for (heads,tokens,width) <- Seq((16L,4096L,40L),(64L,4096L,40L),(16L,1024L,80L),(16L,256L,160L),(20L,4096L,64L),(40L,1024L,64L)) do
+        val q=half(1,heads,tokens,width);val k=half(1,heads,tokens,width);val v=half(1,heads,tokens,width)
+        time(s"self attention     [$heads,$tokens,$width]",20)(s.scaledDotProductAttention(q,k,v))
+        Seq(q,k,v).foreach(_.close())
       for (n,c,side) <- Seq((2L,320L,64L),(8L,320L,64L),(2L,640L,32L),(8L,640L,32L),(8L,1280L,16L),(8L,1280L,8L)) do
         val x=half(n,c,side,side)
         val w=half(c,c,3,3)

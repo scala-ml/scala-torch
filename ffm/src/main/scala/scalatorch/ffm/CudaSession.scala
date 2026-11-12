@@ -150,7 +150,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),loaded) }
     loaded
   private lazy val halfKernels=Seq("h_f32_to_f16","h_f16_to_f32","h_fill","h_add","h_add5","h_scale","h_silu","h_geglu","h_transpose5",
-      "h_concat","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_im2col","h_im2col_batch","h_softmax","h_gelu_erf","h_quick_gelu","h_softmax_causal").map { name =>
+      "h_concat","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_im2col","h_im2col_batch","h_attention_fused","h_softmax","h_gelu_erf","h_quick_gelu","h_softmax_causal").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),halfModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -717,6 +717,16 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val batch=(q(0)*q(1)).toInt;val qt=q(2).toInt;val kt=k(2).toInt;val d=q(3).toInt;val dv=v(3).toInt
     val result=allocate(output,half=true)
     try
+      // Tensor-core kernel that keeps the scores in shared memory (see h_attention_fused): no score matrix in device memory at all.
+      if !causal && CudaSession.fusedHalfAttention && qt%16==0 && kt%16==0 && qt>=16 && kt>=CudaSession.fusedHalfAttentionMinKeys &&
+          d>=16 && d<=160 && dv>=16 && dv<=160 then
+        val started=if profileEnabled then System.nanoTime() else 0L
+        launch(batch.toLong*(qt/16),halfKernels("h_attention_fused"),32,32,"h_attention_fused") { arena =>
+          Seq(query.address,key.address,value.address,result.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
+            Seq(batch,qt,kt,d,dv).map(x => arena.allocateFrom(JAVA_INT,x)) :+
+            arena.allocateFrom(JAVA_FLOAT,(1.0/math.sqrt(d.toDouble)).toFloat)
+        }
+        return result
       // The score matrix never exists as a whole: heads are processed in groups and, when even one head does not fit the scratch
       // budget (very large images), the queries in blocks. `SCALATORCH_CUDA_ATTENTION_SCRATCH_MB` (default 256) trades VRAM for speed.
       val budget=math.min(CudaSession.attentionScratchBytes,math.max(1L,maxBytes-used))
@@ -1061,8 +1071,9 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       val output=allocate(g.shape,half=true)
       try
         // cuDNN convolves without the im2col copy and with tensor-core kernels made for convolution.
-        val planned=if direct then None else cudnn.flatMap(_.plan(g.n,g.ci,g.h,g.w,g.co,g.cg,g.kh,g.kw,g.oh,g.ow,
-          config.stride,config.padding,config.dilation,config.groups)).filter(p => p.workspace<=math.max(0L,(maxBytes-used)/2))
+        // 1x1 convolutions go there as well when there is more than one sample: the built-in path calls cuBLAS once per sample.
+        val planned=if direct && g.n==1 then None else cudnn.flatMap(_.plan(g.n,g.ci,g.h,g.w,g.co,g.cg,g.kh,g.kw,g.oh,g.ow,
+          config.stride,config.padding,config.dilation,config.groups,math.max(0L,(maxBytes-used)/2)))
         if planned.nonEmpty then
           val plan=planned.get
           val started=if profileEnabled then System.nanoTime() else 0L
@@ -1433,6 +1444,13 @@ object CudaSession:
     sys.env.get("SCALATORCH_CUDA_CHUNK_MB").flatMap(_.trim.toLongOption).filter(_ > 0).getOrElse(128L)*1024L*1024L
   /** Float16 convolution of a batch as one GEMM (`SCALATORCH_CUDA_MERGED_CONV=0` keeps one GEMM per sample). */
   private[ffm] val mergedConvolution: Boolean = !sys.env.get("SCALATORCH_CUDA_MERGED_CONV").contains("0")
+  /** Float16 attention through the fused tensor-core kernel, only with `SCALATORCH_CUDA_FUSED_ATTENTION_HALF=1`. It is correct but
+    * slower than the cuBLAS path (RTX 3090, [20,4096,64]: 17.0 ms against 4.5 ms; [16,4096,40]: 6.2 against 3.5): 16x16 tiles loaded
+    * from device memory cannot keep the tensor cores busy. Kept for measurement. */
+  private[ffm] val fusedHalfAttention: Boolean = sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_HALF").contains("1")
+  /** Fewest keys for the fused kernel (`SCALATORCH_CUDA_FUSED_ATTENTION_MIN_KEYS`). */
+  private[ffm] val fusedHalfAttentionMinKeys: Int =
+    sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_MIN_KEYS").flatMap(_.trim.toIntOption).filter(_ >= 16).getOrElse(16)
   /** True while device memory is known to be short (see `CudaWeightPool.tight`). */
   def memoryTight: Boolean = CudaWeightPool.tight
   /** Records that a model did not fit the device. */

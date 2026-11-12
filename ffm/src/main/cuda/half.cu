@@ -1,6 +1,7 @@
 // Float16 activation kernels for the CUDA diffusion runtime. Storage is __half; arithmetic is Float32.
 // Compiled to ffm/src/main/resources/scalatorch/half.ptx by build_ptx.py.
 #include <cuda_fp16.h>
+#include <mma.h>
 
 #define GRID_INDEX(i, n) unsigned i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= (n)) return;
 
@@ -191,9 +192,25 @@ __global__ void h_softmax(__half* x, unsigned rows, unsigned width) {
   unsigned row = blockIdx.x;
   if (row >= rows) return;
   __half* base = x + (unsigned long long)row * width;
-  // One read for the maximum and the sum together: each thread keeps a running maximum and rescales its sum when the maximum grows;
-  // the per-thread sums are brought to the common maximum afterwards. The score matrix is far larger than any cache, so a read less
-  // is time saved.
+  unsigned per = width / blockDim.x;
+  if (width % blockDim.x == 0 && per >= 8 && per <= 16) { // shorter rows measured slower this way
+    // The score matrix is far larger than any cache, so every pass over it costs device-memory bandwidth. Each thread reads its
+    // share of the row once and keeps it in registers (the loops have a constant bound for that): one read and one write of the
+    // row, and one exponential per element.
+    float local[16];
+    float tm = -3.402823466e+38f;
+    #pragma unroll
+    for (unsigned c = 0; c < 16; ++c) if (c < per) { float v = ld(base, threadIdx.x + c * blockDim.x); local[c] = v; tm = fmaxf(tm, v); }
+    float m = block_max(tm, shared);
+    float ts = 0.f;
+    #pragma unroll
+    for (unsigned c = 0; c < 16; ++c) if (c < per) { float e = __expf(local[c] - m); local[c] = e; ts += e; }
+    float inv = 1.f / block_sum(ts, shared);
+    #pragma unroll
+    for (unsigned c = 0; c < 16; ++c) if (c < per) st(base, threadIdx.x + c * blockDim.x, local[c] * inv);
+    return;
+  }
+  // Other widths: one read for the maximum and the sum together (running maximum per thread, sums brought to the common maximum).
   float tm = -3.402823466e+38f, ts = 0.f;
   for (unsigned i = threadIdx.x; i < width; i += blockDim.x) {
     float v = ld(base, i);
@@ -212,6 +229,108 @@ __global__ void h_gelu_erf(const __half* a, __half* out, unsigned n) {
 
 __global__ void h_quick_gelu(const __half* a, __half* out, unsigned n) {
   GRID_INDEX(i, n) { float x = ld(a, i); st(out, i, x / (1.f + __expf(-1.702f * x))); }
+}
+
+// Attention without a score matrix in device memory (tensor cores, one warp per head and 16 query rows).
+// q [heads, T, D], k [heads, S, D], v [heads, S, Dv], out [heads, T, Dv]; T and S are multiples of 16, 16 <= D, Dv <= 160.
+// The keys are visited twice in tiles of 16: first for the row maximum, then the scores are computed again, turned into
+// exponentials relative to that maximum and multiplied with the values; the division by the row sum comes last. Scores live in shared memory only; the keys and
+// values of one head fit the L2 cache, so nothing of the size T x S is ever written to or read from device memory.
+// A width that is not a multiple of 16 takes its last chunk from the last 16 columns; the columns that an earlier chunk
+// already covered are zeroed on the query side (scores) or not written (output).
+#define ATT_MAX_CHUNKS 10
+__global__ void h_attention_fused(const __half* q, const __half* k, const __half* v, __half* out,
+                                  unsigned heads, unsigned T, unsigned S, unsigned D, unsigned Dv, float scale) {
+  using namespace nvcuda;
+  __shared__ float scores[256];
+  __shared__ __half tile[256];
+  unsigned tilesPerHead = T / 16;
+  unsigned head = blockIdx.x / tilesPerHead, row0 = (blockIdx.x % tilesPerHead) * 16;
+  if (head >= heads) return;
+  unsigned lane = threadIdx.x, row = lane & 15, col0 = (lane >> 4) * 8;
+  const __half* qh = q + ((unsigned long long)head * T + row0) * D;
+  const __half* kh = k + (unsigned long long)head * S * D;
+  const __half* vh = v + (unsigned long long)head * S * Dv;
+  unsigned chunks = (D + 15) / 16, tail = D % 16;
+  unsigned chunksV = (Dv + 15) / 16, tailV = Dv % 16;
+
+  wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> qa[ATT_MAX_CHUNKS];
+  for (unsigned c = 0; c < chunks; ++c) {
+    if (c == chunks - 1 && tail != 0) {
+      // last 16 columns, with the columns of the previous chunk set to zero
+      for (unsigned j = 0; j < 8; ++j) {
+        unsigned cc = col0 + j;
+        tile[row * 16 + cc] = cc < 16 - tail ? __float2half_rn(0.f) : qh[row * D + (D - 16) + cc];
+      }
+      __syncwarp();
+      wmma::load_matrix_sync(qa[c], tile, 16);
+      __syncwarp();
+    } else wmma::load_matrix_sync(qa[c], qh + c * 16, D);
+  }
+
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> kb;
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
+
+  // pass 1: running maximum and sum of exponentials for this lane's half of its row
+  float m = -3.402823466e+38f;
+  for (unsigned key0 = 0; key0 < S; key0 += 16) {
+    wmma::fill_fragment(acc, 0.f);
+    for (unsigned c = 0; c < chunks; ++c) {
+      unsigned d0 = (c == chunks - 1 && tail != 0) ? D - 16 : c * 16;
+      wmma::load_matrix_sync(kb, kh + (unsigned long long)key0 * D + d0, D);
+      wmma::mma_sync(acc, qa[c], kb, acc);
+    }
+    wmma::store_matrix_sync(scores, acc, 16, wmma::mem_row_major);
+    __syncwarp();
+    for (unsigned j = 0; j < 8; ++j) m = fmaxf(m, scores[row * 16 + col0 + j]);
+    __syncwarp();
+  }
+  float rowMax = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, 16)) * scale;
+  float sum = 0.f;
+
+  // pass 2: probabilities times values
+  wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> pa;
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> vb;
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> result[ATT_MAX_CHUNKS];
+  for (unsigned c = 0; c < chunksV; ++c) wmma::fill_fragment(result[c], 0.f);
+  for (unsigned key0 = 0; key0 < S; key0 += 16) {
+    wmma::fill_fragment(acc, 0.f);
+    for (unsigned c = 0; c < chunks; ++c) {
+      unsigned d0 = (c == chunks - 1 && tail != 0) ? D - 16 : c * 16;
+      wmma::load_matrix_sync(kb, kh + (unsigned long long)key0 * D + d0, D);
+      wmma::mma_sync(acc, qa[c], kb, acc);
+    }
+    wmma::store_matrix_sync(scores, acc, 16, wmma::mem_row_major);
+    __syncwarp();
+    for (unsigned j = 0; j < 8; ++j) {
+      unsigned at = row * 16 + col0 + j;
+      __half e = __float2half_rn(__expf(scores[at] * scale - rowMax));
+      tile[at] = e;
+      sum += __half2float(e);
+    }
+    __syncwarp();
+    wmma::load_matrix_sync(pa, tile, 16);
+    for (unsigned c = 0; c < chunksV; ++c) {
+      unsigned e0 = (c == chunksV - 1 && tailV != 0) ? Dv - 16 : c * 16;
+      wmma::load_matrix_sync(vb, vh + (unsigned long long)key0 * Dv + e0, Dv);
+      wmma::mma_sync(result[c], pa, vb, result[c]);
+    }
+    __syncwarp();
+  }
+
+  float inv = 1.f / (sum + __shfl_xor_sync(0xffffffffu, sum, 16));
+  __half* oh = out + ((unsigned long long)head * T + row0) * Dv;
+  for (unsigned c = 0; c < chunksV; ++c) {
+    bool last = c == chunksV - 1 && tailV != 0;
+    unsigned e0 = last ? Dv - 16 : c * 16, skip = last ? 16 - tailV : 0;
+    wmma::store_matrix_sync(scores, result[c], 16, wmma::mem_row_major);
+    __syncwarp();
+    for (unsigned j = 0; j < 8; ++j) {
+      unsigned cc = col0 + j;
+      if (cc >= skip) oh[row * Dv + e0 + cc] = __float2half_rn(scores[row * 16 + cc] * inv);
+    }
+    __syncwarp();
+  }
 }
 
 // Causal softmax over [rows, width]: row r attends to keys j <= (r % queries) + queryStart; the rest become 0.

@@ -116,6 +116,18 @@ class CudaHalfSuite extends FunSuite:
       compare(Seq(x,tensor(data(co*ci*15,45,0.3),co.toLong,ci.toLong,5,3)),1e-2)((s,v) => s.conv2dFast(v(0),v(1),Conv2dConfig(padding=(2,0))))
   }
 
+  test("fused attention: widths 16 to 160 (also not multiples of 16), different key and query counts, value width, large scores") {
+    gpu()
+    // The fused kernel is opt-in; without the switch this compares the cuBLAS path on the same shapes.
+    println(s"fused attention kernel under test: ${sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_HALF").contains("1")}")
+    // (heads, queries, keys, width, value width, score scale)
+    for (h,t,kt,d,dv,scale) <- Seq((3,16,16,16,16,1.0),(2,32,48,40,40,1.0),(5,64,64,64,64,1.0),(2,48,160,80,80,1.0),
+        (1,16,32,160,160,1.0),(3,32,64,24,56,1.0),(2,64,256,40,40,4.0),(2,16,1024,64,64,2.0)) do
+      val q=tensor(data(h*t*d,51,scale),1,h.toLong,t.toLong,d.toLong);val k=tensor(data(h*kt*d,52,scale),1,h.toLong,kt.toLong,d.toLong)
+      val v=tensor(data(h*kt*dv,53),1,h.toLong,kt.toLong,dv.toLong)
+      compare(Seq(q,k,v),2e-2)((s,x) => s.scaledDotProductAttention(x(0),x(1),x(2)))
+  }
+
   test("GELU, QuickGELU and causal attention") {
     gpu()
     compare(Seq(tensor(data(5*33,26,2.0),5,33)),3e-3)((s,v) => s.geluErf(v(0)))
