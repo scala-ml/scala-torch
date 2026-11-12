@@ -695,8 +695,22 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         throw error
 
   /** Float32 in, Float32 out; runs in Float16 inside when this runtime was uploaded with half=true. */
+  // SCALATORCH_UNET_GAP_STATS=1: how long the device has nothing to do between two U-Net passes (the sampler step on the CPU,
+  // downloads and uploads). Every pass is waited for, so the sum of the passes is the pure device time.
+  private val gapStats=sys.env.get("SCALATORCH_UNET_GAP_STATS").contains("1")
+  private var gapPasses=0;private var gapNanos=0L;private var passNanos=0L;private var lastPassEnd=0L
   def unet(input: CudaTensor,model: ConditionalUNet2d,timesteps: Tensor[Float],context: CudaTensor,
       added: Option[CudaTensor]=None,control: Option[CudaControlNetResiduals]=None): CudaTensor =
+    if !gapStats then return unetTimed(input,model,timesteps,context,added,control)
+    session.waitForDevice()
+    val started=System.nanoTime()
+    if lastPassEnd!=0L then gapNanos+=started-lastPassEnd
+    val out=unetTimed(input,model,timesteps,context,added,control)
+    session.waitForDevice()
+    lastPassEnd=System.nanoTime();passNanos+=lastPassEnd-started;gapPasses+=1
+    out
+  private def unetTimed(input: CudaTensor,model: ConditionalUNet2d,timesteps: Tensor[Float],context: CudaTensor,
+      added: Option[CudaTensor],control: Option[CudaControlNetResiduals]): CudaTensor =
     if !half then unetCore(input,model,timesteps,context,added,control)
     else scope { use =>
       def h(t: CudaTensor): CudaTensor = if t.half then t else use(session.castToHalf(t))
@@ -1011,6 +1025,8 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     finally hidden.close()
 
   def close(): Unit =
+    if gapStats && gapPasses>0 then
+      System.err.println(f"[scala-torch U-Net gaps] $gapPasses passes ${passNanos/1e6}%.0f ms, between them ${gapNanos/1e6}%.0f ms")
     if !closed then
       session.allocatedBytes
       if profileEnabled && (offloadedWeightUploads>0 || offloadedWeightCacheHits>0) then

@@ -10,6 +10,29 @@ class CudaKernelBenchSuite extends munit.FunSuite:
     val shape=Shape.from(dims)
     Tensor.fromFloats(Array.tabulate(shape.numel.toInt)(i => math.sin(i*.37).toFloat),shape)
 
+  test("cost of issuing a kernel: tiny tensors, so the time is the launch and the bookkeeping around it") {
+    assume(sys.env.get("SCALATORCH_CUDA_BENCH").contains("1"),"benchmark disabled")
+    CudaSession.withDevice(maxBytes=1L<<30) { s =>
+      val a=s.uploadHalf(tensor(4,16));val b=s.uploadHalf(tensor(4,16));val w=s.uploadHalf(tensor(16,16));val bias=s.uploadHalf(tensor(16))
+      def time(label: String)(body: => CudaTensor): Unit =
+        def run(n: Int): (Double,Double) =
+          val started=System.nanoTime()
+          var i=0
+          while i<n do { body.close();i+=1 }
+          val issued=System.nanoTime()
+          s.allFinite(s.fillHalf(Shape.from(Seq(1L)),0f))
+          ((issued-started)/1e3/n,(System.nanoTime()-started)/1e3/n)
+        run(2000)
+        val best=Seq.fill(7)(run(20000)).minBy(_._2)
+        println(f"[issue] $label%-34s issued in ${best._1}%6.1f us, finished in ${best._2}%6.1f us per call")
+      time("add (one launch)")(s.add(a,b))
+      time("silu (one launch)")(s.silu(a))
+      time("layerNorm (one launch)")(s.layerNorm(a))
+      time("matmulTransposedB (cuBLAS)")(s.matmulTransposedB(a,w))
+      time("linearWithBias (launch + cuBLAS)")(s.linearWithBias(a,w,bias).get)
+    }
+  }
+
   test("kernel timings") {
     assume(sys.env.get("SCALATORCH_CUDA_BENCH").contains("1"),"benchmark disabled")
     CudaSession.withDevice(maxBytes=6L<<30) { s =>

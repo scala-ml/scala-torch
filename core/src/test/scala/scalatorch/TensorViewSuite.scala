@@ -12,6 +12,24 @@ class TensorViewSuite extends munit.FunSuite:
     assertEquals(y.transpose(0, 1).toFloatArray.toSeq, x.toFloatArray.toSeq)
     intercept[IllegalArgumentException](x.transpose(0, 2))
   }
+  test("logical order by stepping equals the position of every element: transposed, sliced, stepped and broadcast views") {
+    val base = Tensor.fromFloats(Array.tabulate(2 * 3 * 4 * 5)(_.toFloat), shape(2, 3, 4, 5))
+    val views = Seq(
+      base, base.transpose(0, 3), base.transpose(1, 2).transpose(0, 1), base.slice(2, 1, 4), base.slice(3, 0, 5, 2),
+      base.slice(1, 1, 2).transpose(0, 2), base.slice(0, 1, 2).broadcastTo(shape(3, 3, 4, 5)),
+      Tensor.fromFloats(Array(7f), shape(1, 1, 1, 1)).broadcastTo(shape(2, 3, 4, 5)),
+      Tensor.fromFloats(Array(1f, 2f, 3f), shape(3, 1, 1)).broadcastTo(shape(2, 3, 4, 5)),
+      Tensor.fromFloats(Array(1f, 2f, 3f, 4f, 5f), shape(5)).slice(0, 1, 4), Tensor.fromFloats(Array(9f), Shape.from(Seq.empty[Long])))
+    for v <- views do
+      val expected = Array.tabulate(v.shape.numel.toInt)(i => v.storage.data(v.layout.index(i)))
+      assertEquals(v.layout.gatherFloats(v.storage.data).toSeq, expected.toSeq)
+      assertEquals(v.toFloatArray.toSeq, expected.toSeq)
+    val a = base.transpose(0, 3)
+    val b = Tensor.fromFloats(Array(10f, 20f, 30f), shape(3, 1, 1))
+    val sum = Ops.add(a, b)
+    val bb = b.broadcastTo(a.shape)
+    assertEquals(sum.toFloatArray.toSeq, Seq.tabulate(a.shape.numel.toInt)(i => a.storage.data(a.layout.index(i)) + bb.storage.data(bb.layout.index(i))))
+  }
   test("reshape requires a contiguous layout and contiguous copies views") {
     val x = matrix
     assert(x.contiguous eq x)

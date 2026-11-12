@@ -16,10 +16,12 @@ object Ops:
     })
     val av = a.broadcastTo(shape)
     val bv = b.broadcastTo(shape)
-    val out = new Array[Float](shape.numel.toInt)
+    // both operands in logical order first (stepping, see Layout.gatherFloats), then one tight loop
+    val out = av.layout.gatherFloats(av.storage.data)
+    val other = bv.layout.gatherFloats(bv.storage.data)
     var i = 0
     while i < out.length do
-      out(i) = av.storage.data(av.layout.index(i)) + bv.storage.data(bv.layout.index(i))
+      out(i) = out(i) + other(i)
       i += 1
     Tensor.fromFloats(out, shape)
 

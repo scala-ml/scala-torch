@@ -105,6 +105,8 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       if !evictSharedWeights(Long.MaxValue>>1) && freed==0L then throw error
       rawAllocate(bytes)
   private def hostSync(): Unit = driver.synchronize(stream)
+  /** Waits until everything issued so far has run (for measurements). */
+  def waitForDevice(): Unit = hostSync()
   private def dtoh(host: MemorySegment,address: java.lang.Long,bytes: java.lang.Long): Unit =
     hostSync()
     driver.call("cuMemcpyDtoH_v2",Seq(ADDRESS,JAVA_LONG,JAVA_LONG),host,address,bytes)
