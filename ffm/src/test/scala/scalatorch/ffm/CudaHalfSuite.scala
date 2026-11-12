@@ -81,6 +81,12 @@ class CudaHalfSuite extends FunSuite:
     compare(Seq(tensor(x,2,8,6,6)),6e-3)((s,v) => s.groupNorm(v(0),2))
     compare(Seq(tensor(data(11*64,13,2.0),11,64),tensor(data(64,14),64),tensor(data(64,15),64)),6e-3)((s,v) =>
       s.layerNorm(v(0),1e-5,Some(v(1)),Some(v(2))))
+    // rows of the single-kernel LayerNorm: narrower than a block, several values per thread, the widest it takes, without affine
+    // parameters, and a width above its limit (statistics and apply apart)
+    for (rows,width) <- Seq((5,7),(3,640),(4,1280),(2,2048),(2,2304)) do
+      compare(Seq(tensor(data(rows*width,21,2.0),rows.toLong,width.toLong),tensor(data(width,22),width.toLong),tensor(data(width,23),width.toLong)),6e-3)(
+        (s,v) => s.layerNorm(v(0),1e-5,Some(v(1)),Some(v(2))))
+      compare(Seq(tensor(data(2*rows*width,24,2.0),2,rows.toLong,width.toLong)),6e-3)((s,v) => s.layerNorm(v(0)))
   }
 
   test("transposed-B GEMM and non-causal attention") {
@@ -126,7 +132,9 @@ class CudaHalfSuite extends FunSuite:
         // every kernel variant: 1 / 2 / 4 query tiles per warp x 3 / 4 / 5 chunks, with and without a width remainder
         // (widths 33 and 50 are not multiples of 8: they must take the cuBLAS path, a fragment load there would be misaligned)
         (3,16,64,48,48,1.0),(3,32,64,33,33,1.0),(2,64,128,48,48,3.0),(3,16,48,50,50,1.0),(2,32,96,64,64,1.0),(2,128,64,56,56,1.0),
-        (3,16,32,80,80,1.0),(2,32,64,72,72,2.0),(2,64,64,80,80,1.0),(7,96,4096,40,40,1.0)) do
+        (3,16,32,80,80,1.0),(2,32,64,72,72,2.0),(2,64,64,80,80,1.0),(7,96,4096,40,40,1.0),
+        // key counts that are not multiples of 16 (a text context has 77 tokens): the last key tile is masked
+        (3,32,77,64,64,1.0),(2,64,77,40,40,3.0),(2,16,17,80,80,1.0),(3,128,93,48,48,1.0),(2,32,154,56,56,2.0),(2,16,31,72,72,1.0)) do
       val q=tensor(data(h*t*d,51,scale),1,h.toLong,t.toLong,d.toLong);val k=tensor(data(h*kt*d,52,scale),1,h.toLong,kt.toLong,d.toLong)
       val v=tensor(data(h*kt*dv,53),1,h.toLong,kt.toLong,dv.toLong)
       compare(Seq(q,k,v),2e-2)((s,x) => s.scaledDotProductAttention(x(0),x(1),x(2)))
@@ -153,6 +161,36 @@ class CudaHalfSuite extends FunSuite:
       }
   }
 
+  test("residual folded into a linear layer and bias folded into GEGLU equal the separate passes") {
+    gpu()
+    for (m,k,n) <- Seq((37,129,70),(1,16,6),(300,64,64)) do
+      CudaSession.withDevice(maxBytes=1L<<30) { s =>
+        assume(s.hasCublas,"cuBLAS unavailable")
+        def floats(t: CudaTensor)=s.castToFloat(t).toCpu.toFloatArray
+        def worst(a: Array[Float],b: Array[Float])=a.indices.map(i => math.abs(a(i)-b(i))/(1.0+math.abs(a(i)))).max
+        val x=s.uploadHalf(tensor(data(m*k,61),m.toLong,k.toLong));val w=s.uploadHalf(tensor(data(n*k,62,0.2),n.toLong,k.toLong))
+        val bias=s.uploadHalf(tensor(data(n,63,3.0),n.toLong));val residual=s.uploadHalf(tensor(data(m*n,64,2.0),m.toLong,n.toLong))
+        val plain=s.linearWithBias(x,w,bias).getOrElse(fail("the fused bias path did not apply"))
+        val expected=s.add(residual,plain)
+        val fused=s.linearWithBias(x,w,bias,Some(residual)).getOrElse(fail("the residual path did not apply"))
+        assertEquals(fused.shape,expected.shape)
+        val e1=worst(floats(expected),floats(fused))
+        assert(e1<4e-3,s"residual: max relative error $e1")
+        // a residual of another shape is refused
+        val other=s.uploadHalf(tensor(data(m*n,65),(m*n).toLong))
+        assertEquals(s.linearWithBias(x,w,bias,Some(other)),None)
+        // GEGLU: bias added inside the kernel against a broadcast add before it
+        val product=s.matmulTransposedB(x,w)
+        val withBias=s.addBroadcast(product,bias);val reference=s.geglu(withBias,fast=true)
+        assert(s.canGegluBias(product,bias))
+        val gated=s.gegluBias(product,bias)
+        assertEquals(gated.shape,reference.shape)
+        val e2=worst(floats(reference),floats(gated))
+        assert(e2<4e-3,s"geglu: max relative error $e2")
+        Seq(x,w,bias,residual,plain,expected,fused,other,product,withBias,reference,gated).foreach(_.close())
+      }
+  }
+
   test("tensor-core fragment layout of this device") {
     gpu()
     CudaSession.withDevice(maxBytes=1L<<28) { s =>
@@ -171,7 +209,8 @@ class CudaHalfSuite extends FunSuite:
       assume(s.hasCublas,"cuBLAS unavailable")
       assume(s.canAttendTokensMajor(64,64,40),"fused attention is switched off or not usable on this device")
       // (batch, heads, queries, keys, width): every kernel variant, one and several batch members
-      for (b,h,t,kt,d) <- Seq((1,8,64,64,40),(2,8,32,48,40),(3,5,16,32,64),(2,10,128,64,64),(2,4,48,160,80),(1,3,64,4096,56)) do
+      for (b,h,t,kt,d) <- Seq((1,8,64,64,40),(2,8,32,48,40),(3,5,16,32,64),(2,10,128,64,64),(2,4,48,160,80),(1,3,64,4096,56),
+          (2,10,64,77,64),(2,8,32,77,40),(1,4,16,93,80),(3,6,128,17,56)) do
         assert(s.canAttendTokensMajor(t,kt,d))
         def tokens(count: Int,seed: Long)=s.uploadHalf(tensor(data(b*count*h*d,seed),b.toLong,count.toLong,(h*d).toLong))
         val q=tokens(t,71);val k=tokens(kt,72);val v=tokens(kt,73)
@@ -196,7 +235,7 @@ class CudaHalfSuite extends FunSuite:
         }
         assert(packed.sameElements(separate),s"packed differs for ($b,$h,$t,$d)")
         Seq(q,k,v).foreach(_.close())
-      assert(!s.canAttendTokensMajor(64,77,40) && !s.canAttendTokensMajor(64,64,160) && !s.canAttendTokensMajor(64,64,50))
+      assert(s.canAttendTokensMajor(64,77,40) && !s.canAttendTokensMajor(60,64,40) && !s.canAttendTokensMajor(64,64,160) && !s.canAttendTokensMajor(64,64,50))
     }
   }
 

@@ -188,6 +188,27 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       }
     else linearPlain(x,l)
 
+  /** The weight of a linear layer with a bias when the product and the bias can be issued separately: Float16 rows, cuBLAS,
+    * and adapters (if any) merged into the weight. */
+  private def separableWeight(x: CudaTensor,l: Linear,use: Using.Manager): Option[CudaTensor] =
+    if !(l.bias.nonEmpty && x.half && session.hasCublas && session.shape(x).rank==2 && weightShape(l.weight).rank==2) then None
+    else
+      val adapters=l.lora.toVector.map(a=>(a,1f))++LinearAdapterScope.forWeight(l.weight).toVector
+      if adapters.isEmpty then Some(weight(l.weight,use))
+      else if mergeEnabled && host.isEmpty && weights.contains(l.weight) &&
+          adapters.forall((a,_)=>weights.contains(a.a) && weights.contains(a.b)) then Some(mergedWeight(l,adapters))
+      else None
+
+  /** `residual + linear(x)` for rows [m, width]: one pass over the output where the fused form applies, else linear and add. */
+  private def linearAdd(x: CudaTensor,l: Linear,residual: CudaTensor): CudaTensor = scope { use =>
+    separableWeight(x,l,use).flatMap(w => session.linearWithBias(x,w,weight(l.bias.get,use),Some(residual))) match
+      case Some(out) => use(out)
+      case None =>
+        val out=use(linear(x,l))
+        val sum=use(session.add(residual,out));out.close()
+        sum
+  }
+
   private def linearPlain(x: CudaTensor,l: Linear): CudaTensor = scope { use =>
     // no adapter: product and bias in one pass over the output
     val direct=
@@ -255,7 +276,17 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       result
     }
 
-  def attention(input: CudaTensor,model: DiffusionAttention,context: Option[CudaTensor]): CudaTensor =
+  /** With `residual` (the shape of the result) the result is `residual + attention`; the plain Float16 paths fold the add into
+    * the output projection. */
+  def attention(input: CudaTensor,model: DiffusionAttention,context: Option[CudaTensor],residual: Option[CudaTensor]=None): CudaTensor =
+    val folded=Array(false)
+    val out=attentionInner(input,model,context,residual,folded)
+    residual match
+      case Some(r) if !folded(0) => try session.add(r,out) finally out.close()
+      case _ => out
+
+  private def attentionInner(input: CudaTensor,model: DiffusionAttention,context: Option[CudaTensor],residual: Option[CudaTensor],
+      folded: Array[Boolean]): CudaTensor =
     check()
     val source=context.getOrElse(input)
     val x=session.shape(input);val c=session.shape(source)
@@ -295,7 +326,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         val packed=use(session.reshape(projected,Shape.from(Seq(batch,queries,3*inner))));projected.close()
         val attended=use(session.attentionPacked(packed,model.heads));packed.close()
         val merged=use(session.reshape(attended,Shape.from(Seq(batch*queries,inner))));attended.close()
-        val out=use(linear(merged,model.toOut));merged.close()
+        val out=use(outProjection(merged,model.toOut,residual,folded,use));merged.close()
         val result=use(session.reshape(out,Shape.from(Seq(batch,queries,queryWidth))))
         out.close()
         result
@@ -311,7 +342,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         val attended=use(session.attentionTokensMajor(q,k,v,model.heads))
         q.close();k.close();v.close()
         val flat=use(session.reshape(attended,Shape.from(Seq(batch*queries,inner))));attended.close()
-        val projected=use(linear(flat,model.toOut));flat.close()
+        val projected=use(outProjection(flat,model.toOut,residual,folded,use));flat.close()
         val result=use(session.reshape(projected,Shape.from(Seq(batch,queries,queryWidth))))
         projected.close()
         result
@@ -389,6 +420,50 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     use(session.layerNorm(input,model.epsilon,model.weight.map(p => weight(p,use)),model.bias.map(p => weight(p,use))))
   }
 
+  /** Output projection of an attention layer on rows; with a residual the add is folded into it and `folded` is set. */
+  private def outProjection(rows: CudaTensor,l: Linear,residual: Option[CudaTensor],folded: Array[Boolean],use: Using.Manager): CudaTensor =
+    residual match
+      case Some(r) =>
+        val flat=use(session.reshape(r,Shape.from(Seq(session.shape(rows).dims(0),session.shape(r).numel/session.shape(rows).dims(0)))))
+        val out=linearAdd(rows,l,flat);flat.close()
+        folded(0)=true
+        out
+      case None => linear(rows,l)
+
+  /** With `residual` (the shape of the result) the result is `residual + feedForward(input)`. */
+  def feedForward(input: CudaTensor,model: DiffusionFeedForward,residual: Option[CudaTensor]): CudaTensor =
+    if residual.isEmpty then return feedForward(input,model)
+    check()
+    val shape=session.shape(input)
+    require(shape.rank>0 && shape.dims.last==model.inputWidth,"GEGLU input width mismatch")
+    require(session.shape(residual.get).dims==shape.dims.updated(shape.rank-1,model.outputWidth),"residual shape mismatch")
+    scope { use =>
+      val rows=shape.numel/model.inputWidth
+      val flat=use(session.reshape(input,Shape.from(Seq(rows,model.inputWidth))))
+      val gated=use(gatedProjection(flat,model,use));flat.close()
+      val rest=use(session.reshape(residual.get,Shape.from(Seq(rows,model.outputWidth))))
+      val output=use(linearAdd(gated,model.output,rest));gated.close();rest.close()
+      val result=use(session.reshape(output,Shape.from(shape.dims.updated(shape.rank-1,model.outputWidth))))
+      output.close()
+      result
+    }
+
+  /** GEGLU of the projection of rows; the bias of the projection is added inside the GEGLU kernel where that applies. */
+  private def gatedProjection(flat: CudaTensor,model: DiffusionFeedForward,use: Using.Manager): CudaTensor =
+    val fused=separableWeight(flat,model.projection,use).flatMap { w =>
+      val bias=weight(model.projection.bias.get,use)
+      val product=use(session.matmulTransposedB(flat,w))
+      if session.canGegluBias(product,bias) then
+        val gated=session.gegluBias(product,bias);product.close()
+        Some(gated)
+      else { product.close();None }
+    }
+    fused.getOrElse {
+      val projected=use(linear(flat,model.projection))
+      val gated=session.geglu(projected,fast=true);projected.close()
+      gated
+    }
+
   def feedForward(input: CudaTensor,model: DiffusionFeedForward): CudaTensor =
     check()
     val shape=session.shape(input)
@@ -411,6 +486,9 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       contextShape.dims(2)==weightShape(model.attn2.toK.weight).dims(1),"Transformer context batch/width mismatch")
     scope { use =>
       val norm1=use(layerNorm(input,model.norm1))
+      // Plain Float16 blocks: every residual add is folded into the projection before it (see linearAdd).
+      val foldResiduals=CudaDiffusionRuntime.foldedResiduals && input.half
+      var selfFolded=false
       val attn1=HyperTile.currentUnscoped.flatMap(_.split(shape.dims(1).toInt)) match
         case Some((nh,nw,h,w)) =>
           val b=shape.dims(0).toInt
@@ -450,23 +528,30 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
           val refOrLlliteOut=if aaOut.isEmpty && tdCtx.isEmpty && (ReferenceOnly.current.isDefined || ControlLLLite.current.isDefined) then
             Some(use(up(model.attn1(scalatorch.autograd.Variable(norm1.toCpu,requiresGrad=false),None).data)))
           else None
-          val out=aaOut.orElse(refOrLlliteOut).getOrElse(use(attention(norm1,model.attn1,tdCtx)))
+          val out=aaOut.orElse(refOrLlliteOut).getOrElse {
+            if foldResiduals then selfFolded=true
+            use(attention(norm1,model.attn1,tdCtx,if foldResiduals then Some(input) else None))
+          }
           tdCtx.foreach(_.close())
           out
       norm1.close()
-      val self=use(session.add(input,attn1));attn1.close()
+      val self=if selfFolded then attn1 else { val sum=use(session.add(input,attn1));attn1.close();sum }
       val norm2=use(layerNorm(self,model.norm2))
+      var crossFolded=false
       val attn2=if IpAdapter.current.isDefined || ControlLLLite.current.isDefined then
         val res=model.attn2(scalatorch.autograd.Variable(norm2.toCpu,requiresGrad=false),Some(scalatorch.autograd.Variable(context.toCpu,requiresGrad=false))).data
         norm2.close()
         use(up(res))
       else
-        val res=use(attention(norm2,model.attn2,Some(context)));norm2.close();res
-      val cross=use(session.add(self,attn2));self.close();attn2.close()
+        crossFolded=foldResiduals
+        val res=use(attention(norm2,model.attn2,Some(context),if foldResiduals then Some(self) else None));norm2.close();res
+      val cross=if crossFolded then { self.close();attn2 } else { val sum=use(session.add(self,attn2));self.close();attn2.close();sum }
       val norm3=use(layerNorm(cross,model.norm3))
-      val ff=use(feedForward(norm3,model.feedForward));norm3.close()
-      val result=use(session.add(cross,ff));cross.close();ff.close()
-      result
+      val result=use(feedForward(norm3,model.feedForward,if foldResiduals then Some(cross) else None));norm3.close()
+      if foldResiduals then { cross.close();result }
+      else
+        val sum=use(session.add(cross,result));cross.close();result.close()
+        sum
     }
 
   def spatialTransformer(input: CudaTensor,model: DiffusionSpatialTransformer,context: CudaTensor): CudaTensor =
@@ -906,6 +991,9 @@ private[models] object CudaDiffusionRuntime:
   @volatile private var precisionOverride: Option[Boolean]=None
   /** Self-attention projections as one matrix product, only with `SCALATORCH_CUDA_PACKED_PROJECTIONS=1`. Measured on an RTX 3090:
     * no gain (SD1.5 1.6 s and 4.1 s for 20 and 60 steps either way, SDXL 7.5 s) and more memory for the stacked weights, so off. */
+  /** Residual adds of a transformer block folded into the projection before them, and the GEGLU bias into the GEGLU kernel;
+    * `SCALATORCH_CUDA_FUSED_RESIDUAL=0` keeps the separate passes. */
+  private[models] val foldedResiduals: Boolean = !sys.env.get("SCALATORCH_CUDA_FUSED_RESIDUAL").contains("0")
   private[models] val packedProjections: Boolean = sys.env.get("SCALATORCH_CUDA_PACKED_PROJECTIONS").contains("1")
   /** Keep the key and value projections of the text context between steps, only with `SCALATORCH_CUDA_CONTEXT_CACHE=1`. The images
     * are pixel-identical with and without, and so are the times (RTX 3090: SD1.5 60 steps 4.1 s, batch of 4 4.5 s, SDXL 7.5-7.6 s),

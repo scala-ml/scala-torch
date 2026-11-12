@@ -155,7 +155,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),loaded) }
     loaded
   private lazy val halfKernels=Seq("h_f32_to_f16","h_f16_to_f32","h_fill","h_add","h_add5","h_scale","h_silu","h_geglu","h_transpose5",
-      "h_concat","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_im2col","h_im2col_batch","h_attention_fused_r1c3","h_attention_fused_r2c3","h_attention_fused_r4c3","h_attention_fused_r1c4","h_attention_fused_r2c4","h_attention_fused_r4c4","h_attention_fused_r1c5","h_attention_fused_r2c5","h_fill_rows","h_wmma_layout","h_softmax","h_gelu_erf","h_quick_gelu","h_softmax_causal").map { name =>
+      "h_concat","h_add_rows","h_geglu_bias","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_norm_rows","h_im2col","h_im2col_batch","h_attention_fused_r1c3","h_attention_fused_r2c3","h_attention_fused_r4c3","h_attention_fused_r1c4","h_attention_fused_r2c4","h_attention_fused_r4c4","h_attention_fused_r1c5","h_attention_fused_r2c5","h_fill_rows","h_wmma_layout","h_softmax","h_gelu_erf","h_quick_gelu","h_softmax_causal").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),halfModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -726,8 +726,8 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       // Tensor-core kernel that keeps the scores in shared memory (see h_attention_fused): no score matrix in device memory at all.
       // one kernel per number of 16-wide chunks (3 = width 33..48, 4 = 49..64, 5 = 65..80); other widths use cuBLAS
       val fusedChunks=(d+15)/16
-      if !causal && CudaSession.fusedHalfAttention && wmmaStandardLayout && qt%16==0 && kt%16==0 && qt>=16 && kt>=CudaSession.fusedHalfAttentionMinKeys &&
-          d>=33 && d<=80 && (dv+15)/16==fusedChunks && d%8==0 && dv%8==0 then // fragment loads need 16-byte aligned rows
+      if !causal && CudaSession.fusedHalfAttention && wmmaStandardLayout && qt%16==0 && (kt%16==0 || CudaSession.fusedHalfAttentionAnyKeys) && qt>=16 &&
+          kt>=CudaSession.fusedHalfAttentionMinKeys && d>=33 && d<=80 && (dv+15)/16==fusedChunks && d%8==0 && dv%8==0 then // fragment loads need 16-byte aligned rows
         val started=if profileEnabled then System.nanoTime() else 0L
         // query tiles per warp: more of them per read of the keys and values, as far as the width leaves registers for
         val tiles=Seq(4,2,1).find(t => t<=CudaSession.fusedHalfAttentionTiles && qt%(16*t)==0 && (t<4 || fusedChunks<=4)).get
@@ -927,17 +927,28 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   /** Float16 `x [m,k] * w [n,k]^T + bias [n]` as one pass over the output: the rows are filled with the bias and cuBLAS accumulates
     * the product on top (Float32 accumulation, one rounding). A separate broadcast add read the product and wrote it again.
     * None when this does not apply (not Float16, no cuBLAS, other shapes); the caller then multiplies and adds. */
-  def linearWithBias(x: CudaTensor,w: CudaTensor,bias: CudaTensor): Option[CudaTensor] =
-    validate(x);validate(w);validate(bias)
+  def linearWithBias(x: CudaTensor,w: CudaTensor,bias: CudaTensor,residual: Option[CudaTensor]=None): Option[CudaTensor] =
+    validate(x);validate(w);validate(bias);residual.foreach(validate)
+    // With `residual` [m,n] the result is `residual + x * w^T + bias`: the output starts as residual plus bias instead of the
+    // bias alone, which also replaces the separate add of a residual connection.
+    if residual.exists(r => !CudaSession.fusedResidual || !r.half || r.shape.rank!=2 || r.shape.dims(0)!=x.shape.dims(0) ||
+        r.shape.dims(1)!=w.shape.dims(0)) then return None
     if !(CudaSession.fusedLinearBias && cublas.isDefined && x.half && w.half && bias.half && x.shape.rank==2 && w.shape.rank==2 &&
         x.shape.dims(1)==w.shape.dims(1) && bias.shape.rank==1 && bias.shape.dims(0)==w.shape.dims(0)) then return None
     val m=x.shape.dims(0).toInt;val k=x.shape.dims(1).toInt;val n=w.shape.dims(0).toInt
     if m<=0 || n<=0 || k<=0 || m.toLong*n>Int.MaxValue then return None
     val result=allocate(Shape.from(Seq(m.toLong,n.toLong)),half=true)
     try
-      launch(m.toLong*n,halfKernels("h_fill_rows"),label="h_fill_rows",threadsPerBlock=256) { arena =>
-        Seq(bias.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++ Seq(m*n,n).map(v => arena.allocateFrom(JAVA_INT,v))
-      }
+      residual match
+        case Some(r) =>
+          launch(m.toLong*n,halfKernels("h_add_rows"),label="h_add_rows",threadsPerBlock=256) { arena =>
+            Seq(r.address,bias.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+              Seq(m*n,n).map(v => arena.allocateFrom(JAVA_INT,v))
+          }
+        case None =>
+          launch(m.toLong*n,halfKernels("h_fill_rows"),label="h_fill_rows",threadsPerBlock=256) { arena =>
+            Seq(bias.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++ Seq(m*n,n).map(v => arena.allocateFrom(JAVA_INT,v))
+          }
       val started=if profileEnabled then System.nanoTime() else 0L
       val t0=if launchStats then System.nanoTime() else 0L
       cublas.get.gemmHalfRowMajorBT(m,n,k,x.address,w.address,result.address,accumulate=true)
@@ -950,10 +961,11 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
 
-  /** True when `attentionTokensMajor` can run this shape: Float16, the fused kernels usable on this device, token counts that
-    * are multiples of 16, a head width of 40 to 80 that is a multiple of 8. */
+  /** True when `attentionTokensMajor` can run this shape: Float16, the fused kernels usable on this device, a query count that
+    * is a multiple of 16 (any key count: the 77 tokens of a text context are masked in the last tile), a head width of 40 to 80 that is a multiple of 8. */
   def canAttendTokensMajor(queries: Long,keys: Long,headWidth: Long): Boolean =
-    CudaSession.fusedHalfAttention && cublas.isDefined && wmmaStandardLayout && queries%16==0 && keys%16==0 && queries>=16 &&
+    CudaSession.fusedHalfAttention && cublas.isDefined && wmmaStandardLayout && queries%16==0 && queries>=16 &&
+      (keys%16==0 || CudaSession.fusedHalfAttentionAnyKeys) &&
       keys>=CudaSession.fusedHalfAttentionMinKeys && headWidth>=33 && headWidth<=80 && headWidth%8==0
 
   /** Attention on tensors as the projections of a transformer block leave them: q [batch, queries, heads * width] and k, v
@@ -1140,6 +1152,20 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     }
     execute(output,output.numel,kernels(if fast then "geglu_fast" else "geglu")) { (arena,result) =>
       Seq(input.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+        Seq(output.numel.toInt,width.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
+    }
+  /** True when `gegluBias` applies to this input and bias. */
+  def canGegluBias(input: CudaTensor,bias: CudaTensor): Boolean =
+    CudaSession.fusedResidual && input.half && bias.half && input.shape.rank>0 && bias.shape.rank==1 &&
+      input.shape.dims.last%2==0 && bias.shape.dims(0)==input.shape.dims.last
+  /** Float16 GEGLU of `input + bias` (bias along the final axis) in one kernel. Check `canGegluBias` first. */
+  def gegluBias(input: CudaTensor,bias: CudaTensor): CudaTensor =
+    validate(input);validate(bias)
+    require(canGegluBias(input,bias),"GEGLU with bias needs Float16 input and a bias of the final width")
+    val width=input.shape.dims.last/2
+    val output=Shape.from(input.shape.dims.updated(input.shape.rank-1,width))
+    hexecute(output,output.numel,"h_geglu_bias") { (arena,result) =>
+      Seq(input.address,bias.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
         Seq(output.numel.toInt,width.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
     }
   def multiply(a: CudaTensor,b: CudaTensor): CudaTensor = binary(a,b,1)
@@ -1350,6 +1376,18 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val rows=input.shape.numel/width
     if input.half then
       Seq(weight,bias).flatten.foreach(p => require(p.half,"Float16 GroupNorm needs Float16 affine parameters"))
+      // LayerNorm rows (one group, no spatial axes) that fit the registers of one block: statistics and result in one kernel.
+      if CudaSession.fusedLayerNorm && spatial==1 && width==channels && width<=2048 then
+        val result=allocate(input.shape,half=true)
+        try
+          launch(rows,halfKernels("h_norm_rows"),threadsPerBlock=256,threadsPerOutput=256,label="h_norm_rows") { arena =>
+            Seq(input.address,weight.fold(0L)(_.address),bias.fold(0L)(_.address),result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+              Seq(rows.toInt,width).map(v => arena.allocateFrom(JAVA_INT,v)) :+ arena.allocateFrom(JAVA_FLOAT,epsilon.toFloat)
+          }
+          return result
+        catch case error: Throwable =>
+          try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+          throw error
       return Using.resource(allocate(Shape.from(Seq(rows*2)))) { stats =>
         // One block per group: wide groups get 1024 threads, otherwise a block leaves most of its multiprocessor idle.
         val statThreads=if width>=4096 then 1024 else 256
@@ -1575,10 +1613,18 @@ object CudaSession:
   private[ffm] val fusedHalfAttention: Boolean = !sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_HALF").contains("0")
   private[ffm] val fusedHalfAttentionTiles: Int =
     sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_TILES").flatMap(_.trim.toIntOption).filter(_ >= 1).getOrElse(2)
+  /** Key counts that are not multiples of 16 (cross-attention to a text context) also use the fused kernel;
+    * `SCALATORCH_CUDA_FUSED_ATTENTION_ANY_KEYS=0` keeps cuBLAS, softmax and the transposed copies for them. */
+  private[ffm] val fusedHalfAttentionAnyKeys: Boolean = !sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_ANY_KEYS").contains("0")
   /** Fewest keys for the fused kernel (`SCALATORCH_CUDA_FUSED_ATTENTION_MIN_KEYS`). */
   private[ffm] val fusedHalfAttentionMinKeys: Int =
     sys.env.get("SCALATORCH_CUDA_FUSED_ATTENTION_MIN_KEYS").flatMap(_.trim.toIntOption).filter(_ >= 16).getOrElse(16)
   /** Bias folded into the Float16 matrix product of a linear layer (`SCALATORCH_CUDA_FUSED_LINEAR_BIAS=0` keeps the separate add). */
+  /** Residual connections and the GEGLU bias folded into the neighbouring kernel (`linearWithBias(residual=...)`, `gegluBias`);
+    * `SCALATORCH_CUDA_FUSED_RESIDUAL=0` keeps the separate passes. */
+  private[ffm] val fusedResidual: Boolean = !sys.env.get("SCALATORCH_CUDA_FUSED_RESIDUAL").contains("0")
+  /** Float16 LayerNorm in one kernel (`h_norm_rows`); `SCALATORCH_CUDA_FUSED_LAYERNORM=0` keeps statistics and apply apart. */
+  private[ffm] val fusedLayerNorm: Boolean = !sys.env.get("SCALATORCH_CUDA_FUSED_LAYERNORM").contains("0")
   private[ffm] val fusedLinearBias: Boolean = !sys.env.get("SCALATORCH_CUDA_FUSED_LINEAR_BIAS").contains("0")
   private[ffm] val processStart: Long = System.nanoTime()
   /** Milliseconds on the clock the session log uses (`SCALATORCH_CUDA_LAUNCH_STATS=1`). */

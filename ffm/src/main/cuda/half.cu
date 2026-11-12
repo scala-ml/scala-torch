@@ -49,6 +49,11 @@ __global__ void h_fill_rows(const __half* bias, __half* out, unsigned n, unsigne
   GRID_INDEX(i, n) out[i] = bias[i % width];
 }
 
+// out = a + bias along the last axis: the start of `residual + x W^T + bias`, on which cuBLAS accumulates the product.
+__global__ void h_add_rows(const __half* a, const __half* bias, __half* out, unsigned n, unsigned width) {
+  GRID_INDEX(i, n) st(out, i, ld(a, i) + ld(bias, i % width));
+}
+
 __global__ void h_add(const __half* a, const __half* b, __half* out, unsigned n) {
   GRID_INDEX(i, n) st(out, i, ld(a, i) + ld(b, i));
 }
@@ -100,6 +105,16 @@ __global__ void h_geglu(const __half* in, __half* out, unsigned n, unsigned widt
   st(out, i, v * gelu);
 }
 
+// GEGLU of `in + bias` (bias [2 * width]): the bias of the projection before it is added here, not in a pass of its own.
+__global__ void h_geglu_bias(const __half* in, const __half* bias, __half* out, unsigned n, unsigned width) {
+  GRID_INDEX(i, n)
+  unsigned row = i / width, col = i % width;
+  float v = ld(in, row * 2 * width + col) + ld(bias, col);
+  float g = ld(in, row * 2 * width + width + col) + ld(bias, width + col);
+  float gelu = 0.5f * g * (1.f + erff(g * 0.70710678118654752f));
+  st(out, i, v * gelu);
+}
+
 // Swap axes lo<hi of [outer, X, mid, Y, inner] -> [outer, Y, mid, X, inner]; sizes only.
 __global__ void h_transpose5(const unsigned short* in, unsigned short* out, unsigned n,
                              unsigned x, unsigned mid, unsigned y, unsigned inner) {
@@ -142,6 +157,43 @@ __global__ void h_groupnorm_stats(const __half* x, float2* stats, unsigned rows,
   for (unsigned i = threadIdx.x; i < width; i += blockDim.x) { float d = ld(base, i) - mean; q += d * d; }
   float var = block_sum(q, shared) / (float)width;
   if (threadIdx.x == 0) stats[row] = make_float2(mean, rsqrtf(var + eps));
+}
+
+// LayerNorm of rows up to 8 * blockDim wide in one kernel: a block reads its row once, keeps it in registers, and writes the
+// result (h_groupnorm_stats reads the row twice and h_groupnorm_apply a third time). Same sums in the same order as those two.
+__global__ void h_norm_rows(const __half* x, const __half* weight, const __half* bias, __half* out,
+                            unsigned rows, unsigned width, float eps) {
+  __shared__ float shared[32];
+  unsigned row = blockIdx.x;
+  if (row >= rows) return;
+  const __half* base = x + (unsigned long long)row * width;
+  __half* o = out + (unsigned long long)row * width;
+  float v[8];
+  float s = 0.f;
+  #pragma unroll
+  for (int j = 0; j < 8; ++j) {
+    unsigned i = threadIdx.x + j * blockDim.x;
+    v[j] = i < width ? ld(base, i) : 0.f;
+    s += v[j];
+  }
+  float mean = block_sum(s, shared) / (float)width;
+  float q = 0.f;
+  #pragma unroll
+  for (int j = 0; j < 8; ++j) {
+    unsigned i = threadIdx.x + j * blockDim.x;
+    if (i < width) { float d = v[j] - mean; q += d * d; }
+  }
+  float inv = rsqrtf(block_sum(q, shared) / (float)width + eps);
+  #pragma unroll
+  for (int j = 0; j < 8; ++j) {
+    unsigned i = threadIdx.x + j * blockDim.x;
+    if (i < width) {
+      float r = (v[j] - mean) * inv;
+      if (weight) r *= ld(weight, i);
+      if (bias) r += ld(bias, i);
+      st(o, i, r);
+    }
+  }
 }
 
 __global__ void h_groupnorm_apply(const __half* x, const __half* weight, const __half* bias, __half* out,
@@ -237,7 +289,7 @@ __global__ void h_quick_gelu(const __half* a, __half* out, unsigned n) {
 }
 
 // Attention without a score matrix in device memory (tensor cores, one pass over the keys, everything in registers).
-// q [heads, T, D], k [heads, S, D], v [heads, S, Dv], out [heads, T, Dv]; S is a multiple of 16, T of 16 * R, 16 <= D, Dv.
+// q [heads, T, D], k [heads, S, D], v [heads, S, Dv], out [heads, T, Dv]; T is a multiple of 16 * R, 16 <= D, Dv; any S >= 1.
 // A warp takes R tiles of 16 query rows of one head and visits the keys once, in tiles of 16. For every key tile the key and
 // value fragments are loaded once and used for all R query tiles: scores = Q K^T (tensor cores), then an online softmax (the
 // running row maximum is raised, the sums and results gathered so far are scaled down by exp(old - new), the scores become
@@ -316,15 +368,35 @@ __device__ __forceinline__ void att_body(const __half* q, const __half* k, const
   }
 
   for (unsigned key0 = 0; key0 < S; key0 += 16) {
+    // The last key tile of a key count that is not a multiple of 16 (the 77 tokens of a text context): the keys and values
+    // that exist are copied to shared memory and the rest is zero, so nothing is read past the tensors; their scores are
+    // masked below.
+    bool partial = key0 + 16 > S;
     #pragma unroll
     for (int c = 0; c < C; ++c) {
       unsigned d0 = (c == C - 1 && tail != 0) ? D - 16 : c * 16;
-      wmma::load_matrix_sync(kb[c], kh + (unsigned long long)key0 * strideQ + d0, strideQ);
+      if (partial) {
+        for (unsigned j = 0; j < 8; ++j) {
+          unsigned cc = col0 + j;
+          tile[row * 16 + cc] = key0 + row < S ? kh[(unsigned long long)(key0 + row) * strideQ + d0 + cc] : __float2half_rn(0.f);
+        }
+        __syncwarp();
+        wmma::load_matrix_sync(kb[c], tile, 16);
+        __syncwarp();
+      } else wmma::load_matrix_sync(kb[c], kh + (unsigned long long)key0 * strideQ + d0, strideQ);
     }
     #pragma unroll
     for (int c = 0; c < C; ++c) {
       unsigned e0v = (c == C - 1 && tailV != 0) ? Dv - 16 : c * 16;
-      wmma::load_matrix_sync(vb[c], vh + (unsigned long long)key0 * strideV + e0v, strideV);
+      if (partial) {
+        for (unsigned j = 0; j < 8; ++j) {
+          unsigned cc = col0 + j;
+          tile[row * 16 + cc] = key0 + row < S ? vh[(unsigned long long)(key0 + row) * strideV + e0v + cc] : __float2half_rn(0.f);
+        }
+        __syncwarp();
+        wmma::load_matrix_sync(vb[c], tile, 16);
+        __syncwarp();
+      } else wmma::load_matrix_sync(vb[c], vh + (unsigned long long)key0 * strideV + e0v, strideV);
     }
     #pragma unroll
     for (int r = 0; r < R; ++r) {
@@ -333,6 +405,15 @@ __device__ __forceinline__ void att_body(const __half* q, const __half* k, const
       for (int c = 0; c < C; ++c) wmma::mma_sync(acc, qa[r][c], kb[c], acc);
       float s0 = acc.x[0] * scale, s1 = acc.x[1] * scale, s2 = acc.x[2] * scale, s3 = acc.x[3] * scale;
       float s4 = acc.x[4] * scale, s5 = acc.x[5] * scale, s6 = acc.x[6] * scale, s7 = acc.x[7] * scale;
+      if (partial) {
+        // columns (keys of this tile) of the slots: 0, 2 -> 2t; 1, 3 -> 2t + 1; 4, 6 -> 2t + 8; 5, 7 -> 2t + 9, t = lane % 4
+        unsigned valid = S - key0, t2 = (lane & 3) * 2;
+        const float none = -3.402823466e+38f;
+        if (t2 >= valid) { s0 = none; s2 = none; }
+        if (t2 + 1 >= valid) { s1 = none; s3 = none; }
+        if (t2 + 8 >= valid) { s4 = none; s6 = none; }
+        if (t2 + 9 >= valid) { s5 = none; s7 = none; }
+      }
       float newLow = fmaxf(maxLow[r], att_group_max(fmaxf(fmaxf(s0, s1), fmaxf(s4, s5))));
       float newHigh = fmaxf(maxHigh[r], att_group_max(fmaxf(fmaxf(s2, s3), fmaxf(s6, s7))));
       float downLow = __expf(maxLow[r] - newLow), downHigh = __expf(maxHigh[r] - newHigh);
