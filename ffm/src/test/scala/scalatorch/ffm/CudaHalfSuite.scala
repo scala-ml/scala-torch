@@ -324,3 +324,131 @@ class CudaHalfSuite extends FunSuite:
     assertEquals(readShared(true),expected)           // after release it is uploaded again
     CudaSession.releaseSharedWeights(0)
   }
+
+  test("fused GroupNorm+SiLU, NCHW ResNet epilogues, 3x3/1x1 convs and FlashAttention-2 match references") {
+    gpu()
+    CudaSession.withDevice(maxBytes=2L<<30) { s =>
+      assume(s.hasCublas,"cuBLAS unavailable")
+      // 1. GroupNorm + SiLU vs separate groupNorm -> silu
+      for (n,c,h,w) <- Seq((2,320,16,16),(1,64,5,7)) do
+        val xCpu=tensor(data(n*c*h*w,101),n,c,h,w)
+        val gCpu=tensor(data(c,102,1.5),c)
+        val bCpu=tensor(data(c,103,0.5),c)
+        val x=s.uploadHalf(xCpu)
+        val gamma=s.uploadHalf(gCpu)
+        val beta=s.uploadHalf(bCpu)
+        val expected=Using.resource(s.upload(xCpu))(fx => Using.resource(s.upload(gCpu))(fg => Using.resource(s.upload(bCpu))(fb =>
+          Using.resource(s.groupNorm(fx,32,1e-5,Some(fg),Some(fb)))(g => Using.resource(s.silu(g))(_.toCpu.toFloatArray)))))
+        val actual=Using.resource(s.groupNormSilu(x,32,1e-5,Some(gamma),Some(beta)))(_.toCpu.toFloatArray)
+        val maxDiff=actual.zip(expected).map((a,b) => math.abs(a-b)).max
+        assert(maxDiff<1e-2,s"groupNormSilu max diff $maxDiff for ($n,$c,$h,$w)")
+        Seq(x,gamma,beta).foreach(_.close())
+
+      // 2. NCHW fused bias / bias+time / bias+residual+scale (even and odd spatial)
+      for (n,c,h,w) <- Seq((2,64,8,8),(1,32,5,7)) do
+        val x=s.uploadHalf(tensor(data(n*c*h*w,110),n,c,h,w))
+        val b1=s.uploadHalf(tensor(data(c,111,0.5),c))
+        val b4=s.reshape(b1,Shape.from(Seq(1L,c.toLong,1L,1L)))
+        val time=s.uploadHalf(tensor(data(n*c,112,0.5),n,c))
+        val time4=s.reshape(time,Shape.from(Seq(n.toLong,c.toLong,1L,1L)))
+        val sc=s.uploadHalf(tensor(data(n*c*h*w,113),n,c,h,w))
+        val expBias=Using.resource(s.addBroadcast(x,b4))(_.toCpu.toFloatArray)
+        val actBias=Using.resource(s.addNchwBias(x,b1))(_.toCpu.toFloatArray)
+        assert(actBias.zip(expBias).map((a,b) => math.abs(a-b)).max<1e-3)
+        val expTime=Using.resource(s.upload(tensor(data(n*c*h*w,110),n,c,h,w)))(fx =>
+          Using.resource(s.upload(tensor(data(c,111,0.5),c)))(fb =>
+            Using.resource(s.reshape(fb,Shape.from(Seq(1L,c.toLong,1L,1L))))(fb4 =>
+              Using.resource(s.upload(tensor(data(n*c,112,0.5),n,c)))(ft =>
+                Using.resource(s.reshape(ft,Shape.from(Seq(n.toLong,c.toLong,1L,1L))))(ft4 =>
+                  Using.resource(s.addBroadcast(fx,fb4))(t1 => Using.resource(s.addBroadcast(t1,ft4))(_.toCpu.toFloatArray)))))))
+        val actTime=Using.resource(s.addNchwBiasTime(x,Some(b1),time))(_.toCpu.toFloatArray)
+        val timeDiff=actTime.zip(expTime).map((a,b) => math.abs(a-b)).max
+        assert(timeDiff<5e-3,s"addNchwBiasTime max diff $timeDiff")
+        val expRes=Using.resource(s.upload(tensor(data(n*c*h*w,110),n,c,h,w)))(fx =>
+          Using.resource(s.upload(tensor(data(c,111,0.5),c)))(fb =>
+            Using.resource(s.reshape(fb,Shape.from(Seq(1L,c.toLong,1L,1L))))(fb4 =>
+              Using.resource(s.upload(tensor(data(n*c*h*w,113),n,c,h,w)))(fsc =>
+                Using.resource(s.addBroadcast(fx,fb4))(t1 => Using.resource(s.add(t1,fsc))(t2 => Using.resource(s.scale(t2,0.7071f))(_.toCpu.toFloatArray)))))))
+        val actRes=Using.resource(s.addNchwBiasRes(x,Some(b1),sc,0.7071f))(_.toCpu.toFloatArray)
+        val resDiff=actRes.zip(expRes).map((a,b) => math.abs(a-b)).max
+        assert(resDiff<5e-3,s"addNchwBiasRes max diff $resDiff")
+        Seq(x,b1,b4,time,time4,sc).foreach(_.close())
+
+      // 3. 3x3 s=1 p=1 conv (even and unaligned spatial) and 1x1 batched conv match FP32 on the same quantized operands
+      for (n,ci,co,h,w,kh) <- Seq((2,64,64,32,32,3),(1,32,32,17,29,3),(2,64,96,16,16,1)) do
+        val tx=tensor(data(n*ci*h*w,120,0.4),n,ci,h,w)
+        val tw=tensor(data(co*ci*kh*kh,121,0.4),co,ci,kh,kh)
+        val pad=if kh==3 then (1,1) else (0,0)
+        val cfg=Conv2dConfig(padding=pad)
+        val hx=s.uploadHalf(tx);val hw=s.uploadHalf(tw)
+        val expected=Using.resource(s.castToFloat(hx))(fx => Using.resource(s.castToFloat(hw))(fw => Using.resource(s.conv2d(fx,fw,cfg))(_.toCpu.toFloatArray)))
+        val actual=Using.resource(s.conv2dFast(hx,hw,cfg))(_.toCpu.toFloatArray)
+        Seq(hx,hw).foreach(_.close())
+        val maxRel=actual.zip(expected).map((a,b) => math.abs(a-b)/(1.0+math.abs(b))).max
+        assert(maxRel<4e-3,s"conv ($n,$ci,$co,$h,$w,k=$kh) max rel diff $maxRel")
+
+      // 4. FlashAttention-2 shapes against FP32 attention and bit-for-bit across layouts
+      for (b,h,qt,kt,d) <- Seq((2,8,256,256,40),(1,10,64,77,64),(1,4,256,128,80)) do
+        val qCpu=tensor(data(b*qt*h*d,130,0.5),b,qt,h*d)
+        val kCpu=tensor(data(b*kt*h*d,131,0.5),b,kt,h*d)
+        val vCpu=tensor(data(b*kt*h*d,132,0.5),b,kt,h*d)
+        val qH=s.uploadHalf(qCpu);val kH=s.uploadHalf(kCpu);val vH=s.uploadHalf(vCpu)
+        def toHm(t: CudaTensor,cnt: Int)=Using.resource(s.reshape(t,Shape.from(Seq(b.toLong,cnt.toLong,h.toLong,d.toLong))))(v => s.transpose(v,1,2))
+        val hmOut=Using.resource(toHm(qH,qt))(qh => Using.resource(toHm(kH,kt))(kh => Using.resource(toHm(vH,kt))(vh =>
+          Using.resource(s.scaledDotProductAttention(qh,kh,vh))(out => Using.resource(s.transpose(out,1,2))(_.toCpu.toFloatArray)))))
+        val tmOut=Using.resource(s.attentionTokensMajor(qH,kH,vH,h))(_.toCpu.toFloatArray)
+        assert(hmOut.sameElements(tmOut),s"FA2 layout invariance failed for ($b,$h,$qt,$kt,$d)")
+        val fp32Out=Using.resource(s.castToFloat(qH))(qf => Using.resource(s.castToFloat(kH))(kf => Using.resource(s.castToFloat(vH))(vf =>
+          Using.resource(toHm(qf,qt))(qh => Using.resource(toHm(kf,kt))(kh => Using.resource(toHm(vf,kt))(vh =>
+            Using.resource(s.scaledDotProductAttention(qh,kh,vh))(out => Using.resource(s.transpose(out,1,2))(_.toCpu.toFloatArray))))))))
+        val maxDiff=tmOut.zip(fp32Out).map((a,b) => math.abs(a-b)).max
+        assert(maxDiff<2e-2,s"FA2 vs FP32 max diff $maxDiff for ($b,$h,$qt,$kt,$d)")
+        Seq(qH,kH,vH).foreach(_.close())
+    }
+  }
+
+  test("GPU ToDo, TaylorSeer and T-GATE kernels match exact math references") {
+    gpu()
+    CudaSession.withDevice(maxBytes=1L<<30) { s =>
+      // GPU ToDo exact match to CPU floor((ty + 0.5)*srcH/dstH) on FP16 inputs
+      val (b,sh,sw,c)=(2,32,32,16)
+      val x=s.uploadHalf(tensor(data(b*sh*sw*c,140),b,sh*sw,c))
+      val f32In=Using.resource(s.castToFloat(x))(_.toCpu)
+      val cpuArr=scalatorch.Tensor.fromFloats(
+        f32In.toFloatArray,Shape.from(Seq(b.toLong,(sh*sw).toLong,c.toLong)))
+      val srcArr=cpuArr.toFloatArray
+      val dstH=21;val dstW=21;val outSeq=dstH*dstW;val inSeq=sh*sw
+      val expTodo=new Array[Float](b*outSeq*c)
+      for bi <- 0 until b; ty <- 0 until dstH; tx <- 0 until dstW do
+        val sy=math.floor((ty+0.5)*sh.toDouble/dstH).toInt.min(sh-1)
+        val sx=math.floor((tx+0.5)*sw.toDouble/dstW).toInt.min(sw-1)
+        System.arraycopy(srcArr,(bi*inSeq+sy*sw+sx)*c,expTodo,(bi*outSeq+ty*dstW+tx)*c,c)
+      val actTodo=Using.resource(s.downsampleTokensExact(x,sh,sw,dstH,dstW))(_.toCpu.toFloatArray)
+      assert(actTodo.sameElements(expTodo),"GPU ToDo did not match CPU exact coordinates bit-for-bit")
+      x.close()
+
+      // TaylorSeer diff + forecast1 + forecast2
+      val shape=Shape.from(Seq(1L,4L,8L,8L))
+      val f0=s.uploadHalf(tensor(Array.fill(256)(3.0f),1,4,8,8))
+      val d1=s.uploadHalf(tensor(Array.fill(256)(2.0f),1,4,8,8))
+      val d2=s.uploadHalf(tensor(Array.fill(256)(0.5f),1,4,8,8))
+      val prev=s.uploadHalf(tensor(Array.fill(256)(1.0f),1,4,8,8))
+      val diff=Using.resource(s.taylorDiff(f0,prev,0.5f))(_.toCpu.toFloatArray)
+      assert(diff.forall(v => math.abs(v-1.0f)<1e-3))
+      val p1=Using.resource(s.taylorForecast1(f0,d1,2.0f))(_.toCpu.toFloatArray)
+      assert(p1.forall(v => math.abs(v-7.0f)<2e-3))
+      val p2=Using.resource(s.taylorForecast2(f0,d1,d2,2.0f,6.0f))(_.toCpu.toFloatArray)
+      assert(p2.forall(v => math.abs(v-10.0f)<2e-3))
+      Seq(f0,d1,d2,prev).foreach(_.close())
+
+      // T-GATE avg + broadcast add
+      val attn=s.uploadHalf(tensor(Array.tabulate(64)(i => if i<32 then 1.0f else 3.0f),2,4,8))
+      val avg=s.tgateAvgHalf(attn,hasPair=true)
+      assertEquals(avg.shape,Shape.from(Seq(1L,4L,8L)))
+      assert(avg.toCpu.toFloatArray.forall(v => math.abs(v-2.0f)<1e-3))
+      val self=s.uploadHalf(tensor(Array.fill(64)(0.5f),2,4,8))
+      val out=Using.resource(s.tgateAddBroadcast(self,avg))(_.toCpu.toFloatArray)
+      assert(out.forall(v => math.abs(v-2.5f)<1e-3))
+      Seq(attn,avg,self).foreach(_.close())
+    }
+  }

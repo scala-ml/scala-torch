@@ -323,7 +323,8 @@ object UNetExecution:
                           // U-Net keep what it derives from it)
                           val (c,a)=repeatedConditioning(1,true)
                           (temporary(session.cat(Seq(input,input),0)),c,a)
-                      val output=temporary(unet.applyPrepared(stacked,timesteps,context,addition,None))
+                      val output=temporary(TGate.current.fold(unet.applyPrepared(stacked,timesteps,context,addition,None))(tg =>
+                        tg.withCfgPair(pair)(unet.applyPrepared(stacked,timesteps,context,addition,None))))
                       VaeExecution.checkCancelled(cancelled)
                       val both=output.toCpu
                       if !pair then Some(both)

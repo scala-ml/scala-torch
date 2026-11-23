@@ -98,3 +98,12 @@ class ClipFastTokenizerSuite extends munit.FunSuite:
     val values=output.data.toFloatArray
     assert(values.take(77*32).zip(values.drop(77*32)).exists((a,b) => math.abs(a-b)>1e-5))
   }
+
+  test("bundled CLIP BPE tokenizer loads from classpath without external files") {
+    val tok=ClipFastTokenizer.loadBundled()
+    val tok2=ClipFastTokenizer.loadBundled(padToken="!")
+    assertEquals(tok.baseVocabSize,49408)
+    assertEquals(tok2.padId,0L)
+    val encoded=tok.encode("a red cat on a blue chair").toVector
+    assert(encoded.nonEmpty && encoded.head==tok.bosId && encoded.last==tok.eosId)
+  }

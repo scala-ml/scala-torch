@@ -28,9 +28,20 @@ private[ffm] final class CudaDriver private (
   private lazy val launchHandle = handleFor("cuLaunchKernel", launchLayouts)
   private val syncLayouts: Seq[MemoryLayout] = Seq(ADDRESS)
   private lazy val syncHandle = handleFor("cuStreamSynchronize", syncLayouts)
+  private val ctxGetLayouts: Seq[MemoryLayout] = Seq(ADDRESS)
+  private lazy val ctxGetHandle = handleFor("cuCtxGetCurrent", ctxGetLayouts)
+  /** Current CUDA context pointer read into caller-owned 8-byte segment, without Arena allocation. */
+  def currentContext(cell: MemorySegment): Long =
+    val code: Int = ctxGetHandle.invokeExact(cell)
+    if code != 0 then throw IllegalStateException(s"cuCtxGetCurrent failed with CUDA status $code")
+    cell.get(ADDRESS, 0).address()
   /** One-dimensional kernel launch on `stream`, without boxing or a signature lookup. */
   def launchKernel(kernel: MemorySegment, blocks: Int, threadsPerBlock: Int, stream: MemorySegment, params: MemorySegment): Unit =
     val code: Int = launchHandle.invokeExact(kernel, blocks, 1, 1, threadsPerBlock, 1, 1, 0, stream, params, MemorySegment.NULL)
+    if code != 0 then throw IllegalStateException(s"cuLaunchKernel failed with CUDA status $code")
+  /** Generalized 3D grid/block kernel launch with dynamic shared memory on `stream`. */
+  def launchKernel3D(kernel: MemorySegment, gx: Int, gy: Int, gz: Int, bx: Int, by: Int, bz: Int, sharedBytes: Int, stream: MemorySegment, params: MemorySegment): Unit =
+    val code: Int = launchHandle.invokeExact(kernel, gx, gy, gz, bx, by, bz, sharedBytes, stream, params, MemorySegment.NULL)
     if code != 0 then throw IllegalStateException(s"cuLaunchKernel failed with CUDA status $code")
   def synchronize(stream: MemorySegment): Unit =
     val code: Int = syncHandle.invokeExact(stream)

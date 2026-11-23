@@ -6,6 +6,45 @@ final case class DpmSchedule(timesteps: Vector[Float],sigmas: Vector[Double]):
   require(sigmas.zip(sigmas.drop(1)).forall((a,b) => a>=b),"DPM sigmas must not increase")
 
 object DpmSchedule:
+  /** Ten evaluations at the discrete indices published in the AYS quickstart.
+    * This internal experimental schedule is not the NUI interpolated AYS schedule.
+    * The last published index is a nonzero-noise endpoint, not a model evaluation.
+    */
+  /** Evaluation steps for NVIDIA Align Your Steps (`steps == 10` matches exact published SD1.5/SDXL indices;
+    * other step counts log-interpolate cleanly across the 11 published paper sigmas with nonzero terminal sigma).
+    */
+  private[models] def paperAys(noise: DiffusionNoiseSchedule,sdxl: Boolean,steps: Int=10): DpmSchedule =
+    require(steps>0 && steps<=10000,"invalid AYS inference step count")
+    require(noise.betas.size==1000,"paper AYS indices require 1000 training timesteps")
+    val expected=DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true).betas
+    require(noise.betas.zip(expected).forall((a,b)=>math.abs(a-b)<=1e-7),
+      "paper AYS indices require the standard SD scaled-linear beta schedule")
+    val indices=if sdxl then Vector(999,845,730,587,443,310,193,116,53,13,0)
+      else Vector(999,850,736,645,545,455,343,233,124,24,0)
+    if steps==10 then return DpmSchedule(indices.dropRight(1).map(_.toFloat),indices.map(noise.sigmas))
+    val base=indices.map(noise.sigmas)
+    val levels=Vector.tabulate(steps+1) { i =>
+      val pos=i.toDouble*(base.size-1)/steps
+      val lo=math.floor(pos).toInt
+      val hi=math.min(lo+1,base.size-1)
+      val frac=pos-lo
+      math.exp(math.log(base(lo))*(1.0-frac)+math.log(base(hi))*frac)
+    }
+    val training=noise.floatTrainingSigmas
+    val logs=training.map(s => math.log(s.toDouble).toFloat)
+    val times=levels.dropRight(1).map { sigma =>
+      if logs.size==1 then 0f
+      else
+        val target=math.log(sigma)
+        var lo=0;var hi=logs.size-1
+        while hi-lo>1 do
+          val mid=(lo+hi)/2
+          if logs(mid).toDouble<=target then lo=mid else hi=mid
+        val weight=math.max(0.0,math.min(1.0,(target-logs(lo))/(logs(hi)-logs(lo))))
+        math.rint(lo+weight).toFloat
+    }
+    DpmSchedule(times,levels)
+
   /** Diffusers leading spacing used by the DDIM schedule fallback. */
   def leading(noise: DiffusionNoiseSchedule,steps: Int,stepsOffset: Int=0): DpmSchedule =
     require(steps>0 && steps<=10000,"invalid DPM inference step count")

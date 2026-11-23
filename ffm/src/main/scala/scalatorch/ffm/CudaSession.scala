@@ -19,6 +19,7 @@ final class CudaTensor private[ffm] (private[ffm] val session: CudaSession,
     val shape: Shape, private[ffm] val allocation: CudaAllocation,val half: Boolean=false) extends AutoCloseable:
   private[ffm] def address: Long = allocation.address
   private[ffm] var released=false
+  def isReleased: Boolean = released
   def toCpu: Tensor[Float] = session.download(this)
   def matmul(other: CudaTensor): CudaTensor = session.matmul(this,other)
   def close(): Unit = session.release(this)
@@ -156,8 +157,33 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     moduleNanos+=System.nanoTime()-moduleStarted
     driver.cleanup { driver.call("cuModuleUnload",Seq(ADDRESS),loaded) }
     loaded
-  private lazy val halfKernels=Seq("h_f32_to_f16","h_f16_to_f32","h_fill","h_add","h_add5","h_scale","h_silu","h_geglu","h_transpose5",
-      "h_concat","h_add_rows","h_geglu_bias","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_norm_rows","h_im2col","h_im2col_batch","h_attention_fused_r1c3","h_attention_fused_r2c3","h_attention_fused_r4c3","h_attention_fused_r1c4","h_attention_fused_r2c4","h_attention_fused_r4c4","h_attention_fused_r1c5","h_attention_fused_r2c5","h_fill_rows","h_wmma_layout","h_softmax","h_gelu_erf","h_quick_gelu","h_softmax_causal").map { name =>
+  private val scratchArena=Arena.ofConfined()
+  private val ctxCell=scratchArena.allocate(ADDRESS)
+  private val argSlots=scratchArena.allocate(8L*24L,8L)
+  private val paramPtrs=
+    val ptrs=scratchArena.allocate(ADDRESS,24L)
+    var i=0
+    while i<24 do { ptrs.setAtIndex(ADDRESS,i.toLong,argSlots.asSlice(i.toLong*8L,8L));i+=1 }
+    ptrs
+  private[ffm] final class ArgBuilder:
+    private var n=0
+    def reset(): ArgBuilder={ n=0;this }
+    def ptr(v: Long): ArgBuilder={ argSlots.set(JAVA_LONG,n.toLong*8L,v);n+=1;this }
+    def i32(v: Int): ArgBuilder={ argSlots.set(JAVA_INT,n.toLong*8L,v);n+=1;this }
+    def f32(v: Float): ArgBuilder={ argSlots.set(JAVA_FLOAT,n.toLong*8L,v);n+=1;this }
+    def f64(v: Double): ArgBuilder={ argSlots.set(JAVA_DOUBLE,n.toLong*8L,v);n+=1;this }
+  private val argBuilder=new ArgBuilder
+  private lazy val halfKernels=Seq("h_f32_to_f16","h_f16_to_f32","h_fill","h_add","h_add5","h_scale","h_silu",
+      "h_add_nchw_bias","h_add_nchw_bias_time","h_add_nchw_bias_res",
+      "h_geglu","h_geglu_bias","h_transpose5",
+      "h_concat","h_add_rows","h_fill_rows","h_resize_nearest","h_groupnorm_stats","h_groupnorm_apply","h_groupnorm_apply_silu","h_norm_rows",
+      "h_im2col","h_im2col_batch","h_im2col_3x3_s1_p1_batch",
+      "h_attention_fused_r1c3","h_attention_fused_r2c3","h_attention_fused_r4c3",
+      "h_attention_fused_r1c4","h_attention_fused_r2c4","h_attention_fused_r4c4",
+      "h_attention_fused_r1c5","h_attention_fused_r2c5",
+      "h_fa2_w4r1c3","h_fa2_w4r1c4","h_fa2_w4r1c5","h_fa2_w4r2c3","h_fa2_w4r2c4",
+      "h_downsample_tokens_exact","h_taylor_diff","h_taylor_forecast1","h_taylor_forecast2","h_tgate_avg_half","h_tgate_add_broadcast",
+      "h_wmma_layout","h_softmax","h_gelu_erf","h_quick_gelu","h_softmax_causal").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),halfModule,driver.arena.allocateFrom(name))
   }.toMap
   private val stream=driver.pointerResult("cuStreamCreate",Seq(JAVA_INT),Int.box(1))
@@ -184,12 +210,8 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   private def check(): Unit =
     threadCheck()
     if closed then throw IllegalStateException("CUDA session is closed")
-    Using.resource(Arena.ofConfined()) { arena =>
-      val current=arena.allocate(ADDRESS)
-      driver.call("cuCtxGetCurrent",Seq(ADDRESS),current)
-      if current.get(ADDRESS,0).address() != context.address() then
-        throw IllegalStateException("CUDA session context is not current")
-    }
+    if driver.currentContext(ctxCell) != context.address() then
+      throw IllegalStateException("CUDA session context is not current")
   private def validate(tensor: CudaTensor): Unit =
     check()
     require(tensor.session eq this,"tensor belongs to another CUDA session")
@@ -690,18 +712,20 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   def castToHalf(value: CudaTensor): CudaTensor =
     validate(value)
     require(!value.half,"tensor is already Float16")
-    hexecute(value.shape,value.shape.numel,"h_f32_to_f16") { (arena,result) =>
-      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) :+ arena.allocateFrom(JAVA_INT,value.shape.numel.toInt)
+    val n=value.shape.numel
+    hexecuteFast(value.shape,vec2(n),"h_f32_to_f16") { (b,result) =>
+      b.ptr(value.address).ptr(result.address).i32(n.toInt)
     }
 
   /** Float16 to Float32 copy of the same shape. */
   def castToFloat(value: CudaTensor): CudaTensor =
     validate(value)
     require(value.half,"tensor is not Float16")
+    val n=value.shape.numel
     val result=allocate(value.shape)
     try
-      launch(value.shape.numel,halfKernels("h_f16_to_f32"),256,1,"h_f16_to_f32") { arena =>
-        Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) :+ arena.allocateFrom(JAVA_INT,value.shape.numel.toInt)
+      launchFast(vec2(n),halfKernels("h_f16_to_f32"),256,1,"h_f16_to_f32") { b =>
+        b.ptr(value.address).ptr(result.address).i32(n.toInt)
       }
       result
     catch case error: Throwable =>
@@ -712,9 +736,18 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   def uploadHalf(source: Tensor[Float]): CudaTensor = Using.resource(upload(source))(castToHalf)
 
   def fillHalf(shape: Shape,value: Float): CudaTensor =
-    hexecute(shape,shape.numel,"h_fill") { (arena,result) =>
-      Seq(arena.allocateFrom(JAVA_LONG,result.address),arena.allocateFrom(JAVA_INT,shape.numel.toInt),arena.allocateFrom(JAVA_FLOAT,value))
+    hexecuteFast(shape,shape.numel,"h_fill") { (b,result) =>
+      b.ptr(result.address).i32(shape.numel.toInt).f32(value)
     }
+
+  /** Single shared kernel dispatcher for `attentionHalf`, `attentionTokensMajor`, and `attentionPacked` (keeps layout invariance bit-exact). */
+  private def selectFusedAttention(qt: Int,kt: Int,d: Int): (String,Int,Int) =
+    val chunks=(d+15)/16
+    if CudaSession.flashAttention2 && chunks>=4 && (qt>=256 || kt>=256) then
+      if qt%128==0 && chunks==4 && qt>=2048 && kt>=1024 then return (s"h_fa2_w4r2c$chunks",128,128)
+      if qt%64==0 && (chunks>=5 || kt<=512) then return (s"h_fa2_w4r1c$chunks",128,64)
+    val tiles=Seq(4,2,1).find(t => t<=CudaSession.fusedHalfAttentionTiles && qt%(16*t)==0 && (t<4 || chunks<=4)).get
+    (s"h_attention_fused_r${tiles}c$chunks",32,16*tiles)
 
   /** Non-causal attention over [batch, heads, tokens, width] Float16 tensors via cuBLAS and a block softmax. */
   private def attentionHalf(query: CudaTensor,key: CudaTensor,value: CudaTensor,output: Shape,causal: Boolean,queryStart: Int): CudaTensor =
@@ -725,19 +758,15 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val batch=(q(0)*q(1)).toInt;val qt=q(2).toInt;val kt=k(2).toInt;val d=q(3).toInt;val dv=v(3).toInt
     val result=allocate(output,half=true)
     try
-      // Tensor-core kernel that keeps the scores in shared memory (see h_attention_fused): no score matrix in device memory at all.
-      // one kernel per number of 16-wide chunks (3 = width 33..48, 4 = 49..64, 5 = 65..80); other widths use cuBLAS
+      // Tensor-core kernel that keeps the scores in shared memory (see h_attention_fused / h_fa2): no score matrix in device memory.
       val fusedChunks=(d+15)/16
       if !causal && CudaSession.fusedHalfAttention && wmmaStandardLayout && qt%16==0 && (kt%16==0 || CudaSession.fusedHalfAttentionAnyKeys) && qt>=16 &&
           kt>=CudaSession.fusedHalfAttentionMinKeys && d>=33 && d<=80 && (dv+15)/16==fusedChunks && d%8==0 && dv%8==0 then // fragment loads need 16-byte aligned rows
-        val started=if profileEnabled then System.nanoTime() else 0L
-        // query tiles per warp: more of them per read of the keys and values, as far as the width leaves registers for
-        val tiles=Seq(4,2,1).find(t => t<=CudaSession.fusedHalfAttentionTiles && qt%(16*t)==0 && (t<4 || fusedChunks<=4)).get
-        val kernelName=s"h_attention_fused_r${tiles}c$fusedChunks"
-        launch(batch.toLong*(qt/(16*tiles)),halfKernels(kernelName),32,32,kernelName) { arena =>
-          Seq(query.address,key.address,value.address,result.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
-            (Seq(batch,qt,kt,d,dv).map(x => arena.allocateFrom(JAVA_INT,x)) :+
-            arena.allocateFrom(JAVA_FLOAT,(1.0/math.sqrt(d.toDouble)).toFloat)) ++ Seq(0,0,0).map(x => arena.allocateFrom(JAVA_INT,x))
+        val (kernelName,threads,qPerBlock)=selectFusedAttention(qt,kt,d)
+        launchFast(batch.toLong*(qt/qPerBlock),halfKernels(kernelName),threads,threads,kernelName) { b =>
+          b.ptr(query.address).ptr(key.address).ptr(value.address).ptr(result.address)
+            .i32(batch).i32(qt).i32(kt).i32(d).i32(dv)
+            .f32((1.0/math.sqrt(d.toDouble)).toFloat).i32(0).i32(0).i32(0)
         }
         return result
       // The score matrix never exists as a whole: heads are processed in groups and, when even one head does not fit the scratch
@@ -764,13 +793,12 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
               driver.synchronize(stream)
               record("half_attention_scores",started)
             if causal then
-              launch(n.toLong*qb,halfKernels("h_softmax_causal"),256,256,"h_softmax_causal") { arena =>
-                Seq(arena.allocateFrom(JAVA_LONG,scratch.address),arena.allocateFrom(JAVA_INT,(n.toLong*qb).toInt),
-                  arena.allocateFrom(JAVA_INT,kt),arena.allocateFrom(JAVA_INT,qb),arena.allocateFrom(JAVA_INT,queryStart))
+              launchFast(n.toLong*qb,halfKernels("h_softmax_causal"),256,256,"h_softmax_causal") { b =>
+                b.ptr(scratch.address).i32((n.toLong*qb).toInt).i32(kt).i32(qb).i32(queryStart)
               }
             else
-              launch(n.toLong*qb,halfKernels("h_softmax"),256,256,"h_softmax") { arena =>
-                Seq(arena.allocateFrom(JAVA_LONG,scratch.address),arena.allocateFrom(JAVA_INT,(n.toLong*qb).toInt),arena.allocateFrom(JAVA_INT,kt))
+              launchFast(n.toLong*qb,halfKernels("h_softmax"),256,256,"h_softmax") { b =>
+                b.ptr(scratch.address).i32((n.toLong*qb).toInt).i32(kt)
               }
             val started2=if profileEnabled then System.nanoTime() else 0L
             cublas.get.gemmHalfStridedBatched(0,0,dv,qb,kt,1f,va,dv,kt.toLong*dv,scratch.address,kt,qb.toLong*kt,ra,dv,qt.toLong*dv,n)
@@ -941,15 +969,15 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     if m<=0 || n<=0 || k<=0 || m.toLong*n>Int.MaxValue then return None
     val result=allocate(Shape.from(Seq(m.toLong,n.toLong)),half=true)
     try
+      val mn=m.toLong*n
       residual match
         case Some(r) =>
-          launch(m.toLong*n,halfKernels("h_add_rows"),label="h_add_rows",threadsPerBlock=256) { arena =>
-            Seq(r.address,bias.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
-              Seq(m*n,n).map(v => arena.allocateFrom(JAVA_INT,v))
+          launchFast(vec2(mn),halfKernels("h_add_rows"),256,1,"h_add_rows") { b =>
+            b.ptr(r.address).ptr(bias.address).ptr(result.address).i32(m*n).i32(n)
           }
         case None =>
-          launch(m.toLong*n,halfKernels("h_fill_rows"),label="h_fill_rows",threadsPerBlock=256) { arena =>
-            Seq(bias.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++ Seq(m*n,n).map(v => arena.allocateFrom(JAVA_INT,v))
+          launchFast(vec2(mn),halfKernels("h_fill_rows"),256,1,"h_fill_rows") { b =>
+            b.ptr(bias.address).ptr(result.address).i32(m*n).i32(n)
           }
       val started=if profileEnabled then System.nanoTime() else 0L
       val t0=if launchStats then System.nanoTime() else 0L
@@ -981,17 +1009,14 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       heads>0 && q(2)%heads==0,"tokens-major attention shape mismatch")
     val width=(q(2)/heads).toInt;val qt=q(1).toInt;val kt=k(1).toInt
     require(canAttendTokensMajor(qt,kt,width),"shape not supported by the fused attention kernels")
-    val chunks=(width+15)/16
-    val tiles=Seq(4,2,1).find(t => t<=CudaSession.fusedHalfAttentionTiles && qt%(16*t)==0 && (t<4 || chunks<=4)).get
-    val kernelName=s"h_attention_fused_r${tiles}c$chunks"
+    val (kernelName,threads,qPerBlock)=selectFusedAttention(qt,kt,width)
     val all=(q(0)*heads).toInt
     val result=allocate(query.shape,half=true)
     try
-      launch(all.toLong*(qt/(16*tiles)),halfKernels(kernelName),32,32,kernelName) { arena =>
-        Seq(query.address,key.address,value.address,result.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
-          Seq(all,qt,kt,width,width).map(x => arena.allocateFrom(JAVA_INT,x)) :+
-          arena.allocateFrom(JAVA_FLOAT,(1.0/math.sqrt(width.toDouble)).toFloat) :+ arena.allocateFrom(JAVA_INT,heads) :+
-          arena.allocateFrom(JAVA_INT,0) :+ arena.allocateFrom(JAVA_INT,0)
+      launchFast(all.toLong*(qt/qPerBlock),halfKernels(kernelName),threads,threads,kernelName) { b =>
+        b.ptr(query.address).ptr(key.address).ptr(value.address).ptr(result.address)
+          .i32(all).i32(qt).i32(kt).i32(width).i32(width)
+          .f32((1.0/math.sqrt(width.toDouble)).toFloat).i32(heads).i32(0).i32(0)
       }
       result
     catch case error: Throwable =>
@@ -1008,17 +1033,14 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     require(dims.size==3 && heads>0 && dims(2)%(3L*heads)==0,"packed attention shape mismatch")
     val inner=(dims(2)/3).toInt;val width=inner/heads;val tokens=dims(1).toInt
     require(canAttendTokensMajor(tokens,tokens,width),"shape not supported by the fused attention kernels")
-    val chunks=(width+15)/16
-    val tiles=Seq(4,2,1).find(t => t<=CudaSession.fusedHalfAttentionTiles && tokens%(16*t)==0 && (t<4 || chunks<=4)).get
-    val kernelName=s"h_attention_fused_r${tiles}c$chunks"
+    val (kernelName,threads,qPerBlock)=selectFusedAttention(tokens,tokens,width)
     val all=(dims(0)*heads).toInt
     val result=allocate(Shape.from(Seq(dims(0),dims(1),inner.toLong)),half=true)
     try
-      launch(all.toLong*(tokens/(16*tiles)),halfKernels(kernelName),32,32,kernelName) { arena =>
-        Seq(packed.address,packed.address+inner*2L,packed.address+inner*4L,result.address).map(x => arena.allocateFrom(JAVA_LONG,x)) ++
-          Seq(all,tokens,tokens,width,width).map(x => arena.allocateFrom(JAVA_INT,x)) ++
-          Seq(arena.allocateFrom(JAVA_FLOAT,(1.0/math.sqrt(width.toDouble)).toFloat)) ++
-          Seq(heads,3*inner,inner).map(x => arena.allocateFrom(JAVA_INT,x))
+      launchFast(all.toLong*(tokens/qPerBlock),halfKernels(kernelName),threads,threads,kernelName) { b =>
+        b.ptr(packed.address).ptr(packed.address+inner*2L).ptr(packed.address+inner*4L).ptr(result.address)
+          .i32(all).i32(tokens).i32(tokens).i32(width).i32(width)
+          .f32((1.0/math.sqrt(width.toDouble)).toFloat).i32(heads).i32(3*inner).i32(inner)
       }
       result
     catch case error: Throwable =>
@@ -1103,8 +1125,9 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     require(a.half==b.half,"arithmetic needs one element type")
     if a.half then
       require(op==0,"Float16 supports addition only")
-      return hexecute(a.shape,a.shape.numel,"h_add") { (arena,result) =>
-        Seq(a.address,b.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) :+ arena.allocateFrom(JAVA_INT,a.shape.numel.toInt)
+      val n=a.shape.numel
+      return hexecuteFast(a.shape,vec2(n),"h_add") { (bldr,result) =>
+        bldr.ptr(a.address).ptr(b.address).ptr(result.address).i32(n.toInt)
       }
     execute(a.shape,a.shape.numel,kernels("binary")) { (arena,result) =>
       Seq(a.address,b.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
@@ -1129,11 +1152,17 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     if rank<=5 then
       def lead(v: Vector[Long],fill: Long)=Vector.fill(5-rank)(fill)++v
       val dimsP=lead(output.dims,1L);val aS=lead(strides(ad),0L);val bS=lead(strides(bd),0L)
-      val broadcastArgs=(arena: Arena,result: CudaTensor) =>
+      if a.half then
+        return hexecuteFast(output,output.numel,"h_add5") { (bldr,result) =>
+          bldr.ptr(a.address).ptr(b.address).ptr(result.address).i32(output.numel.toInt)
+          dimsP.foreach(v => bldr.i32(v.toInt))
+          aS.foreach(v => bldr.i32(v.toInt))
+          bS.foreach(v => bldr.i32(v.toInt))
+        }
+      return execute(output,output.numel,kernels("broadcast_add5"),threadsPerBlock=256) { (arena,result) =>
         Seq(a.address,b.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
           (Vector(output.numel)++dimsP++aS++bS).map(v => arena.allocateFrom(JAVA_INT,v.toInt))
-      return if a.half then hexecute(output,output.numel,"h_add5")(broadcastArgs)
-        else execute(output,output.numel,kernels("broadcast_add5"),threadsPerBlock=256)(broadcastArgs)
+      }
     require(!a.half,"Float16 broadcast supports up to five axes")
     withInts((output.dims++strides(ad)++strides(bd)).map(_.toInt).toArray) { metadata =>
       execute(output,output.numel,kernels("broadcast_add")) { (arena,result) =>
@@ -1148,9 +1177,8 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       input.shape.dims.last<=Int.MaxValue,"GEGLU requires a positive even final width")
     val width=input.shape.dims.last/2
     val output=Shape.from(input.shape.dims.updated(input.shape.rank-1,width))
-    if input.half then return hexecute(output,output.numel,"h_geglu") { (arena,result) =>
-      Seq(input.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
-        Seq(output.numel.toInt,width.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
+    if input.half then return hexecuteFast(output,output.numel,"h_geglu") { (b,result) =>
+      b.ptr(input.address).ptr(result.address).i32(output.numel.toInt).i32(width.toInt)
     }
     execute(output,output.numel,kernels(if fast then "geglu_fast" else "geglu")) { (arena,result) =>
       Seq(input.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
@@ -1166,9 +1194,8 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     require(canGegluBias(input,bias),"GEGLU with bias needs Float16 input and a bias of the final width")
     val width=input.shape.dims.last/2
     val output=Shape.from(input.shape.dims.updated(input.shape.rank-1,width))
-    hexecute(output,output.numel,"h_geglu_bias") { (arena,result) =>
-      Seq(input.address,bias.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
-        Seq(output.numel.toInt,width.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
+    hexecuteFast(output,output.numel,"h_geglu_bias") { (bldr,result) =>
+      bldr.ptr(input.address).ptr(bias.address).ptr(result.address).i32(output.numel.toInt).i32(width.toInt)
     }
   def multiply(a: CudaTensor,b: CudaTensor): CudaTensor = binary(a,b,1)
   def fill(shape: Shape,value: Float): CudaTensor =
@@ -1190,10 +1217,11 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     }
   def scale(value: CudaTensor,scalar: Float): CudaTensor =
     validate(value)
-    if value.half then return hexecute(value.shape,value.shape.numel,"h_scale") { (arena,result) =>
-      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
-        Seq(arena.allocateFrom(JAVA_INT,value.shape.numel.toInt),arena.allocateFrom(JAVA_FLOAT,scalar))
-    }
+    if value.half then
+      val n=value.shape.numel
+      return hexecuteFast(value.shape,vec2(n),"h_scale") { (b,result) =>
+        b.ptr(value.address).ptr(result.address).i32(n.toInt).f32(scalar)
+      }
     execute(value.shape,value.shape.numel,kernels("scale")) { (arena,result) =>
       Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
         Seq(arena.allocateFrom(JAVA_INT,value.shape.numel.toInt),arena.allocateFrom(JAVA_FLOAT,scalar))
@@ -1218,10 +1246,9 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       val k=g.cg.toLong*g.kh*g.kw
       val outputChannelsPerGroup=g.co/config.groups
       val direct=g.kh==1 && g.kw==1 && config.stride==((1,1)) && config.padding==((0,0)) && config.dilation==((1,1))
+      val conv3x3S1P1=g.kh==3 && g.kw==3 && config.stride==((1,1)) && config.padding==((1,1)) && config.dilation==((1,1)) && config.groups==1 && g.ci<=65535
       val output=allocate(g.shape,half=true)
       try
-        // cuDNN convolves without the im2col copy and with tensor-core kernels made for convolution.
-        // 1x1 convolutions go there as well when there is more than one sample: the built-in path calls cuBLAS once per sample.
         val planned=if direct && g.n==1 then None else cudnn.flatMap(_.plan(g.n,g.ci,g.h,g.w,g.co,g.cg,g.kh,g.kw,g.oh,g.ow,
           config.stride,config.padding,config.dilation,config.groups,math.max(0L,(maxBytes-used)/2)))
         if planned.nonEmpty then
@@ -1240,16 +1267,15 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
           val weightOffset=group.toLong*outputChannelsPerGroup*k*2
           val outputOffset=((batch.toLong*g.co+group.toLong*outputChannelsPerGroup)*spatial+positionStart)*2
           val started=if profileEnabled then System.nanoTime() else 0L
+          val t0=if launchStats then System.nanoTime() else 0L
           cublas.get.gemmHalfRowMajor(outputChannelsPerGroup,positions,k.toInt,weight.address+weightOffset,k.toInt,
             inputAddress,ldb,output.address+outputOffset,spatial.toInt)
+          if launchStats then { libraryNanos+=System.nanoTime()-t0;libraryCalls+=1 }
           if profileEnabled then
             driver.synchronize(stream)
             record(s"half_conv_gemm[$outputChannelsPerGroup,$positions,$k]",started)
-        // Several samples as ONE GEMM: columns [k, S*P], product [co, S*P], then the sample and channel axes are swapped into the
-        // output. cuBLAS is far more efficient on the larger matrix (SD1.5 shapes: 27-30 TFLOPS per sample, about 50 on big ones)
-        // and the call count drops from one per sample to one per chunk.
         val perSample=k*spatial
-        val mergedCap=math.min(134217728L,(maxBytes-used)/4)
+        val mergedCap=math.min(268435456L,(maxBytes-used)/3)
         val samplesPerChunk=if perSample>0 then math.min(g.n.toLong,mergedCap/math.max(1L,perSample+g.co.toLong*spatial)) else 0L
         if !direct && CudaSession.mergedConvolution && config.groups==1 && g.n>1 && samplesPerChunk>=2 &&
             perSample*samplesPerChunk<=Int.MaxValue && g.co.toLong*spatial*samplesPerChunk<=Int.MaxValue then
@@ -1260,26 +1286,42 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
                 val samples=math.min(samplesPerChunk,g.n.toLong-start).toInt
                 val row=samples.toLong*spatial
                 val count=k*row
-                launch(count,halfKernels("h_im2col_batch"),label="h_im2col_batch",threadsPerBlock=256) { arena =>
-                  Seq(input.address,columns.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
-                    Seq(count.toInt,g.ci,g.h,g.w,g.kh,g.kw,g.oh,g.ow,config.stride._1,config.stride._2,
-                      config.padding._1,config.padding._2,config.dilation._1,config.dilation._2,start,samples)
-                      .map(v => arena.allocateFrom(JAVA_INT,v))
-                }
+                if conv3x3S1P1 && samples<=65535 then
+                  val tiles=((g.w+31)/32)*((g.h+15)/16)
+                  launchGridFast(tiles,g.ci,samples,256,1,1,0,halfKernels("h_im2col_3x3_s1_p1_batch"),"h_im2col_3x3_s1_p1_batch") { b =>
+                    b.ptr(input.address).ptr(columns.address).i32(g.ci).i32(g.h).i32(g.w).i32(start).i32(samples)
+                  }
+                else
+                  launchFast(count,halfKernels("h_im2col_batch"),256,1,"h_im2col_batch") { b =>
+                    b.ptr(input.address).ptr(columns.address).i32(count.toInt).i32(g.ci).i32(g.h).i32(g.w)
+                      .i32(g.kh).i32(g.kw).i32(g.oh).i32(g.ow).i32(config.stride._1).i32(config.stride._2)
+                      .i32(config.padding._1).i32(config.padding._2).i32(config.dilation._1).i32(config.dilation._2)
+                      .i32(start).i32(samples)
+                  }
                 val started=if profileEnabled then System.nanoTime() else 0L
+                val t0=if launchStats then System.nanoTime() else 0L
                 cublas.get.gemmHalfRowMajor(g.co,row.toInt,k.toInt,weight.address,k.toInt,columns.address,row.toInt,product.address,row.toInt)
+                if launchStats then { libraryNanos+=System.nanoTime()-t0;libraryCalls+=1 }
                 if profileEnabled then
                   driver.synchronize(stream)
                   record(s"half_conv_gemm_merged[${g.co},$row,$k]",started)
-                // [co, samples, P] -> [samples, co, P], written straight into the output
                 val elements=g.co.toLong*row
-                launch(elements,halfKernels("h_transpose5"),label="h_transpose5",threadsPerBlock=256) { arena =>
-                  Seq(product.address,output.address+start.toLong*g.co*spatial*2).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
-                    Seq(elements.toInt,g.co,1,samples,spatial.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
+                launchFast(elements,halfKernels("h_transpose5"),256,1,"h_transpose5") { b =>
+                  b.ptr(product.address).ptr(output.address+start.toLong*g.co*spatial*2)
+                    .i32(elements.toInt).i32(g.co).i32(1).i32(samples).i32(spatial.toInt)
                 }
                 start+=samples
             }
           }
+        else if direct && config.groups==1 && g.n>1 && spatial>0 && g.co>0 && k>0 then
+          val started=if profileEnabled then System.nanoTime() else 0L
+          val t0=if launchStats then System.nanoTime() else 0L
+          cublas.get.gemmHalfStridedBatched(0,0,spatial.toInt,g.co,k.toInt,1f,
+            input.address,spatial.toInt,k*spatial,weight.address,k.toInt,0L,output.address,spatial.toInt,g.co.toLong*spatial,g.n)
+          if launchStats then { libraryNanos+=System.nanoTime()-t0;libraryCalls+=1 }
+          if profileEnabled then
+            driver.synchronize(stream)
+            record(s"half_conv_1x1_batched[${g.n},${g.co},$spatial,$k]",started)
         else if direct then
           var batch=0
           while batch<g.n do
@@ -1300,12 +1342,18 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
                 while positionStart<spatial do
                   val positions=math.min(positionsPerChunk,spatial-positionStart)
                   val count=k*positions
-                  launch(count,halfKernels("h_im2col"),label="h_im2col",threadsPerBlock=256) { arena =>
-                    Seq(input.address,columns.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
-                      Seq(count.toInt,g.ci,g.h,g.w,g.cg,g.kh,g.kw,g.oh,g.ow,config.stride._1,config.stride._2,
-                        config.padding._1,config.padding._2,config.dilation._1,config.dilation._2,
-                        batch,group,positionStart.toInt,positions.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
-                  }
+                  if conv3x3S1P1 && positionStart==0L && positions==spatial then
+                    val tiles=((g.w+31)/32)*((g.h+15)/16)
+                    launchGridFast(tiles,g.ci,1,256,1,1,0,halfKernels("h_im2col_3x3_s1_p1_batch"),"h_im2col_3x3_s1_p1_batch") { b =>
+                      b.ptr(input.address).ptr(columns.address).i32(g.ci).i32(g.h).i32(g.w).i32(batch).i32(1)
+                    }
+                  else
+                    launchFast(count,halfKernels("h_im2col"),256,1,"h_im2col") { b =>
+                      b.ptr(input.address).ptr(columns.address).i32(count.toInt).i32(g.ci).i32(g.h).i32(g.w)
+                        .i32(g.cg).i32(g.kh).i32(g.kw).i32(g.oh).i32(g.ow).i32(config.stride._1).i32(config.stride._2)
+                        .i32(config.padding._1).i32(config.padding._2).i32(config.dilation._1).i32(config.dilation._2)
+                        .i32(batch).i32(group).i32(positionStart.toInt).i32(positions.toInt)
+                    }
                   gemm(batch,group,columns.address,positions.toInt,positions.toInt,positionStart)
                   positionStart+=positions
                 group+=1
@@ -1367,6 +1415,15 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   /** GroupNorm with independently optional per-channel scale/bias; Float32 affine rounding. */
   def groupNorm(input: CudaTensor,groups: Int,epsilon: Double=1e-5,
       weight: Option[CudaTensor]=None,bias: Option[CudaTensor]=None): CudaTensor =
+    groupNormImpl(input,groups,epsilon,weight,bias,applySilu=false)
+
+  /** Fused Float16 GroupNorm + SiLU in one kernel pass (`groupNorm` -> `silu`). */
+  def groupNormSilu(input: CudaTensor,groups: Int,epsilon: Double=1e-5,
+      weight: Option[CudaTensor]=None,bias: Option[CudaTensor]=None): CudaTensor =
+    groupNormImpl(input,groups,epsilon,weight,bias,applySilu=true)
+
+  private def groupNormImpl(input: CudaTensor,groups: Int,epsilon: Double,
+      weight: Option[CudaTensor],bias: Option[CudaTensor],applySilu: Boolean): CudaTensor =
     validate(input)
     val width=GroupNormOps.width(input.shape,groups,epsilon)
     val channels=input.shape.dims(1)
@@ -1378,47 +1435,157 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val rows=input.shape.numel/width
     if input.half then
       Seq(weight,bias).flatten.foreach(p => require(p.half,"Float16 GroupNorm needs Float16 affine parameters"))
-      // LayerNorm rows (one group, no spatial axes) that fit the registers of one block: statistics and result in one kernel.
-      if CudaSession.fusedLayerNorm && spatial==1 && width==channels && width<=2048 then
+      if !applySilu && CudaSession.fusedLayerNorm && spatial==1 && width==channels && width<=2048 then
         val result=allocate(input.shape,half=true)
         try
-          launch(rows,halfKernels("h_norm_rows"),threadsPerBlock=256,threadsPerOutput=256,label="h_norm_rows") { arena =>
-            Seq(input.address,weight.fold(0L)(_.address),bias.fold(0L)(_.address),result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
-              Seq(rows.toInt,width).map(v => arena.allocateFrom(JAVA_INT,v)) :+ arena.allocateFrom(JAVA_FLOAT,epsilon.toFloat)
+          launchFast(rows,halfKernels("h_norm_rows"),threadsPerBlock=256,threadsPerOutput=256,label="h_norm_rows") { b =>
+            b.ptr(input.address).ptr(weight.fold(0L)(_.address)).ptr(bias.fold(0L)(_.address)).ptr(result.address)
+              .i32(rows.toInt).i32(width).f32(epsilon.toFloat)
           }
           return result
         catch case error: Throwable =>
           try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
           throw error
       return Using.resource(allocate(Shape.from(Seq(rows*2)))) { stats =>
-        // One block per group: wide groups get 1024 threads, otherwise a block leaves most of its multiprocessor idle.
         val statThreads=if width>=4096 then 1024 else 256
-        launch(rows,halfKernels("h_groupnorm_stats"),threadsPerBlock=statThreads,threadsPerOutput=statThreads,label="h_groupnorm_stats") { arena =>
-          Seq(input.address,stats.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
-            Seq(rows.toInt,width).map(v => arena.allocateFrom(JAVA_INT,v)) :+ arena.allocateFrom(JAVA_FLOAT,epsilon.toFloat)
+        launchFast(rows,halfKernels("h_groupnorm_stats"),threadsPerBlock=statThreads,threadsPerOutput=statThreads,label="h_groupnorm_stats") { b =>
+          b.ptr(input.address).ptr(stats.address).i32(rows.toInt).i32(width).f32(epsilon.toFloat)
         }
-        hexecute(input.shape,input.shape.numel,"h_groupnorm_apply") { (arena,result) =>
-          Seq(input.address,weight.fold(0L)(_.address),bias.fold(0L)(_.address),result.address,stats.address)
-            .map(v => arena.allocateFrom(JAVA_LONG,v)) ++
-            Seq(input.shape.numel.toInt,width,channels.toInt,spatial.toInt).map(v => arena.allocateFrom(JAVA_INT,v))
-        }
-      }
-    if width>=4096 && rows*16<=maxBytes-used-input.shape.numel*4 then
-      Using.resource(allocate(Shape.from(Seq(rows*4)))) { stats =>
-        launch(rows,kernels("groupnorm_stats_par"),threadsPerBlock=256,threadsPerOutput=256,label="groupnorm_stats_par") { arena =>
-          Seq(input.address,stats.address).map(v=>arena.allocateFrom(JAVA_LONG,v)) ++
-            Seq(rows.toInt,width).map(v=>arena.allocateFrom(JAVA_INT,v)) :+ arena.allocateFrom(JAVA_DOUBLE,epsilon)
-        }
-        execute(input.shape,input.shape.numel,kernels("groupnorm_apply")) { (arena,result) =>
-          Seq(input.address,weight.fold(0L)(_.address),bias.fold(0L)(_.address),result.address,stats.address)
-            .map(v=>arena.allocateFrom(JAVA_LONG,v)) ++
-            Seq(input.shape.numel.toInt,width,channels.toInt,spatial.toInt).map(v=>arena.allocateFrom(JAVA_INT,v))
+        val n=input.shape.numel
+        val applyKernel=if applySilu then "h_groupnorm_apply_silu" else "h_groupnorm_apply"
+        hexecuteFast(input.shape,vec2(n),applyKernel) { (b,result) =>
+          b.ptr(input.address).ptr(weight.fold(0L)(_.address)).ptr(bias.fold(0L)(_.address)).ptr(result.address).ptr(stats.address)
+            .i32(n.toInt).i32(width).i32(channels.toInt).i32(spatial.toInt)
         }
       }
-    else execute(input.shape,rows,kernels("groupnorm")) { (arena,result) =>
-      Seq(input.address,weight.fold(0L)(_.address),bias.fold(0L)(_.address),result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
-        Seq(rows.toInt,width,channels.toInt,spatial.toInt).map(v => arena.allocateFrom(JAVA_INT,v)) :+
-        arena.allocateFrom(JAVA_DOUBLE,epsilon)
+    val normResult=
+      if width>=4096 && rows*16<=maxBytes-used-input.shape.numel*4 then
+        Using.resource(allocate(Shape.from(Seq(rows*4)))) { stats =>
+          launch(rows,kernels("groupnorm_stats_par"),threadsPerBlock=256,threadsPerOutput=256,label="groupnorm_stats_par") { arena =>
+            Seq(input.address,stats.address).map(v=>arena.allocateFrom(JAVA_LONG,v)) ++
+              Seq(rows.toInt,width).map(v=>arena.allocateFrom(JAVA_INT,v)) :+ arena.allocateFrom(JAVA_DOUBLE,epsilon)
+          }
+          execute(input.shape,input.shape.numel,kernels("groupnorm_apply")) { (arena,result) =>
+            Seq(input.address,weight.fold(0L)(_.address),bias.fold(0L)(_.address),result.address,stats.address)
+              .map(v=>arena.allocateFrom(JAVA_LONG,v)) ++
+              Seq(input.shape.numel.toInt,width,channels.toInt,spatial.toInt).map(v=>arena.allocateFrom(JAVA_INT,v))
+          }
+        }
+      else execute(input.shape,rows,kernels("groupnorm")) { (arena,result) =>
+        Seq(input.address,weight.fold(0L)(_.address),bias.fold(0L)(_.address),result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
+          Seq(rows.toInt,width,channels.toInt,spatial.toInt).map(v => arena.allocateFrom(JAVA_INT,v)) :+
+          arena.allocateFrom(JAVA_DOUBLE,epsilon)
+      }
+    if !applySilu then normResult
+    else try silu(normResult) finally normResult.close()
+
+  /** NCHW Float16 per-channel bias add. */
+  def addNchwBias(input: CudaTensor,bias: CudaTensor): CudaTensor =
+    validate(input);validate(bias)
+    require(input.half && bias.half && input.shape.rank==4,"NCHW bias add requires 4D Float16 tensor and 1D Float16 bias")
+    val c=input.shape.dims(1).toInt
+    require(bias.shape.numel==c,"NCHW bias channel mismatch")
+    val spatial=(input.shape.dims(2)*input.shape.dims(3)).toInt
+    val n=input.shape.numel
+    hexecuteFast(input.shape,vec2(n),"h_add_nchw_bias") { (b,result) =>
+      b.ptr(input.address).ptr(bias.address).ptr(result.address).i32(n.toInt).i32(c).i32(spatial)
+    }
+
+  /** NCHW Float16 fused conv bias + timestep projection add: `input + bias? + time[N,C,1,1]`. */
+  def addNchwBiasTime(input: CudaTensor,bias: Option[CudaTensor],time: CudaTensor): CudaTensor =
+    validate(input);bias.foreach(validate);validate(time)
+    require(input.half && bias.forall(_.half) && time.half && input.shape.rank==4,"fused NCHW time add requires 4D Float16 input")
+    val batch=input.shape.dims(0);val c=input.shape.dims(1).toInt
+    require(bias.forall(_.shape.numel==c) && time.shape.numel==batch*c,"fused NCHW bias/time shape mismatch")
+    val spatial=(input.shape.dims(2)*input.shape.dims(3)).toInt
+    val n=input.shape.numel
+    hexecuteFast(input.shape,vec2(n),"h_add_nchw_bias_time") { (b,result) =>
+      b.ptr(input.address).ptr(bias.fold(0L)(_.address)).ptr(time.address).ptr(result.address)
+        .i32(n.toInt).i32(c).i32(spatial)
+    }
+
+  /** NCHW Float16 fused conv2 bias + residual shortcut add + scale: `(input + bias? + shortcut) * scale`. */
+  def addNchwBiasRes(input: CudaTensor,bias: Option[CudaTensor],shortcut: CudaTensor,scale: Float=1f): CudaTensor =
+    validate(input);bias.foreach(validate);validate(shortcut)
+    require(input.half && bias.forall(_.half) && shortcut.half && input.shape==shortcut.shape && input.shape.rank==4,
+      "fused NCHW residual add requires matching 4D Float16 shapes")
+    val c=input.shape.dims(1).toInt
+    require(bias.forall(_.shape.numel==c),"fused NCHW residual bias shape mismatch")
+    val spatial=(input.shape.dims(2)*input.shape.dims(3)).toInt
+    val n=input.shape.numel
+    hexecuteFast(input.shape,vec2(n),"h_add_nchw_bias_res") { (b,result) =>
+      b.ptr(input.address).ptr(bias.fold(0L)(_.address)).ptr(shortcut.address).ptr(result.address)
+        .i32(n.toInt).i32(c).i32(spatial).f32(scale)
+    }
+
+  /** GPU-native nearest-exact token downsampling matching `TokenDownsampling.resampleTokens`. */
+  def downsampleTokensExact(input: CudaTensor,srcH: Int,srcW: Int,dstH: Int,dstW: Int): CudaTensor =
+    validate(input)
+    require(input.half && input.shape.rank==3,"GPU ToDo requires 3D Float16 token tensor")
+    val dims=input.shape.dims
+    val batch=dims(0);val channels=dims(2)
+    require(srcH>0 && srcW>0 && dstH>0 && dstW>0 && srcH.toLong*srcW==dims(1),"GPU ToDo spatial shape mismatch")
+    val output=Shape.from(Seq(batch,dstH.toLong*dstW,channels))
+    val result=allocate(output,half=true)
+    try
+      val tokens=batch*dstH.toLong*dstW
+      launchFast(tokens,halfKernels("h_downsample_tokens_exact"),256,256,"h_downsample_tokens_exact") { b =>
+        b.ptr(input.address).ptr(result.address).i32(batch.toInt).i32(srcH).i32(srcW)
+          .i32(dstH).i32(dstW).i32(channels.toInt)
+      }
+      result
+    catch case error: Throwable =>
+      try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
+  /** TaylorSeer scaled finite difference `(cur - prev) * invStep` in Float16. */
+  def taylorDiff(cur: CudaTensor,prev: CudaTensor,invStep: Float): CudaTensor =
+    validate(cur);validate(prev)
+    require(cur.half && prev.half && cur.shape==prev.shape,"TaylorSeer diff requires matching Float16 shapes")
+    val n=cur.shape.numel
+    hexecuteFast(cur.shape,vec2(n),"h_taylor_diff") { (b,result) =>
+      b.ptr(cur.address).ptr(prev.address).ptr(result.address).i32(n.toInt).f32(invStep)
+    }
+
+  /** TaylorSeer first-order forecast `f0 + c1 * d1` in Float16. */
+  def taylorForecast1(f0: CudaTensor,d1: CudaTensor,c1: Float): CudaTensor =
+    validate(f0);validate(d1)
+    require(f0.half && d1.half && f0.shape==d1.shape,"TaylorSeer forecast requires matching Float16 shapes")
+    val n=f0.shape.numel
+    hexecuteFast(f0.shape,vec2(n),"h_taylor_forecast1") { (b,result) =>
+      b.ptr(f0.address).ptr(d1.address).ptr(result.address).i32(n.toInt).f32(c1)
+    }
+
+  /** TaylorSeer second-order Newton forecast `f0 + c1 * d1 + c2 * d2` in Float16. */
+  def taylorForecast2(f0: CudaTensor,d1: CudaTensor,d2: CudaTensor,c1: Float,c2: Float): CudaTensor =
+    validate(f0);validate(d1);validate(d2)
+    require(f0.half && d1.half && d2.half && f0.shape==d1.shape && f0.shape==d2.shape,"TaylorSeer forecast requires matching Float16 shapes")
+    val n=f0.shape.numel
+    hexecuteFast(f0.shape,vec2(n),"h_taylor_forecast2") { (b,result) =>
+      b.ptr(f0.address).ptr(d1.address).ptr(d2.address).ptr(result.address).i32(n.toInt).f32(c1).f32(c2)
+    }
+
+  /** T-GATE cache extraction: averages `[neg; pos]` CFG pair halves into `[B, ...]` when `hasPair`, else copies `input`. */
+  def tgateAvgHalf(input: CudaTensor,hasPair: Boolean): CudaTensor =
+    validate(input)
+    require(input.half && input.shape.rank>=1,"T-GATE average requires non-scalar Float16 tensor")
+    val dims=input.shape.dims
+    val outShape=if !hasPair then input.shape else
+      require(dims(0)%2==0,"T-GATE CFG pair average requires even batch dimension")
+      Shape.from((dims(0)/2) +: dims.drop(1))
+    val n=outShape.numel
+    hexecuteFast(outShape,vec2(n),"h_tgate_avg_half") { (b,result) =>
+      b.ptr(input.address).ptr(result.address).i32(n.toInt).i32(if hasPair then 1 else 0)
+    }
+
+  /** T-GATE broadcast residual add: `self[k] + cached[k % cached.numel]` in Float16. */
+  def tgateAddBroadcast(self: CudaTensor,cached: CudaTensor): CudaTensor =
+    validate(self);validate(cached)
+    require(self.half && cached.half && cached.shape.numel>0 && self.shape.numel%cached.shape.numel==0,
+      "T-GATE broadcast add requires compatible Float16 shapes")
+    val n=self.shape.numel
+    hexecuteFast(self.shape,vec2(n),"h_tgate_add_broadcast") { (b,result) =>
+      b.ptr(self.address).ptr(cached.address).ptr(result.address).i32(n.toInt).i32(cached.shape.numel.toInt)
     }
 
   /** Final-axis normalization, with temporary reshape handles released on every path. */
@@ -1435,9 +1602,11 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
 
   def silu(value: CudaTensor): CudaTensor =
     validate(value)
-    if value.half then return hexecute(value.shape,value.shape.numel,"h_silu") { (arena,result) =>
-      Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) :+ arena.allocateFrom(JAVA_INT,value.shape.numel.toInt)
-    }
+    if value.half then
+      val n=value.shape.numel
+      return hexecuteFast(value.shape,vec2(n),"h_silu") { (b,result) =>
+        b.ptr(value.address).ptr(result.address).i32(n.toInt)
+      }
     execute(value.shape,value.shape.numel,kernels("silu")) { (arena,result) =>
       Seq(value.address,result.address).map(v => arena.allocateFrom(JAVA_LONG,v)) ++
         Seq(arena.allocateFrom(JAVA_INT,value.shape.numel.toInt),arena.allocateFrom(JAVA_LONG,0L),arena.allocateFrom(JAVA_INT,0))
@@ -1525,6 +1694,39 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
 
+  private def vec2(count: Long): Long = (count+1L)>>1
+  private def launchGridFast(gx: Int,gy: Int,gz: Int,bx: Int,by: Int,bz: Int,sharedBytes: Int,
+      kernel: java.lang.foreign.MemorySegment,label: String)(fill: ArgBuilder => Unit): Unit =
+    val started=if profileEnabled then System.nanoTime() else 0L
+    val prepStarted=if launchStats then System.nanoTime() else 0L
+    fill(argBuilder.reset())
+    if launchStats then
+      val t0=System.nanoTime()
+      driver.launchKernel3D(kernel,gx,gy,gz,bx,by,bz,sharedBytes,stream,paramPtrs)
+      launchNanos+=System.nanoTime()-t0;launchCount+=1
+      launchPrepNanos+=t0-prepStarted
+    else driver.launchKernel3D(kernel,gx,gy,gz,bx,by,bz,sharedBytes,stream,paramPtrs)
+    if syncEveryLaunch then
+      try driver.synchronize(stream)
+      catch case error: Throwable => throw IllegalStateException(s"CUDA kernel '$label' failed during synchronization",error)
+    if profileEnabled then record(label,started)
+  private def launchFast(count: Long,kernel: MemorySegment,threadsPerBlock: Int=256,threadsPerOutput: Int=1,label: String="unknown")
+      (fill: ArgBuilder => Unit): Unit =
+    require(threadsPerBlock>0 && threadsPerOutput>0 && threadsPerBlock%threadsPerOutput==0,"CUDA launch dimensions must divide evenly")
+    val outputsPerBlock=threadsPerBlock/threadsPerOutput
+    if count>0 then
+      val blocks=((count+outputsPerBlock-1)/outputsPerBlock).toInt
+      launchGridFast(blocks,1,1,threadsPerBlock,1,1,0,kernel,label)(fill)
+  private def hexecuteFast(output: Shape,count: Long,name: String,threadsPerBlock: Int=256,threadsPerOutput: Int=1)
+      (fill: (ArgBuilder,CudaTensor) => Unit): CudaTensor =
+    val result=allocate(output,half=true)
+    try
+      launchFast(count,halfKernels(name),threadsPerBlock,threadsPerOutput,name)(b => fill(b,result))
+      result
+    catch case error: Throwable =>
+      try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
   private def launch(count: Long,kernel: MemorySegment,threadsPerBlock: Int=64,threadsPerOutput: Int=1,label: String="unknown")
       (arguments: Arena => Seq[MemorySegment]): Unit =
       require(threadsPerBlock>0 && threadsPerOutput>0 && threadsPerBlock%threadsPerOutput==0,
@@ -1583,6 +1785,7 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     if weightArenaUsed then weightArena.retired=true
     var shared=0L;touchedShared.forEach(a => shared+=a.bytes)
     attempt { CudaWeightPool.releaseUsers(touchedShared) }
+    attempt { scratchArena.close() }
     if launchStats && launchCount>0 then
       System.err.println(f"[scala-torch CUDA launches] $launchCount launches, ${launchNanos/1e6}%.1f ms in cuLaunchKernel, " +
         f"${launchPrepNanos/1e6}%.1f ms preparing arguments, $libraryCalls cuBLAS/cuDNN calls ${libraryNanos/1e6}%.1f ms, half module load ${moduleNanos/1e6}%.1f ms, session open ${(System.nanoTime()-opened)/1e6}%.1f ms, " +
@@ -1609,6 +1812,8 @@ object CudaSession:
     sys.env.get("SCALATORCH_CUDA_CHUNK_MB").flatMap(_.trim.toLongOption).filter(_ > 0).getOrElse(128L)*1024L*1024L
   /** Float16 convolution of a batch as one GEMM (`SCALATORCH_CUDA_MERGED_CONV=0` keeps one GEMM per sample). */
   private[ffm] val mergedConvolution: Boolean = !sys.env.get("SCALATORCH_CUDA_MERGED_CONV").contains("0")
+  /** FlashAttention-2 multi-warp Q-split shared-memory K/V attention (`SCALATORCH_CUDA_FA2=0` keeps single-warp fused kernels). */
+  private[ffm] val flashAttention2: Boolean = !sys.env.get("SCALATORCH_CUDA_FA2").contains("0")
   /** Float16 self-attention through the fused tensor-core kernels (h_attention_fused_*): no score matrix in device memory.
     * RTX 3090: [16,4096,40] 3.08 -> 1.09 ms, [64,4096,40] 12.4 -> 3.95 ms, [20,4096,64] 3.86 -> 1.83 ms against the cuBLAS path.
     * Used when the fragment layout of the device is the expected one; `SCALATORCH_CUDA_FUSED_ATTENTION_HALF=0` keeps cuBLAS. */

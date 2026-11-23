@@ -11,36 +11,38 @@ import java.nio.file.{Files, Path, Paths}
 private[ffm] final class Cublas private (handle: MemorySegment,sgemmHandle: MethodHandle,batchedHandle: MethodHandle,gemmExHandle: MethodHandle,gemmExBatchedHandle: MethodHandle,arena: Arena,setStreamHandle: MethodHandle):
   /** Points the (shared) handle at the stream of the session that is about to use it. */
   def bindStream(stream: MemorySegment): Unit =
-    require(setStreamHandle.invokeWithArguments(handle,stream).asInstanceOf[Integer].intValue()==0,"cublasSetStream_v2 failed")
+    val status: Int=setStreamHandle.invokeExact(handle,stream)
+    require(status==0,"cublasSetStream_v2 failed")
   private val alpha=arena.allocate(JAVA_FLOAT); alpha.set(JAVA_FLOAT,0,1f)
   private val beta=arena.allocate(JAVA_FLOAT); beta.set(JAVA_FLOAT,0,0f)
+  private val scaleBuf=arena.allocate(JAVA_FLOAT); scaleBuf.set(JAVA_FLOAT,0,1f)
   /** Row-major C[m,n] = A[m,k] * B[k,n] with leading dimensions lda, ldb, ldc (column-major trick). */
   def sgemmRowMajor(m: Int,n: Int,k: Int,a: Long,lda: Int,b: Long,ldb: Int,c: Long,ldc: Int): Unit =
-    val status=sgemmHandle.invokeWithArguments(handle,Int.box(0),Int.box(0),Int.box(n),Int.box(m),Int.box(k),alpha,
-      MemorySegment.ofAddress(b),Int.box(ldb),MemorySegment.ofAddress(a),Int.box(lda),beta,
-      MemorySegment.ofAddress(c),Int.box(ldc)).asInstanceOf[Integer].intValue()
+    val status: Int=sgemmHandle.invokeExact(handle,0,0,n,m,k,alpha,
+      MemorySegment.ofAddress(b),ldb,MemorySegment.ofAddress(a),lda,beta,
+      MemorySegment.ofAddress(c),ldc)
     if status!=0 then throw IllegalStateException(s"cublasSgemm_v2 failed with status $status")
   /** Column-major strided-batched SGEMM: C = alpha * op(A) * op(B). Transpose flags use cuBLAS codes 0 (N) / 1 (T). */
   def sgemmStridedBatched(transA: Int,transB: Int,m: Int,n: Int,k: Int,alpha: Float,
       a: Long,lda: Int,strideA: Long,b: Long,ldb: Int,strideB: Long,c: Long,ldc: Int,strideC: Long,batch: Int): Unit =
-    val scale=arena.allocate(JAVA_FLOAT); scale.set(JAVA_FLOAT,0,alpha)
-    val status=batchedHandle.invokeWithArguments(handle,Int.box(transA),Int.box(transB),Int.box(m),Int.box(n),Int.box(k),scale,
-      MemorySegment.ofAddress(a),Int.box(lda),Long.box(strideA),MemorySegment.ofAddress(b),Int.box(ldb),Long.box(strideB),beta,
-      MemorySegment.ofAddress(c),Int.box(ldc),Long.box(strideC),Int.box(batch)).asInstanceOf[Integer].intValue()
+    scaleBuf.set(JAVA_FLOAT,0,alpha)
+    val status: Int=batchedHandle.invokeExact(handle,transA,transB,m,n,k,scaleBuf,
+      MemorySegment.ofAddress(a),lda,strideA,MemorySegment.ofAddress(b),ldb,strideB,beta,
+      MemorySegment.ofAddress(c),ldc,strideC,batch)
     if status!=0 then throw IllegalStateException(s"cublasSgemmStridedBatched failed with status $status")
 
   /** Row-major C[m,n] = A[m,k] * W[n,k]^T in Float32. */
   def sgemmRowMajorBT(m: Int,n: Int,k: Int,a: Long,w: Long,c: Long): Unit =
-    val status=sgemmHandle.invokeWithArguments(handle,Int.box(1),Int.box(0),Int.box(n),Int.box(m),Int.box(k),alpha,
-      MemorySegment.ofAddress(w),Int.box(k),MemorySegment.ofAddress(a),Int.box(k),beta,
-      MemorySegment.ofAddress(c),Int.box(n)).asInstanceOf[Integer].intValue()
+    val status: Int=sgemmHandle.invokeExact(handle,1,0,n,m,k,alpha,
+      MemorySegment.ofAddress(w),k,MemorySegment.ofAddress(a),k,beta,
+      MemorySegment.ofAddress(c),n)
     if status!=0 then throw IllegalStateException(s"cublasSgemm_v2 (transposed) failed with status $status")
 
   /** Row-major C[m,n] (Float32) = A[m,k] * W[n,k]^T with Float16 operands and Float32 accumulation on tensor cores. */
   def gemmExHalfBT(m: Int,n: Int,k: Int,a: Long,w: Long,c: Long): Unit =
-    val status=gemmExHandle.invokeWithArguments(handle,Int.box(1),Int.box(0),Int.box(n),Int.box(m),Int.box(k),alpha,
-      MemorySegment.ofAddress(w),Int.box(2),Int.box(k),MemorySegment.ofAddress(a),Int.box(2),Int.box(k),beta,
-      MemorySegment.ofAddress(c),Int.box(0),Int.box(n),Int.box(68),Int.box(99)).asInstanceOf[Integer].intValue()
+    val status: Int=gemmExHandle.invokeExact(handle,1,0,n,m,k,alpha,
+      MemorySegment.ofAddress(w),2,k,MemorySegment.ofAddress(a),2,k,beta,
+      MemorySegment.ofAddress(c),0,n,68,99)
     if status!=0 then throw IllegalStateException(s"cublasGemmEx failed with status $status")
 
   /** Row-major C[m,n] = A[m,k] * B[k,n], all Float16, Float32 accumulation (tensor cores). */
@@ -63,11 +65,10 @@ private[ffm] final class Cublas private (handle: MemorySegment,sgemmHandle: Meth
       a: Long,lda: Int,strideA: Long,b: Long,ldb: Int,strideB: Long,c: Long,ldc: Int,strideC: Long,batch: Int): Unit =
     alpha.set(JAVA_FLOAT,0,alphaValue)
     try
-      val status=gemmExBatchedHandle.invokeWithArguments(handle,Int.box(transA),Int.box(transB),Int.box(m),Int.box(n),Int.box(k),alpha,
-        MemorySegment.ofAddress(a),Int.box(2),Int.box(lda),Long.box(strideA),
-        MemorySegment.ofAddress(b),Int.box(2),Int.box(ldb),Long.box(strideB),beta,
-        MemorySegment.ofAddress(c),Int.box(2),Int.box(ldc),Long.box(strideC),Int.box(batch),Int.box(68),Int.box(99))
-        .asInstanceOf[Integer].intValue()
+      val status: Int = gemmExBatchedHandle.invokeExact(handle,transA,transB,m,n,k,alpha,
+        MemorySegment.ofAddress(a),2,lda,strideA,
+        MemorySegment.ofAddress(b),2,ldb,strideB,beta,
+        MemorySegment.ofAddress(c),2,ldc,strideC,batch,68,99)
       if status!=0 then throw IllegalStateException(s"cublasGemmStridedBatchedEx failed with status $status")
     finally alpha.set(JAVA_FLOAT,0,1f)
 

@@ -51,10 +51,18 @@ class CudaKernelBenchSuite extends munit.FunSuite:
         val q=half(1,heads,tokens,width);val k=half(1,heads,tokens,width);val v=half(1,heads,tokens,width)
         time(s"self attention     [$heads,$tokens,$width]",20)(s.scaledDotProductAttention(q,k,v))
         Seq(q,k,v).foreach(_.close())
-      for (n,c,side) <- Seq((2L,320L,64L),(8L,320L,64L),(2L,640L,32L),(8L,640L,32L),(8L,1280L,16L),(8L,1280L,8L)) do
+      for (heads,qt,kt,width) <- Seq((16L,4096L,77L,40L),(20L,4096L,77L,64L),(40L,1024L,77L,64L),(16L,256L,77L,80L)) do
+        val q=half(1,heads,qt,width);val k=half(1,heads,kt,width);val v=half(1,heads,kt,width)
+        time(s"cross attention    [$heads,$qt,$kt,$width]",20)(s.scaledDotProductAttention(q,k,v))
+        Seq(q,k,v).foreach(_.close())
+      for (n,c,side) <- Seq((2L,320L,128L),(2L,320L,64L),(8L,320L,64L),(2L,640L,32L),(8L,640L,32L),(8L,1280L,16L),(8L,1280L,8L)) do
         val x=half(n,c,side,side)
         val w=half(c,c,3,3)
         time(s"conv 3x3           [$n,$c,$side,$side]",60)(s.conv2dFast(x,w,Conv2dConfig(padding=(1,1))))
+        x.close();w.close()
+      for (c,side) <- Seq((320L,128L),(640L,64L),(1280L,32L)) do
+        val x=half(2,c,side,side);val w=half(c,c,1,1)
+        time(s"conv 1x1 batched   [2,$c,$side,$side]",60)(s.conv2dFast(x,w))
         x.close();w.close()
       for (c,side) <- Seq((320L,64L),(640L,32L),(1280L,16L),(1280L,8L)) do
         val x=half(2,c,side,side)
@@ -64,6 +72,7 @@ class CudaKernelBenchSuite extends munit.FunSuite:
         time(s"add same shape     [2,$c,$side,$side]",300)(s.add(x,x))
         time(s"silu               [2,$c,$side,$side]",300)(s.silu(x))
         time(s"group norm 32      [2,$c,$side,$side]",300)(s.groupNorm(x,32,1e-5,Some(gamma),Some(beta)))
+        time(s"group norm+silu 32 [2,$c,$side,$side]",300)(s.groupNormSilu(x,32,1e-5,Some(gamma),Some(beta)))
         val tokens=half(2,side*side,c)
         val lastBias=half(c)
         time(s"add last-axis bias [2,${side*side},$c]",300)(s.addBroadcast(tokens,lastBias))

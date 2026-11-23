@@ -159,11 +159,29 @@ object ClipFastTokenizer:
       else { val s=next.toChar.toString;next+=1;s }
     }.toVector
   private lazy val inverseAlphabet: Map[Char,Byte]=alphabet.zipWithIndex.map((symbol,index)=>symbol.charAt(0)->index.toByte).toMap
+  private val BundledResourcePrefix="/scalatorch/models/tokenizer"
   private def read(path: Path): String=Using.resource(Files.newInputStream(path)) { stream =>
     val bytes=stream.readNBytes(TokenizerJson.maxBytes+1)
     require(bytes.length<=TokenizerJson.maxBytes,"CLIP tokenizer file exceeds32MiB")
     UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString
   }
+  private def readResource(name: String): String =
+    val resourcePath=s"$BundledResourcePrefix/$name"
+    val stream=Option(ClipFastTokenizer.getClass.getResourceAsStream(resourcePath))
+      .getOrElse(throw IllegalStateException(s"missing bundled CLIP tokenizer resource: $resourcePath"))
+    Using.resource(stream) { input =>
+      val bytes=input.readNBytes(TokenizerJson.maxBytes+1)
+      require(bytes.length<=TokenizerJson.maxBytes,"CLIP tokenizer file exceeds 32MiB")
+      UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString
+    }
+  private lazy val bundledBase: (Map[String,Int],Map[(String,String),Int]) =
+    parseBase(readResource("vocab.json"),readResource("merges.txt"))
+  /** Load the MIT-licensed CLIP BPE tokenizer bundled as classpath resources. */
+  def loadBundled(maxLength: Int=77,padToken: String=eos): ClipFastTokenizer =
+    require(maxLength>=2 && maxLength<=16384,"invalid CLIP context length")
+    val (vocab,ranks)=bundledBase
+    require(vocab.contains(padToken),"missing CLIP pad token")
+    new ClipFastTokenizer(vocab,ranks,maxLength,vocab(padToken).toLong)
   def load(vocabPath: Path,mergesPath: Path,maxLength: Int=77,padToken: String=eos): ClipFastTokenizer =
     fromText(read(vocabPath),read(mergesPath),maxLength,padToken)
   /** Directory profile including explicit CLIP special-token padding configuration. */
@@ -178,8 +196,7 @@ object ClipFastTokenizer:
       "unsupported CLIP special token configuration")
     val length=config.get("model_max_length").fold(77)(_.int)
     load(directory.resolve("vocab.json"),directory.resolve("merges.txt"),length,token("pad_token",eos))
-  def fromText(vocabJson: String,mergesText: String,maxLength: Int=77,padToken: String=eos): ClipFastTokenizer =
-    require(maxLength>=2 && maxLength<=16384,"invalid CLIP context length")
+  private def parseBase(vocabJson: String,mergesText: String): (Map[String,Int],Map[(String,String),Int]) =
     val vocab=TokenizerJson.parse(vocabJson).obj.map((token,id) => token->id.int)
     require(vocab.nonEmpty && vocab.size<=1000000 && vocab.keys.forall(_.nonEmpty) &&
       vocab.values.toSet==(0 until vocab.size).toSet,"invalid CLIP vocabulary IDs")
@@ -195,5 +212,9 @@ object ClipFastTokenizer:
       (a,b)
     }
     require(pairs.size<=1000000 && pairs.distinct.size==pairs.size,"duplicate or excessive CLIP merges")
+    (vocab,pairs.zipWithIndex.toMap)
+  def fromText(vocabJson: String,mergesText: String,maxLength: Int=77,padToken: String=eos): ClipFastTokenizer =
+    require(maxLength>=2 && maxLength<=16384,"invalid CLIP context length")
+    val (vocab,ranks)=parseBase(vocabJson,mergesText)
     require(vocab.contains(padToken),"missing CLIP pad token")
-    new ClipFastTokenizer(vocab,pairs.zipWithIndex.toMap,maxLength,vocab(padToken).toLong)
+    new ClipFastTokenizer(vocab,ranks,maxLength,vocab(padToken).toLong)
