@@ -615,6 +615,27 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
         paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.delete(_))
       finally paths.close()
   }
+  test("load_model dtype selects the execution precision: fp16 and fp32 are accepted and reported, anything else is rejected") {
+    val configured=sys.props.get("scalatorch.clip.dir")
+    assume(configured.nonEmpty,"public tiny model required")
+    val root=Path.of(configured.get).getParent
+    val config=Files.createTempFile("native-euler-dtype", ".json")
+    Files.writeString(config,"""{"num_train_timesteps":1000,"beta_start":0.00085,"beta_end":0.012,"beta_schedule":"scaled_linear"}""")
+    try
+      val backend=new NativeDiffusionBackend(root,config)
+      val context=new NativeWorkContext(() => false,() => true,(_,_) => ())
+      def run(kind: String,params: Map[String,NativeJson])=backend.execute(NativeRequest("r",kind,params,None),context)
+      import NativeJson.*
+      assertEquals(run("load_model",Map("dtype"->Str("fp16"),"vram_mode"->Str("auto")))("dtype"),Str("fp16"))
+      assertEquals(run("load_model",Map("dtype"->Str("fp32"),"vram_mode"->Str("cpu")))("dtype"),Str("fp32"))
+      assertEquals(run("load_model",Map("dtype"->Str("fp16")))("dtype"),Str("fp16"))
+      val bad=intercept[NativeBackendError](run("load_model",Map("dtype"->Str("bf16"))))
+      assertEquals(bad.code,"unsupported")
+    finally
+      scalatorch.models.CudaDiffusionRuntime.setHalfPrecision(None)
+      Files.deleteIfExists(config)
+  }
+
   test("public native backend loads generates PNG and unloads without Python") {
     val configured=sys.props.get("scalatorch.clip.dir")
     assume(configured.nonEmpty,"public tiny model required")
@@ -649,7 +670,10 @@ class NativeDiffusionBackendSuite extends munit.FunSuite:
       assertEquals(backend.systemStatus("model"),retained)
       val restored=run("set_vae",Map("path"->Null))
       assertEquals(restored("vae_name"),Null)
-      intercept[NativeBackendError](run("load_model",Map("dtype"->Str("fp16"))))
+      assertEquals(run("load_model",Map("dtype"->Str("fp16"),"vram_mode"->Str("auto")))("dtype"),Str("fp16"))
+      assertEquals(run("load_model",Map("dtype"->Str("fp32")))("dtype"),Str("fp32"))
+      intercept[NativeBackendError](run("load_model",Map("dtype"->Str("bf16"))))
+      scalatorch.models.CudaDiffusionRuntime.setHalfPrecision(None)
       val result=run("txt2img",NativeGenerationDefaults.envelope++Map("output_dir"->Str(output.toString),"vae_recovery_dir"->Str(output.toString),"params"->Obj(NativeGenerationDefaults.generation++Map(
         "checkpoint"->Str(root.toString),"vae"->Str("Automatic"),
         "prompt"->Str("a red cat"),"width"->Number(10),"height"->Number(6),"steps"->Number(2),

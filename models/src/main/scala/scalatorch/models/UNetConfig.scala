@@ -141,6 +141,7 @@ object UNetConfig:
         integer("downsample_padding",1),time,boolean("flip_sin_to_cos",true),number("freq_shift",0),number("mid_block_scale_factor",1),
         heads,depths,boolean("use_linear_projection",false),addition.map(_._1),addition.map(_._2))
       ignoredFields.foreach(fields.remove)
+      fields.remove("_name_or_path")
       require(fields.isEmpty,s"unknown U-Net config fields: ${fields.keys.toVector.sorted.mkString(", ")}")
       config
     }

@@ -12,14 +12,15 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
     vaeExecution: VaeExecution=VaeExecution.Cpu,unetExecution: UNetExecution=UNetExecution.Cpu,
     maxAttentionScoreElements: Long=16777216L,maxVaeAttentionScoreElements: Long= -1L,
     tinyPreviewEnvironment: Map[String,String]=sys.env) extends NativeWorkerBackend:
-  require(maxAttentionScoreElements>=0 && maxAttentionScoreElements<=Int.MaxValue,"invalid attention work limit")
-  private val vaeAttentionLimit=if maxVaeAttentionScoreElements<0 then maxAttentionScoreElements else maxVaeAttentionScoreElements
+  require(maxAttentionScoreElements>=0 && maxAttentionScoreElements<=(1L<<36),"invalid attention work limit")
+  private val vaeAttentionLimit=if maxVaeAttentionScoreElements<0 then math.min(maxAttentionScoreElements,Int.MaxValue.toLong) else maxVaeAttentionScoreElements
   require(vaeAttentionLimit<=Int.MaxValue,"invalid VAE attention work limit")
   import NativeJson.*
-  private val root=modelRoot.toRealPath()
+  private val idle=modelRoot.toString=="-"
+  private val root=if idle then modelRoot else modelRoot.toRealPath()
   private val tinyPreview=NativeTinyPreview.fromEnvironment(tinyPreviewEnvironment,vaeExecution)
   private def singleFileKind: String = if SingleFileSd1Model.isPyTorch(root) then "ckpt" else "safetensors"
-  private val config=if schedulerConfig.toString=="-" && Files.isRegularFile(root) then
+  private val config=if idle || (schedulerConfig.toString=="-" && Files.isRegularFile(root)) then
     EulerConfig.fromJson("""{"num_train_timesteps":1000,"beta_start":0.00085,"beta_end":0.012,"beta_schedule":"scaled_linear","prediction_type":"epsilon"}""")
   else EulerConfig.read(schedulerConfig)
   private var loaded: Option[EulerImagePipeline]=None
@@ -28,6 +29,13 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
   private var loadedEmbeddingTokens=Set.empty[String]
   private var loadedEmbeddingInfo=Vector.empty[NativeEmbeddingInspector.LoadedEmbedding]
   private var linearTargets=Map.empty[String,scalatorch.nn.Parameter]
+  // LoRA files that were read for the loaded model, by file, size, modification time and dynamic rank. Reading and matching an
+  // SDXL LoRA took about a second of every generation; with the same tensors the text encoder cache also applies again.
+  // `SCALATORCH_LORA_FILE_CACHE=0` reads the file on every request.
+  private val loraFileCacheEnabled= !sys.env.get("SCALATORCH_LORA_FILE_CACHE").contains("0")
+  private var loraFileCacheTargets: AnyRef=null
+  private val loraFileCache=scala.collection.mutable.LinkedHashMap.empty[(Path,Option[Int],Long,Long),
+    (Long,Map[scalatorch.nn.Parameter,Vector[LinearAdapterScope.Applied]])]
   private var keywordState=ModelKeyword.State()
   @volatile private var pendingSystemSubmission: Option[(Long,Map[String,NativeJson])]=None
   @volatile private var vramLastProfile: Option[NativeJson]=None
@@ -35,7 +43,11 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
   @volatile private var vaeTilingEnabled=false
   private var singleFileFamily="sd1"
   override def device: String=unetExecution.device
-  override def features: Vector[String]=Vector("img2img_hires_fix","loopback_scaler","tokenizer","latent_upscale","inpaint_difference","gpu_temperature_guard","rescale_cfg","cfg_schedule","resharpen","latent_mirroring","color_grading","anti_burn","vectorscope_cc","detail_daemon","vae_tools","model_keyword","freeu","dynamic_thresholding","tiling","cads","hypertile","metadata_utils","model_sampling","apg","mahiro","pag","weight_gradient","negpip","kohya_hrfix","token_downsampling","conditioning_highres_fix","multidiffusion","latent_modifier","soft_inpainting","neveroom","semantic_guidance","sonar","hires_fix_tweaks","pnginfo_injection","prevent_interrupt","controlnet","controlnet_preprocess_extras","system_info","save_intermediate","steps_animation","img2imgalt","cd_tuner","llul","agent_attention","incantations","characteristic_guidance","clip_io","prompt_fusion","neutral_prompt","composable_lora","embedding_merge","aesthetic_gradients","sag","reference","revision","ip_adapter","controllllite","fooocus_inpaint","compile","taesd","spandrel","vram_estimator","adetailer","batch_face_swap","face_restore","nsfw_checker","aesthetic_score","animatediff","cn_animation","controlnet_fastload_data","photomaker","caption","img2vid","novel_view","custom_code","ldsr","marigold","controlnet_aux","temporal_lab","clip_interrogator","chara_searcher","batch_interrogate_wd_v3_partial")
+  // Text encoders follow the U-Net onto CUDA unless SCALATORCH_CLIP_DEVICE says otherwise.
+  if !sys.env.contains("SCALATORCH_CLIP_DEVICE") then unetExecution.device match
+    case value if value.startsWith("cuda") => ClipCuda.enable(value.drop(5).toIntOption.getOrElse(0))
+    case _ => ()
+  override def features: Vector[String]=Vector("img2img_hires_fix","loopback_scaler","tokenizer","latent_upscale","inpaint_difference","gpu_temperature_guard","rescale_cfg","cfg_schedule","sada","tgate","resharpen","latent_mirroring","color_grading","anti_burn","vectorscope_cc","detail_daemon","vae_tools","model_keyword","freeu","deepcache","dynamic_thresholding","tiling","cads","hypertile","metadata_utils","model_sampling","apg","mahiro","pag","weight_gradient","negpip","kohya_hrfix","token_downsampling","conditioning_highres_fix","multidiffusion","latent_modifier","soft_inpainting","neveroom","semantic_guidance","sonar","hires_fix_tweaks","pnginfo_injection","prevent_interrupt","controlnet","controlnet_preprocess_extras","system_info","save_intermediate","steps_animation","img2imgalt","cd_tuner","llul","agent_attention","incantations","characteristic_guidance","clip_io","prompt_fusion","neutral_prompt","composable_lora","embedding_merge","aesthetic_gradients","sag","reference","revision","ip_adapter","controllllite","fooocus_inpaint","compile","taesd","spandrel","vram_estimator","adetailer","batch_face_swap","face_restore","nsfw_checker","aesthetic_score","animatediff","cn_animation","controlnet_fastload_data","photomaker","caption","img2vid","novel_view","custom_code","ldsr","marigold","controlnet_aux","temporal_lab","clip_interrogator","chara_searcher","batch_interrogate_wd_v3_partial")
   override def usesCuda: Boolean=vaeExecution.device!="cpu" || unetExecution.device!="cpu"
   override def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot(modelSummary,vaeExecution.device,unetExecution.device,
     vaeExecution.offloadWeights,unetExecution.offloadWeights,maxAttentionScoreElements,vaeTilingEnabled,vaeAttentionLimit)
@@ -114,7 +126,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
     val directory=Files.isDirectory(selected)
     val folder=if directory then selected else selected.getParent
     val filename=if directory then "diffusion_pytorch_model.safetensors" else selected.getFileName.toString
-    val vae=PretrainedVae.load(folder,maxScoreElements=vaeAttentionLimit,
+    val vae=PretrainedVae.load(folder,maxFeatureElements=Int.MaxValue.toLong,maxScoreElements=vaeAttentionLimit,
       configOverride=if directory then None else Some(if Files.isRegularFile(root) then singleFileVaeOverride.getOrElse(if singleFileFamily=="sdxl" then SingleFileSdxlConfig.vaeConfig else SingleFileSd1Config.vaeConfig)
         else VaeConfig.read(root.resolve("vae/config.json"))),filename=filename)
     context.checkCancelled()
@@ -135,6 +147,23 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
     val info=if path.isEmpty then Map("vae_name"->Null,"vae_hash"->Null) else
       Map("vae_name"->Str(selected.getFileName.toString),"vae_hash"->Str(java.util.HexFormat.of().formatHex(digest.digest())))
     (vae,info)
+  /** `load_model` dtype: fp16 (default) or fp32 selects the CUDA execution precision of U-Net, VAE and CLIP; CPU execution is Float32
+    * whatever is asked. `vram_mode` is accepted and ignored (U-Net/VAE placement comes from the SDFX_SCALATORCH_* settings). */
+  private def applyPrecision(p: Map[String,NativeJson]): String=
+    val requested=str(p,"dtype","fp16").trim.toLowerCase(java.util.Locale.ROOT)
+    val half=requested match
+      case "fp16" | "float16" | "half" | "auto" => true
+      case "fp32" | "float32" | "full" => false
+      case other => unsupported(s"native engine supports dtype fp16 and fp32, not $other")
+    CudaDiffusionRuntime.setHalfPrecision(Some(half))
+    if half then "fp16" else "fp32"
+
+  /** Device weights kept for later sessions belong to the model that was loaded; free them when the model changes or is unloaded. */
+  private def releaseCudaWeights(): Unit =
+    Seq(vaeExecution.device,unetExecution.device).distinct.foreach { d =>
+      if d.startsWith("cuda:") then scalatorch.ffm.CudaSession.releaseSharedWeights(d.drop(5).toInt)
+    }
+
   private def unsupported(message: String): Nothing=throw new NativeBackendError("unsupported",message)
   private def controlNetStamp(directory: Path,context: NativeWorkContext): Vector[ControlNetFileStamp] =
     if Files.isRegularFile(directory) then
@@ -174,7 +203,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
               else SingleFileSd1Config.unetConfigFor(archive)
             }
           else UNetConfig.read(root.resolve("unet/config.json")))
-        val model=PretrainedControlNet.loadWithProgress(real,500000000L,16777216L,context.cancelled,() =>
+        val model=PretrainedControlNet.loadWithProgress(real,2000000000L,maxAttentionScoreElements,context.cancelled,() =>
           context.event("log",Map("level"->Str("info"),"message"->Str("Reading ControlNet tensor weights"))))
         context.checkCancelled()
         require(controlNetStamp(real,context)==stamp,"ControlNet files changed during loading")
@@ -376,7 +405,15 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
       NativeTokenizerInspection.execute(request.params,tokenizers,context)
     else if Set("txt2img","img2img")(request.kind) && request.params.contains("embedding_editor_preview") then
       executeEditorPreview(request,context)
-    else executeNativeRequest(request,context)
+    else NativeParallelCount.run(request,context,usesCuda,keywordInert)((r,c) => executeNativeRequest(r,c)).getOrElse(executeNativeRequest(request,context))
+
+  /** True when the model keyword hook would not change any prompt or the keyword state for this request (so the request may be split). */
+  private def keywordInert(hooks: Option[NativeJson],prompt: String,count: Int): Boolean =
+    try
+      val hash=modelSummary.get("hash").collect { case Str(h) => h }.getOrElse("")
+      NativeKeywordHook.plan(hooks,prompt,hash,modelSummary.get("name").collect { case Str(n) => n }.getOrElse(""),count,0L,keywordState,() => (),Set.empty)
+        .forall(plan => plan.prompts.forall(_==prompt) && plan.nextState==keywordState)
+    catch case _: Throwable => false
 
   private def executeEditorPreview(request: NativeRequest,context: NativeWorkContext): Map[String,NativeJson] =
     val draft=request.params("embedding_editor_preview") match
@@ -813,7 +850,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           }
           case _ => throw IllegalArgumentException("dirs must be an array")
         // Advertise only the configured checkpoint that this worker can load.
-        val visible=directories.exists(path => Files.isDirectory(path) && root.startsWith(path.toRealPath()))
+        val visible= !idle && directories.exists(path => Files.isDirectory(path) && root.startsWith(path.toRealPath()))
         val entries=if !visible then Vector.empty else
           val files=Files.walk(root)
           val bytes=try
@@ -843,55 +880,70 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
       case "load_model" if Files.isRegularFile(root) =>
         keys(p,Set("path","dtype","vram_mode","vae_path","vae_tiling"))
         require(Path.of(str(p,"path",root.toString)).toRealPath()==root,"model path differs from configured checkpoint")
-        if str(p,"dtype","fp32")!="fp32" || str(p,"vram_mode","cpu")!="cpu" then
-          unsupported("native parameter loading requires fp32 and cpu; execution placement is configured separately")
+        val precision=applyPrecision(p)
         val selectedVae=vaeChoice(p,"vae_path")
+        def tokenizerFromDir(dir: Path,padToken: String,useDirectoryConfig: Boolean): Option[ClipFastTokenizer] =
+          val hasFiles=Files.isRegularFile(dir.resolve("vocab.json")) && Files.isRegularFile(dir.resolve("merges.txt"))
+          if !hasFiles then None
+          else if useDirectoryConfig && Files.isRegularFile(dir.resolve("tokenizer_config.json")) then Some(ClipFastTokenizer.loadDirectory(dir))
+          else Some(ClipFastTokenizer.load(dir.resolve("vocab.json"),dir.resolve("merges.txt"),padToken=padToken))
         val tokenizerDir=sys.env.get("SDFX_SCALATORCH_TOKENIZER").map(Path.of(_)).getOrElse(root.getParent.resolve("tokenizer"))
-        val tokenizer=ClipFastTokenizer.load(tokenizerDir.resolve("vocab.json"),tokenizerDir.resolve("merges.txt")).withNuiFallbackNormalization
+        val tokenizer=tokenizerFromDir(tokenizerDir,"<|endoftext|>",useDirectoryConfig=false)
+          .getOrElse(ClipFastTokenizer.loadBundled())
+          .withNuiFallbackNormalization
         val tiling=bool(p,"vae_tiling",false)
         val before=Files.readAttributes(root,classOf[java.nio.file.attribute.BasicFileAttributes])
-        val components=SingleFileSd1Model.load(root,maxAttentionScoreElements,() => context.checkCancelled(),vaeAttentionLimit)
+        // The checkpoint hash is independent of tensor loading: compute it on another thread while the tensors load.
+        val hashStart=System.nanoTime()
+        val hashFuture=java.util.concurrent.CompletableFuture.supplyAsync(() =>
+          val digest=java.security.MessageDigest.getInstance("SHA-256")
+          val stream=Files.newInputStream(root)
+          try
+            val buffer=new Array[Byte](1<<20)
+            var n=stream.read(buffer)
+            while n != -1 do
+              digest.update(buffer,0,n)
+              n=stream.read(buffer)
+          finally stream.close()
+          digest)
+        val loadStart=System.nanoTime()
+        val components=try SingleFileSd1Model.load(root,maxAttentionScoreElements,() => context.checkCancelled(),vaeAttentionLimit) catch case error: Throwable =>
+          hashFuture.cancel(true);throw error
+        if sys.env.get("SCALATORCH_LOAD_PROFILE").contains("1") then System.err.println(f"[scala-torch load] single-file tensors+modules: ${(System.nanoTime()-loadStart)/1e9}%.1f s")
         val sdxlText=components.clip2.map { clip2 =>
           val secondDir=sys.env.get("SDFX_SCALATORCH_TOKENIZER_2").map(Path.of(_)).getOrElse(tokenizerDir.resolveSibling("tokenizer_2"))
-          val tokenizer2=(if Files.isRegularFile(secondDir.resolve("vocab.json")) && Files.isRegularFile(secondDir.resolve("merges.txt")) then
-            if Files.isRegularFile(secondDir.resolve("tokenizer_config.json")) then ClipFastTokenizer.loadDirectory(secondDir)
-            else ClipFastTokenizer.load(secondDir.resolve("vocab.json"),secondDir.resolve("merges.txt"),padToken="!")
-          else ClipFastTokenizer.load(tokenizerDir.resolve("vocab.json"),tokenizerDir.resolve("merges.txt"),padToken="!")).withNuiFallbackNormalization
+          val tokenizer2=tokenizerFromDir(secondDir,"!",useDirectoryConfig=true)
+            .orElse(tokenizerFromDir(tokenizerDir,"!",useDirectoryConfig=false))
+            .getOrElse(ClipFastTokenizer.loadBundled(padToken="!"))
+            .withNuiFallbackNormalization
           new SdxlTextConditioning(tokenizer,components.clip,tokenizer2,clip2)
         }
         val (vae,vaeInfo)=selectedVae.fold((components.vae,Map[String,NativeJson]("vae_name"->Null,"vae_hash"->Null)))(p => readVae(Some(p),context,Some(components.vae.config)))
         val pipeline=new EulerImagePipeline(tokenizer,components.clip,components.unet,vae,
           vaeExecution=vaeExecution,unetExecution=unetExecution,sdxlConditioning=sdxlText,vaeTiling=tiling)
-        val digest=java.security.MessageDigest.getInstance("SHA-256")
-        val stream=Files.newInputStream(root)
-        try
-          val buffer=new Array[Byte](65536)
-          var n=stream.read(buffer)
-          while n != -1 do
-            context.checkCancelled()
-            digest.update(buffer,0,n)
-            n=stream.read(buffer)
-        finally stream.close()
+        val digest=hashFuture.get()
+        if sys.env.get("SCALATORCH_LOAD_PROFILE").contains("1") then System.err.println(f"[scala-torch load] sha256 of checkpoint: ${(System.nanoTime()-hashStart)/1e9}%.1f s")
         val after=Files.readAttributes(root,classOf[java.nio.file.attribute.BasicFileAttributes])
         require(before.size()==after.size() && before.lastModifiedTime()==after.lastModifiedTime() &&
           before.fileKey()==after.fileKey(),"checkpoint changed during loading or hashing")
         context.beginPublication()
         NativeBatch18Services.clearPreparedBatchInterrogates()
         loaded=Some(pipeline)
+        releaseCudaWeights()
         vaeTilingEnabled=tiling
         loadedEmbeddingTokens=Set.empty
         loadedEmbeddingInfo=Vector.empty
         linearTargets=components.linearTargets
         singleFileFamily=components.family
-        modelSummary=Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),"kind"->Str(singleFileKind),
+        modelSummary=Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),"kind"->Str(singleFileKind),"dtype"->Str(precision),
           "hash"->Str(java.util.HexFormat.of().formatHex(digest.digest())),"family"->Str(if components.family=="sdxl" then "sdxl" else if components.family=="sd2" then "sd2" else "sd"),
           "model_token"->Str(UUID.randomUUID().toString))++vaeInfo
         modelSummary
       case "load_model" =>
+        if idle then throw new NativeBackendError("no_model","pass a model path to load_model")
         keys(p,Set("path","dtype","vram_mode","vae_path","vae_tiling"))
         require(Path.of(str(p,"path",root.toString)).toRealPath()==root,"model path differs from configured checkpoint")
-        if str(p,"dtype","fp32")!="fp32" || str(p,"vram_mode","cpu")!="cpu" then
-          unsupported("native parameter loading requires fp32 and cpu; U-Net/VAE execution placement is configured separately")
+        val precision=applyPrecision(p)
         val vaeTiling=bool(p,"vae_tiling",false)
         val selectedVae=vaeChoice(p,"vae_path")
         val sdxl=sdxlProfile()
@@ -919,11 +971,12 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         context.beginPublication()
         NativeBatch18Services.clearPreparedBatchInterrogates()
         loaded=Some(pipeline)
+        releaseCudaWeights()
         vaeTilingEnabled=vaeTiling
         loadedEmbeddingTokens=Set.empty
         loadedEmbeddingInfo=Vector.empty
         linearTargets=nextLinearTargets
-        modelSummary=Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),"kind"->Str("diffusers"),
+        modelSummary=Map("name"->Str(root.getFileName.toString),"path"->Str(root.toString),"kind"->Str("diffusers"),"dtype"->Str(precision),
           "hash"->Str(hash),"family"->Str(if sdxl then "sdxl" else "sd"),"model_token"->Str(UUID.randomUUID().toString))++vaeInfo
         if usesCuda then
           val deviceIndex=Seq(vaeExecution.device,unetExecution.device).collectFirst {
@@ -950,6 +1003,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         context.beginPublication()
         NativeBatch18Services.clearPreparedBatchInterrogates()
         loaded=None
+        releaseCudaWeights()
         loadedControlNet=None
         vaeTilingEnabled=false
         loadedEmbeddingTokens=Set.empty
@@ -1123,6 +1177,20 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
                 str(fields,"curve","linear").toLowerCase(java.util.Locale.ROOT),number(fields,"start",0).toDouble,number(fields,"end",1).toDouble))
           }
           case _ => None
+        val sada=g.get("hooks") match
+          case Some(Obj(hooks)) => hooks.get("sada").flatMap {
+            case Null | Bool(false) => None
+            case Obj(fields) if fields.get("enabled").contains(Bool(false)) => None
+            case value =>
+              val fields=value match
+                case Bool(true) => Map.empty[String,NativeJson]
+                case Obj(v) => v
+                case _ => throw IllegalArgumentException("invalid sada hook")
+              require(fields.keySet.subsetOf(Set("enabled","start","end","max_consecutive")),"unknown sada option")
+              Some(SadaConfig(number(fields,"start",BigDecimal("0.2")).toDouble,number(fields,"end",BigDecimal("0.9")).toDouble,
+                number(fields,"max_consecutive",2).toInt))
+          }
+          case _ => None
         if cfgSchedule.nonEmpty && number(g,"cfg_scale",7)<=1 then
           context.event("log",Map("level"->Str("warn"),"message"->Str("CFG schedule needs CFG scale > 1 (CFG is off); ignored")))
         val resharpen=g.get("hooks") match
@@ -1193,6 +1261,36 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
               Some(LatentVectorscope(number(fields,"brightness",0).toDouble,number(fields,"contrast",0).toDouble,
                 number(fields,"saturation",0).toDouble,number(fields,"r",0).toDouble,number(fields,"g",0).toDouble,
                 number(fields,"b",0).toDouble,str(fields,"method","Straight"),str(fields,"scaling","Flat"),number(fields,"strength",1).toDouble))
+          }
+          case _ => None
+        val deepCache=g.get("hooks") match
+          case Some(Obj(hooks)) => hooks.get("deepcache").flatMap {
+            case Null | Bool(false) => None
+            case Obj(fields) if fields.get("enabled").contains(Bool(false)) => None
+            case value =>
+              val fields=value match
+                case Bool(true) => Map.empty[String,NativeJson]
+                case Obj(v) => v
+                case _ => throw IllegalArgumentException("invalid deepcache hook")
+              require(fields.keySet.subsetOf(Set("enabled","interval","branch","full_first","order")),"unknown deepcache option")
+              require(usesCuda,"DeepCache needs the CUDA U-Net")
+              Some(DeepCacheConfig(number(fields,"interval",BigDecimal(3)).toInt,number(fields,"branch",BigDecimal(0)).toInt,
+                number(fields,"full_first",BigDecimal(5)).toInt,number(fields,"order",BigDecimal(0)).toInt))
+          }
+          case _ => None
+        DeepCache.install(deepCache)
+        val tgateHook=g.get("hooks") match
+          case Some(Obj(hooks)) => hooks.get("tgate").flatMap {
+            case Null | Bool(false) => None
+            case Obj(fields) if fields.get("enabled").contains(Bool(false)) => None
+            case value =>
+              val fields=value match
+                case Bool(true) => Map.empty[String,NativeJson]
+                case Obj(v) => v
+                case _ => throw IllegalArgumentException("invalid tgate hook")
+              require(fields.keySet.subsetOf(Set("enabled","gate_step")),"unknown tgate option")
+              require(usesCuda,"T-GATE needs the CUDA U-Net")
+              Some(TGateConfig(number(fields,"gate_step",BigDecimal(8)).toInt))
           }
           case _ => None
         val freeU=g.get("hooks") match
@@ -1665,7 +1763,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           case None | Some(Null) => None
           case value => Some(parseLoras(value))
         val nineChannelModel=pipeline.unet.convIn.weight.data.shape.dims(1)==2*pipeline.vae.config.latentChannels+1
-        var remainingAdapterElements=100000000L
+        var remainingAdapterElements=1073741824L
         val adapterCache=scala.collection.mutable.Map.empty[(Path,Option[Int]),Map[scalatorch.nn.Parameter,Vector[LinearAdapterScope.Applied]]]
         val adapterWindows=new java.util.IdentityHashMap[scalatorch.nn.LowRankAdapter,LoraStepWindow]()
         val adaptersByName=scala.collection.mutable.HashMap.empty[String,scala.collection.mutable.ArrayBuffer[scalatorch.nn.LowRankAdapter]]
@@ -1680,10 +1778,20 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           require(Vector(".safetensors",".pt",".pth",".bin",".ckpt").exists(lower.endsWith) && Files.isRegularFile(file),
             s"LoRA tensor archive is missing or unsupported: $name")
           val loadedAdapter=adapterCache.getOrElseUpdate((file,dynamicRank), {
-            val loaded=DiffusionLoRA.load(file,linearTargets,elementBudget=remainingAdapterElements,dynamicRank=dynamicRank)
-            val used=loaded.valuesIterator.flatten.map { case (adapter,_) =>
-              adapter.a.data.shape.numel+adapter.b.data.shape.numel
-            }.sum
+            if loraFileCacheTargets ne linearTargets then { loraFileCache.clear();loraFileCacheTargets=linearTargets }
+            val fileKey=(file,dynamicRank,Files.size(file),Files.getLastModifiedTime(file).toMillis)
+            val kept=if loraFileCacheEnabled then loraFileCache.get(fileKey).filter(_._1<=remainingAdapterElements) else None
+            val (used,loaded)=kept.getOrElse {
+              val read=DiffusionLoRA.load(file,linearTargets,elementBudget=remainingAdapterElements,dynamicRank=dynamicRank)
+              val elements=read.valuesIterator.flatten.map { case (adapter,_) =>
+                adapter.a.data.shape.numel+adapter.b.data.shape.numel
+              }.sum
+              if loraFileCacheEnabled then
+                loraFileCache.remove(fileKey)
+                loraFileCache(fileKey)=(elements,read)
+                while loraFileCache.size>4 do loraFileCache.remove(loraFileCache.head._1)
+              (elements,read)
+            }
             remainingAdapterElements-=used
             loaded
           })
@@ -1764,10 +1872,19 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val aestheticScoreHook=NativeBatch18Services.parseAestheticScore(g.get("hooks"))
         val animateDiffHook=NativeBatch18Services.parseAnimateDiff(g.get("hooks"))
         require(steps>0 && steps<=1000,"steps must be between 1 and 1000")
+        val postDiffExperiment=g.get("extra") match
+          case Some(Obj(extra)) => NativePostDiff.parse(extra.get("postdiff_experiment"))
+          case _ => None
+        val paperAysExperiment=g.get("extra") match
+          case Some(Obj(extra)) => extra.get("paper_ays_experiment") match
+            case None | Some(Null) => false
+            case Some(Str("1")) => true
+            case _ => throw IllegalArgumentException("paper AYS experiment requires the string '1'")
+          case _ => false
         val baseImageRequest=DiffusionImageRequest(str(g,"prompt",""),str(g,"negative_prompt",""),
           integer(g,"width",512),integer(g,"height",512),seed,number(g,"cfg_scale",7).toFloat,
           clipSkip=integer(g,"clip_skip",1),sdxlSize=sdxlSize,
-          torchCpuNoise=NativeGenerationMetadata.torchCpuNoise(g.get("extra"),cudaAvailable=usesCuda),guidanceRescale=guidanceRescale,cfgSchedule=cfgSchedule,resharpen=resharpen,latentMirroring=latentMirroring,colorGrading=colorGrading,antiBurn=antiBurn,vectorscope=vectorscope,detailDaemon=detailDaemon,dynamicThresholding=dynamicThresholding,tiling=tilingHook,cads=cadsHook,hyperTile=hyperTileHook,apg=apgHook,mahiro=mahiroHook,pag=pagHook,trainingSigmas=activeNoise.floatTrainingSigmas,weightGradient=weightGradientHook,negPip=negPipHook,kohyaHrFix=kohyaHrFixHook,tokenDownsampling=tokenDownsamplingHook,latentModifier=latentModifierHook,softInpainting=softInpaintingHook,multiDiffusion=multiDiffusionHook,semanticGuidance=semanticGuidanceHook,sonar=sonarHook,cdTuner=cdTunerHook,llul=llulHook,agentAttention=agentAttentionHook,incantations=incantationsHook,characteristicGuidance=chgHook,clipIo=clipIoHook,promptFusion=promptFusionHook,neutralPrompt=neutralPromptHook,composableLora=composableLoraHook,aestheticGradients=aestheticGradientsHook,sag=sagHook,reference=referenceHook,revision=revisionHook,ipAdapter=ipAdapterHook,controlLLLite=controlLLLiteHook,fooocusInpaint=fooocusInpaintHook,compile=compileHook,controlNetPaths=controlnetPaths)
+          torchCpuNoise=NativeGenerationMetadata.torchCpuNoise(g.get("extra"),cudaAvailable=usesCuda),guidanceRescale=guidanceRescale,cfgSchedule=cfgSchedule,sada=sada,postDiff=postDiffExperiment,resharpen=resharpen,latentMirroring=latentMirroring,colorGrading=colorGrading,antiBurn=antiBurn,vectorscope=vectorscope,detailDaemon=detailDaemon,dynamicThresholding=dynamicThresholding,tiling=tilingHook,cads=cadsHook,hyperTile=hyperTileHook,apg=apgHook,mahiro=mahiroHook,pag=pagHook,trainingSigmas=activeNoise.floatTrainingSigmas,weightGradient=weightGradientHook,negPip=negPipHook,kohyaHrFix=kohyaHrFixHook,tokenDownsampling=tokenDownsamplingHook,latentModifier=latentModifierHook,softInpainting=softInpaintingHook,multiDiffusion=multiDiffusionHook,semanticGuidance=semanticGuidanceHook,sonar=sonarHook,cdTuner=cdTunerHook,llul=llulHook,agentAttention=agentAttentionHook,incantations=incantationsHook,characteristicGuidance=chgHook,clipIo=clipIoHook,promptFusion=promptFusionHook,neutralPrompt=neutralPromptHook,composableLora=composableLoraHook,aestheticGradients=aestheticGradientsHook,sag=sagHook,reference=referenceHook,revision=revisionHook,ipAdapter=ipAdapterHook,controlLLLite=controlLLLiteHook,fooocusInpaint=fooocusInpaintHook,compile=compileHook,tgate=tgateHook,controlNetPaths=controlnetPaths)
         val fallbackControlImage=if img2img then g.get("img2img") match
           case Some(Obj(fields)) => fields.get("init_image").collect { case Str(path) if path.nonEmpty => path }
           case _ => None
@@ -1787,7 +1904,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val imageRequest=baseImageRequest.copy(controlNets=controlNet)
         val keywordPlan=NativeKeywordHook.plan(g.get("hooks"),imageRequest.prompt,
           modelSummary("hash").asInstanceOf[Str].value,root.getFileName.toString,iterations,seed,keywordState,
-          () => context.checkCancelled(),allowActive=Set("img2img_hires_fix","latent_upscale","inpaint_difference","gpu_temperature_guard","rescale_cfg","cfg_schedule","resharpen","latent_mirroring","color_grading","anti_burn","vectorscope_cc","detail_daemon","freeu","dynamic_thresholding","tiling","cads","hypertile","model_sampling","apg","mahiro","pag","weight_gradient","negpip","kohya_hrfix","token_downsampling","conditioning_highres_fix","multidiffusion","latent_modifier","soft_inpainting","neveroom","semantic_guidance","sonar","hires_fix_tweaks","pnginfo_injection","prevent_interrupt","save_intermediate","steps_animation","img2imgalt","cd_tuner","llul","agent_attention","incantations","characteristic_guidance","clip_io","prompt_fusion","neutral_prompt","composable_lora","embedding_merge","aesthetic_gradients","sag","reference","revision","ip_adapter","controllllite","fooocus_inpaint","compile","adetailer","batch_face_swap","face_restore","nsfw_checker","aesthetic_score","animatediff","photomaker"))
+          () => context.checkCancelled(),allowActive=Set("img2img_hires_fix","latent_upscale","inpaint_difference","gpu_temperature_guard","rescale_cfg","cfg_schedule","sada","tgate","resharpen","latent_mirroring","color_grading","anti_burn","vectorscope_cc","detail_daemon","freeu","deepcache","dynamic_thresholding","tiling","cads","hypertile","model_sampling","apg","mahiro","pag","weight_gradient","negpip","kohya_hrfix","token_downsampling","conditioning_highres_fix","multidiffusion","latent_modifier","soft_inpainting","neveroom","semantic_guidance","sonar","hires_fix_tweaks","pnginfo_injection","prevent_interrupt","save_intermediate","steps_animation","img2imgalt","cd_tuner","llul","agent_attention","incantations","characteristic_guidance","clip_io","prompt_fusion","neutral_prompt","composable_lora","embedding_merge","aesthetic_gradients","sag","reference","revision","ip_adapter","controllllite","fooocus_inpaint","compile","adetailer","batch_face_swap","face_restore","nsfw_checker","aesthetic_score","animatediff","photomaker"))
         val keywordRefinement=hiresFix.filter(_.prompt.isEmpty).flatMap(_ => keywordPlan.map(_.preview))
         val keywordRefinementAdapters=keywordRefinement.map { text =>
           val refs=manualLoras++NativeLoraPrompt.parse(text)._2
@@ -1962,6 +2079,13 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val supportedSchedules=Set("Uniform","Karras","Exponential","Polyexponential","Normal","Simple","SGM Uniform","Align Your Steps","KL Optimal","DDIM","Beta")
         if !allSupportedSamplers(sampler) || !supportedSchedules(schedule) then
           unsupported(s"unsupported sampler/schedule: $sampler/$schedule")
+        if paperAysExperiment then
+          require(sampler=="DPM++ 2M SDE" && steps==10 && batchSize==1 && !img2img && hires.isEmpty &&
+            hiresFix.isEmpty && controlNet.isEmpty && prediction==DiffusionPrediction.Epsilon && postDiffExperiment.isEmpty && g.get("hooks").forall {
+              case Null => true
+              case Obj(fields) => fields.isEmpty
+              case _ => false
+            },"paper AYS experiment requires plain txt2img, one image, 10 steps, and DPM++ 2M SDE")
         if sampler=="Euler a" && prediction==DiffusionPrediction.Sample then
           unsupported("Euler a does not support sample prediction")
         val hiresSamplerName=hires.flatMap(_.sampler).getOrElse(samplerName)
@@ -1984,6 +2108,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val staged=scala.collection.mutable.ArrayBuffer.empty[Path]
         val published=scala.collection.mutable.ArrayBuffer.empty[Path]
         val samplerWarnings=scala.collection.mutable.LinkedHashSet.empty[String]
+        if paperAysExperiment then
+          samplerWarnings += "Experimental paper AYS overrides the requested scheduler; PNG replay metadata does not encode this experiment"
         def warnUnusedEta(name: String): Unit =
           if etaProvided && name!="DDIM" then samplerWarnings += s"eta is ignored by sampler '$name'"
         if img2img && variationStrength>0 then samplerWarnings+="variation seed is only applied in txt2img"
@@ -2061,10 +2187,17 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
 
 
         def dpmSchedule(count: Int,requested: String,samplerName: String="DPM++ 2M"): DpmSchedule =
+          if paperAysExperiment && samplerName=="DPM++ 2M SDE" then
+            require(count==10,"paper AYS experiment requires 10 steps")
+            return DpmSchedule.paperAys(activeNoise,generationPipeline.sdxlConditioning.nonEmpty)
           if count>activeNoise.betas.size && Set("Uniform","Normal","Simple","SGM Uniform")(requested) then
             samplerWarnings += "repeated DPM sigma steps use a stable first-order fallback"
           requested match
             case "Karras" => DpmSchedule.karras(activeNoise,count)
+            case "Align Your Steps" if Set("DPM++ 2M SDE","DPM++ 2M SDE Heun","DPM++ 3M SDE")(samplerName) &&
+                activeNoise.betas.size==1000 &&
+                activeNoise.betas.zip(DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true).betas).forall((a,b)=>math.abs(a-b)<=1e-7) =>
+              DpmSchedule.paperAys(activeNoise,generationPipeline.sdxlConditioning.nonEmpty,count)
             case "Polyexponential" | "Align Your Steps" | "KL Optimal" =>
               samplerWarnings += s"schedule '$requested' is not available for sampler '$samplerName'; using Karras"
               DpmSchedule.karras(activeNoise,count)
@@ -2110,6 +2243,28 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
 
         */
         var tinyPreviewFailed=false
+        // Batched sampling: the `batch_size` images of one group share every U-Net pass (one batch of 2N with guidance) instead of
+        // being sampled one after another. Only for the plain requests parallel count may split, with nothing per image but the seed.
+        val batchedGroups=batchSize>1 && CudaUNet.batchedSampling && generationPipeline.unetExecution.isInstanceOf[UNetExecution.Cuda] &&
+          // DeepCache and T-GATE work on the whole U-Net batch (their state is per thread, so they stay off the parallel-count path only).
+          NativeParallelCount.plainTxt2img(request,keywordInert,Set("deepcache","cfg_schedule","sada","tgate")) && !img2img && source.isEmpty && hires.isEmpty && hiresFix.isEmpty &&
+          keywordPlan.forall(_.prompts.forall(_==imageRequest.prompt)) && requestedLoras.isEmpty && manualLoras.isEmpty && controlNet.isEmpty &&
+          intermediateSession.isEmpty && variationStrength==0 && freeU.isEmpty && temperatureGuard.isEmpty &&
+          hardware.isEmpty && !altActive && sonarHook.isEmpty && adetailerUnits.isEmpty && EulerImagePipeline.batchable(imageRequest)
+        if batchSize>1 && !batchedGroups && sys.env.get("SCALATORCH_BATCHED_SAMPLING_LOG").contains("1") then
+          System.err.println("[scala-torch] batched sampling not used: "+Seq(
+            "switch"->CudaUNet.batchedSampling,"cuda"->generationPipeline.unetExecution.isInstanceOf[UNetExecution.Cuda],
+            "plain"->NativeParallelCount.plainTxt2img(request,keywordInert,Set("deepcache","cfg_schedule","sada","tgate")),"txt2img"->(!img2img && source.isEmpty),
+            "noHires"->(hires.isEmpty && hiresFix.isEmpty),"samePrompt"->keywordPlan.forall(_.prompts.forall(_==imageRequest.prompt)),
+            "noLora"->(requestedLoras.isEmpty && manualLoras.isEmpty),"noControlNet"->controlNet.isEmpty,
+            "noRecorder"->intermediateSession.isEmpty,"noVariation"->(variationStrength==0),"noFreeU"->freeU.isEmpty,
+            "noGuard"->temperatureGuard.isEmpty,"noHardware"->hardware.isEmpty,"noAlt"->(!altActive),"noSonar"->sonarHook.isEmpty,
+            "noAdetailer"->adetailerUnits.isEmpty,"pipeline"->EulerImagePipeline.batchable(imageRequest)).filterNot(_._2).map(_._1).mkString(", "))
+          System.err.println("[scala-torch] outer keys: "+request.params.map((k,v) => k+"="+v.toString.take(60)).mkString(" ; ")+" extra="+g.get("extra").map(_.toString.take(300)))
+          System.err.println("[scala-torch] request keys: "+g.keySet.toVector.sorted.mkString(",")+" | hooks: "+(g.get("hooks") match
+            case Some(Obj(h)) => h.map((k,v) => k+"="+v.toString.take(160)).mkString(" ; ")
+            case other => other.toString))
+        val batchedLatents=scala.collection.mutable.HashMap.empty[Int,scalatorch.Tensor[Float]]
         try
           val images=Vector.tabulate(iterations) { index =>
             context.checkCancelled()
@@ -2238,25 +2393,50 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
                       lat => DiffusionImageIO.toBufferedImage(generationPipeline.decodeLatents(lat,context.cancelled)),
                       lat => NativePreview.jpegBase64(lat,sdxl=generationPipeline.sdxlConditioning.nonEmpty))
                 }
-              def basePass(): scalatorch.Tensor[Float]={
+              /** The decoded image of this index when its batch is sampled together. The first image of a batch runs the sampling
+                * for all of them; a memory failure (or a step only the single-image path implements) leaves the batch to the
+                * ordinary pass below, image by image. */
+              def batchedBase(): Option[scalatorch.Tensor[Float]]=
+                if !batchedGroups then None
+                else
+                  if index%batchSize==0 then
+                    batchedLatents.clear()
+                    if !scalatorch.ffm.CudaSession.memoryTight then
+                      try
+                        val report=progress("base")
+                        val all=baseLatentsPass(current.copy(batchSeeds=Vector.tabulate(batchSize)(k => current.seed+k)),
+                          value => report(value.copy(latents=value.latents.slice(0,0,1).contiguous)))
+                        require(all.shape.dims.head==batchSize,"batched sampling returned a different number of latents")
+                        (0 until batchSize).foreach(k => batchedLatents(index+k)=all.slice(0,k,k+1).contiguous)
+                      catch
+                        case error: BatchedSamplingUnsupported =>
+                          batchedLatents.clear()
+                          System.err.println(s"[scala-torch] batched sampling not used: ${error.getMessage}")
+                        case error: Throwable if CudaUNet.memoryFailure(error) && !context.cancelled() =>
+                          batchedLatents.clear()
+                          System.err.println(s"[scala-torch] batched sampling ran out of memory (${Option(error.getMessage).getOrElse("").take(160)}); sampling one by one")
+                          context.event("log",Map("level"->Str("warn"),"message"->Str(
+                            "not enough GPU memory to sample the batch together; sampling its images one after another")))
+                  batchedLatents.remove(index).map(latents => generationPipeline.decodeLatents(latents,context.cancelled))
+              def basePass(): scalatorch.Tensor[Float]=batchedBase().getOrElse {
                 val (reqBase,srcBase)=if altActive then
                   val invNoise=generationPipeline.invertImageForAlt(current,source.get.image,img2imgAltHook.get,activeNoise,steps,prediction,context.cancelled)
                   (current.copy(initialNoiseOverride=Some(invNoise),onStepObservation=stepObserverFor("base",0,current.seed)),None)
                 else (current.copy(onStepObservation=stepObserverFor("base",0,current.seed)),source)
                 runImagePass(reqBase,if altActive then steps else baseSteps,progress("base"),srcBase,None,sampler,schedule)
               }
-              def baseLatentsPass(): scalatorch.Tensor[Float]=
+              def baseLatentsPass(passRequest: DiffusionImageRequest=current,callback: DiffusionImageProgress => Unit=progress("base")): scalatorch.Tensor[Float]=
                 val actualRequest=if generationPipeline.sdxlConditioning.isEmpty && source.nonEmpty then
-                  current.copy(guidanceRescale=0f) else current
+                  passRequest.copy(guidanceRescale=0f) else passRequest
                 warnUnusedEta(sampler)
                 if sampler=="DPM++ 2M SDE" || sampler=="DPM++ 2M SDE Heun" || sampler=="DPM++ 3M SDE" then
                   val layout=dpmSchedule(baseSteps,schedule,sampler)
                   generationPipeline.generateDpmMultistepSde(actualRequest,layout,order=if sampler=="DPM++ 3M SDE" then 3 else 2,
-                    heunVariant=(sampler=="DPM++ 2M SDE Heun"),onProgress=progress("base"),cancelled=context.cancelled,
+                    heunVariant=(sampler=="DPM++ 2M SDE Heun"),onProgress=callback,cancelled=context.cancelled,
                     prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="UniPC" then
                   val layout=dpmSchedule(baseSteps,schedule,"UniPC")
-                  generationPipeline.generateUniPc(actualRequest,layout,onProgress=progress("base"),cancelled=context.cancelled,
+                  generationPipeline.generateUniPc(actualRequest,layout,onProgress=callback,cancelled=context.cancelled,
                     prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="LCM" then
                   schedule match
@@ -2267,37 +2447,37 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
                       samplerWarnings += s"schedule '$schedule' is not supported by sampler 'LCM'; using the sampler's default spacing"
                     case _ => ()
                   if schedule!="Uniform" then samplerWarnings += "LCM ignores the schedule type"
-                  generationPipeline.generateLcm(actualRequest,LcmSchedule(activeNoise,baseSteps),onProgress=progress("base"),
+                  generationPipeline.generateLcm(actualRequest,LcmSchedule(activeNoise,baseSteps),onProgress=callback,
                     cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="LMS" then
-                  generationPipeline.generateLms(actualRequest,discreteEulerSchedule(baseSteps,schedule,"LMS"),onProgress=progress("base"),
+                  generationPipeline.generateLms(actualRequest,discreteEulerSchedule(baseSteps,schedule,"LMS"),onProgress=callback,
                     cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="DPM2" || sampler=="DPM2 a" then
                   generationPipeline.generateKdpm2(actualRequest,discreteEulerSchedule(baseSteps,schedule,sampler,roundKarrasTimesteps=true),ancestral=(sampler=="DPM2 a"),
-                    onProgress=progress("base"),cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
+                    onProgress=callback,cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="DPM++ 2S a" then
-                  generationPipeline.generateDpm2Sa(actualRequest,dpmSinglestepSchedule(baseSteps,schedule),onProgress=progress("base"),
+                  generationPipeline.generateDpm2Sa(actualRequest,dpmSinglestepSchedule(baseSteps,schedule),onProgress=callback,
                     cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="DPM++ SDE" then
-                  generationPipeline.generateDpmSde(actualRequest,discreteEulerSchedule(baseSteps,schedule,"DPM++ SDE"),onProgress=progress("base"),
+                  generationPipeline.generateDpmSde(actualRequest,discreteEulerSchedule(baseSteps,schedule,"DPM++ SDE"),onProgress=callback,
                     cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="DDIM" then
                   generationPipeline.generateDdim(actualRequest,ddimSchedule(baseSteps,schedule),config.ddimClipSample,config.ddimClipRange,
-                    eta=ddimEta,onProgress=progress("base"),cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
+                    eta=ddimEta,onProgress=callback,cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
                 else if sampler=="DPM++ 2M" then
                   val layout=dpmSchedule(baseSteps,schedule)
-                  generationPipeline.generateDpmLatents(actualRequest,layout,onProgress=progress("base"),cancelled=context.cancelled,
+                  generationPipeline.generateDpmLatents(actualRequest,layout,onProgress=callback,cancelled=context.cancelled,
                     prediction=prediction,source=source)
                 else if sampler=="Euler a" then
                   val layout=ancestralSchedule(baseSteps,schedule)
-                  generationPipeline.generateAncestralLatents(actualRequest,layout,onProgress=progress("base"),
+                  generationPipeline.generateAncestralLatents(actualRequest,layout,onProgress=callback,
                     cancelled=context.cancelled,prediction=prediction,source=source)
                 else if sampler=="Heun" then
-                  generationPipeline.generateHeun(actualRequest,discreteEulerSchedule(baseSteps,schedule,"Heun"),onProgress=progress("base"),
+                  generationPipeline.generateHeun(actualRequest,discreteEulerSchedule(baseSteps,schedule,"Heun"),onProgress=callback,
                     cancelled=context.cancelled,prediction=prediction,source=source,returnLatents=true)
                 else
                   val layout=eulerSchedule(baseSteps,schedule)
-                  generationPipeline.generateLatents(actualRequest,layout,onProgress=progress("base"),cancelled=context.cancelled,
+                  generationPipeline.generateLatents(actualRequest,layout,onProgress=callback,cancelled=context.cancelled,
                     prediction=prediction,source=source)
               def firstPass(): scalatorch.Tensor[Float]=hires match
                 case None => basePass()
@@ -2405,7 +2585,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
               case failure: VaeDecodeFailure =>
                 context.checkCancelled()
                 val artifact=NativeVaeRecovery.save(failure.decoderInput,recovery)
-                throw new NativeBackendError("vae_decode_failed",s"VAE decode failed; exact decoder input saved to $artifact",failure)
+                throw new NativeBackendError("vae_decode_failed",s"VAE decode failed (${Option(failure.getCause).getOrElse(failure).toString.take(300)}); exact decoder input saved to $artifact",failure)
             context.checkCancelled()
             val pastedImage=preparedInpaint.filter(_.pasteBox.nonEmpty).filter(_ => hiresFix.isEmpty)
               .map(_.pasteBack(DiffusionImageIO.toBufferedImage(image),context.cancelled))
@@ -2466,7 +2646,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
           Files.delete(staging)
           keywordPlan.foreach(plan => keywordState=plan.nextState)
           Map("images"->Arr(images),"timing_s"->Number(BigDecimal((System.nanoTime()-started)/1e9)),
-            "model_name"->Str(root.getFileName.toString),"scheduler"->Str(schedule),
+            "model_name"->Str(root.getFileName.toString),"scheduler"->Str(if paperAysExperiment then "paper AYS (experimental)" else schedule),
             "warnings"->Arr((embeddingWarnings++samplerWarnings.toVector).map(Str.apply)),
             "intermediate_artifacts"->Arr(intermediateSession.map(_.finish()).getOrElse(Vector.empty)))++
             Option.when(systemInfoFields.nonEmpty) {
@@ -2487,20 +2667,22 @@ object NativeWorkerMain:
   private val DefaultMaxAttentionScoreElements=134217728L
   private[models] def attentionScoreLimit(configured: Option[String],cudaUnet: Boolean): Long =
     // CUDA attention slices its score scratch to a fixed byte budget; keep a high-resolution total-work cap.
-    val limit=configured.fold(if cudaUnet then Int.MaxValue.toLong else DefaultMaxAttentionScoreElements)(_.toLong)
-    require(limit>=0 && limit<=Int.MaxValue,"invalid attention work limit")
+    val cap=if cudaUnet then 1L<<36 else Int.MaxValue.toLong
+    val limit=configured.fold(if cudaUnet then cap else DefaultMaxAttentionScoreElements)(_.toLong)
+    require(limit>=0 && limit<=cap,"invalid attention work limit")
     limit
   private[models] def vaeAttentionLimit(configured: Long,explicit: Boolean,cuda: Boolean): Long =
-    if cuda && !explicit then math.max(configured,268435456L) else configured
+    val c=math.min(configured,Int.MaxValue.toLong)
+    if cuda && !explicit then math.max(c,268435456L) else c
   private[worker] def schedulerFor(initial: Path,configured: Path,selected: Path): Path =
     val default=initial.resolve("scheduler/scheduler_config.json").toAbsolutePath.normalize()
-    val automatic=configured.toString=="-" || configured.toAbsolutePath.normalize()==default
+    val automatic=configured.toString=="-" || initial.toString=="-" || configured.toAbsolutePath.normalize()==default
     if !automatic then configured
-    else if Files.isRegularFile(selected) then Path.of("-")
+    else if selected.toString=="-" || Files.isRegularFile(selected) then Path.of("-")
     else selected.resolve("scheduler/scheduler_config.json")
   def main(args: Array[String]): Unit=
     require(args.length==2,"usage: NativeWorkerMain <diffusers-root> <explicit-euler-config.json>")
-    val initial=Path.of(args(0)).toRealPath()
+    val initial=if args(0)=="-" then Path.of("-") else Path.of(args(0)).toRealPath()
     val config=Path.of(args(1))
     val environment=CudaDeviceMemoryBudget.withAutomaticBudgets(sys.env,Seq(
       "SDFX_SCALATORCH_VAE_DEVICE"->"SDFX_SCALATORCH_VAE_MAX_BYTES",

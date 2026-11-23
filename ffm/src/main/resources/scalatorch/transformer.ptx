@@ -1832,3 +1832,251 @@ GA_STORE:
  mul.wide.u32 offset,index,4; add.u64 addr,po,offset; st.global.f32 [addr],result;
 GA_DONE: ret;
 }
+
+// Block-parallel GroupNorm statistics: one block of 256 threads per group, strided FP64 partial sums,
+// shared-memory tree reduction. Same mean/inverse-stddev layout as groupnorm_stats.
+.shared .align 8 .b8 gp_red[2048];
+.visible .entry groupnorm_stats_par(.param .u64 gp_x,.param .u64 gp_stats,
+ .param .u32 gp_rows,.param .u32 gp_width,.param .f64 gp_eps) {
+ .reg .pred p;
+ .reg .u32 rows,row,width,tid,i,index,start,half;
+ .reg .u64 px,ps,offset,addr,sh,mine;
+ .reg .f32 x;
+ .reg .f64 acc,value,other,mean,variance,denom,eps,centered,product,inverse;
+ ld.param.u64 px,[gp_x]; ld.param.u64 ps,[gp_stats];
+ ld.param.u32 rows,[gp_rows]; ld.param.u32 width,[gp_width]; ld.param.f64 eps,[gp_eps];
+ mov.u32 row,%ctaid.x; setp.ge.u32 p,row,rows; @p bra GP_DONE;
+ mov.u32 tid,%tid.x; mul.lo.u32 start,row,width; cvt.rn.f64.u32 denom,width;
+ mov.u64 sh,gp_red; mul.wide.u32 offset,tid,8; add.u64 mine,sh,offset;
+ mov.f64 acc,0d0000000000000000; mov.u32 i,tid;
+GP_MEAN:
+ setp.ge.u32 p,i,width; @p bra GP_MEAN_END;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; cvt.f64.f32 value,x; add.rn.f64 acc,acc,value;
+ add.u32 i,i,256; bra GP_MEAN;
+GP_MEAN_END:
+ st.shared.f64 [mine],acc; bar.sync 0; mov.u32 half,128;
+GP_RED1:
+ setp.eq.u32 p,half,0; @p bra GP_RED1_END;
+ setp.ge.u32 p,tid,half; @p bra GP_RED1_SKIP;
+ add.u32 index,tid,half; mul.wide.u32 offset,index,8; add.u64 addr,sh,offset;
+ ld.shared.f64 other,[addr]; ld.shared.f64 acc,[mine]; add.rn.f64 acc,acc,other; st.shared.f64 [mine],acc;
+GP_RED1_SKIP:
+ bar.sync 0; shr.u32 half,half,1; bra GP_RED1;
+GP_RED1_END:
+ ld.shared.f64 mean,[sh]; div.rn.f64 mean,mean,denom; bar.sync 0;
+ mov.f64 acc,0d0000000000000000; mov.u32 i,tid;
+GP_VAR:
+ setp.ge.u32 p,i,width; @p bra GP_VAR_END;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; cvt.f64.f32 value,x; sub.rn.f64 centered,value,mean;
+ mul.rn.f64 product,centered,centered; add.rn.f64 acc,acc,product;
+ add.u32 i,i,256; bra GP_VAR;
+GP_VAR_END:
+ st.shared.f64 [mine],acc; bar.sync 0; mov.u32 half,128;
+GP_RED2:
+ setp.eq.u32 p,half,0; @p bra GP_RED2_END;
+ setp.ge.u32 p,tid,half; @p bra GP_RED2_SKIP;
+ add.u32 index,tid,half; mul.wide.u32 offset,index,8; add.u64 addr,sh,offset;
+ ld.shared.f64 other,[addr]; ld.shared.f64 acc,[mine]; add.rn.f64 acc,acc,other; st.shared.f64 [mine],acc;
+GP_RED2_SKIP:
+ bar.sync 0; shr.u32 half,half,1; bra GP_RED2;
+GP_RED2_END:
+ setp.ne.u32 p,tid,0; @p bra GP_DONE;
+ ld.shared.f64 variance,[sh]; div.rn.f64 variance,variance,denom; add.rn.f64 variance,variance,eps;
+ sqrt.rn.f64 inverse,variance; div.rn.f64 inverse,0d3FF0000000000000,inverse;
+ mul.wide.u32 offset,row,16; add.u64 addr,ps,offset; st.global.f64 [addr],mean;
+ add.u64 addr,addr,8; st.global.f64 [addr],inverse;
+GP_DONE: ret;
+}
+
+// FP32 GEGLU for inference: Phi(x) from the Abramowitz-Stegun 7.1.26 erf fit (abs error ~1.5e-7).
+// The negative tail is formed directly so it keeps relative precision. Exact FP64 geglu stays available.
+.visible .entry geglu_fast(.param .u64 gf_input, .param .u64 gf_output, .param .u32 gf_count, .param .u32 gf_width) {
+ .reg .pred p;
+ .reg .b32 r<8>;
+ .reg .b64 d<4>;
+ .reg .f32 f<12>;
+ ld.param.u64 d0,[gf_input]; ld.param.u64 d1,[gf_output];
+ ld.param.u32 r0,[gf_count]; ld.param.u32 r1,[gf_width];
+ mov.u32 r2,%ctaid.x; mov.u32 r3,%ntid.x; mov.u32 r4,%tid.x;
+ mad.lo.u32 r2,r2,r3,r4; setp.ge.u32 p,r2,r0; @p bra GF_DONE;
+ div.u32 r3,r2,r1; rem.u32 r4,r2,r1; shl.b32 r5,r1,1;
+ mad.lo.u32 r6,r3,r5,r4; add.u32 r7,r6,r1;
+ mul.wide.u32 d2,r6,4; add.u64 d2,d0,d2; ld.global.f32 f0,[d2];
+ mul.wide.u32 d2,r7,4; add.u64 d2,d0,d2; ld.global.f32 f1,[d2];
+ abs.f32 f2,f1; mul.rn.f32 f2,f2,0f3F3504F3;
+ mul.rn.f32 f3,f2,f2; mul.rn.f32 f3,f3,0fBFB8AA3B; ex2.approx.f32 f3,f3;
+ fma.rn.f32 f4,f2,0f3EA7BA05,0f3F800000; rcp.rn.f32 f4,f4;
+ mov.f32 f5,0f3F87DC22;
+ fma.rn.f32 f5,f5,f4,0fBFBA00E3;
+ fma.rn.f32 f5,f5,f4,0f3FB5F0E3;
+ fma.rn.f32 f5,f5,f4,0fBE91A98E;
+ fma.rn.f32 f5,f5,f4,0f3E827906;
+ mul.rn.f32 f5,f5,f4; mul.rn.f32 f5,f5,f3; mul.rn.f32 f5,f5,0f3F000000;
+ sub.rn.f32 f6,0f3F800000,f5;
+ setp.ge.f32 p,f1,0f00000000; selp.f32 f7,f6,f5,p;
+ mul.rn.f32 f8,f1,f7; mul.rn.f32 f8,f0,f8;
+ mul.wide.u32 d3,r2,4; add.u64 d3,d1,d3; st.global.f32 [d3],f8;
+GF_DONE: ret;
+}
+
+.visible .entry gelu_erf(.param .u64 ge_input, .param .u64 ge_output, .param .u32 ge_count) {
+ .reg .pred p;
+ .reg .b32 r<4>;
+ .reg .b64 d<4>;
+ .reg .f32 f<10>;
+ ld.param.u64 d0,[ge_input]; ld.param.u64 d1,[ge_output];
+ ld.param.u32 r0,[ge_count];
+ mov.u32 r1,%ctaid.x; mov.u32 r2,%ntid.x; mov.u32 r3,%tid.x;
+ mad.lo.u32 r1,r1,r2,r3; setp.ge.u32 p,r1,r0; @p bra GE_DONE;
+ mul.wide.u32 d2,r1,4; add.u64 d3,d0,d2; ld.global.f32 f0,[d3];
+ abs.f32 f2,f0; mul.rn.f32 f2,f2,0f3F3504F3;
+ mul.rn.f32 f3,f2,f2; mul.rn.f32 f3,f3,0fBFB8AA3B; ex2.approx.f32 f3,f3;
+ fma.rn.f32 f4,f2,0f3EA7BA05,0f3F800000; rcp.rn.f32 f4,f4;
+ mov.f32 f5,0f3F87DC22;
+ fma.rn.f32 f5,f5,f4,0fBFBA00E3;
+ fma.rn.f32 f5,f5,f4,0f3FB5F0E3;
+ fma.rn.f32 f5,f5,f4,0fBE91A98E;
+ fma.rn.f32 f5,f5,f4,0f3E827906;
+ mul.rn.f32 f5,f5,f4; mul.rn.f32 f5,f5,f3; mul.rn.f32 f5,f5,0f3F000000;
+ sub.rn.f32 f6,0f3F800000,f5;
+ setp.ge.f32 p,f0,0f00000000; selp.f32 f7,f6,f5,p;
+ mul.rn.f32 f8,f0,f7;
+ add.u64 d3,d1,d2; st.global.f32 [d3],f8;
+GE_DONE: ret;
+}
+
+.visible .entry quick_gelu(.param .u64 qg_input, .param .u64 qg_output, .param .u32 qg_count) {
+ .reg .pred p;
+ .reg .b32 r<4>;
+ .reg .b64 d<4>;
+ .reg .f32 f<6>;
+ ld.param.u64 d0,[qg_input]; ld.param.u64 d1,[qg_output];
+ ld.param.u32 r0,[qg_count];
+ mov.u32 r1,%ctaid.x; mov.u32 r2,%ntid.x; mov.u32 r3,%tid.x;
+ mad.lo.u32 r1,r1,r2,r3; setp.ge.u32 p,r1,r0; @p bra QG_DONE;
+ mul.wide.u32 d2,r1,4; add.u64 d3,d0,d2; ld.global.f32 f0,[d3];
+ mul.rn.f32 f1,f0,0fC01D265F;
+ ex2.approx.f32 f1,f1;
+ add.rn.f32 f1,f1,0f3F800000;
+ div.rn.f32 f2,f0,f1;
+ add.u64 d3,d1,d2; st.global.f32 [d3],f2;
+QG_DONE: ret;
+}
+
+.shared .align 4 .b8 sm_red[1024];
+.visible .entry softmax_par(.param .u64 sm_x,.param .u32 sm_rows,.param .u32 sm_width) {
+ .reg .pred p;
+ .reg .u32 rows,row,width,tid,i,index,start,half;
+ .reg .u64 px,offset,addr,sh,mine;
+ .reg .f32 x,m,other,acc,e,total;
+ ld.param.u64 px,[sm_x]; ld.param.u32 rows,[sm_rows]; ld.param.u32 width,[sm_width];
+ mov.u32 row,%ctaid.x; setp.ge.u32 p,row,rows; @p bra SM_DONE;
+ mov.u32 tid,%tid.x; mul.lo.u32 start,row,width;
+ mov.u64 sh,sm_red; mul.wide.u32 offset,tid,4; add.u64 mine,sh,offset;
+ mov.f32 acc,0fFF800000; mov.u32 i,tid;
+SM_MAX:
+ setp.ge.u32 p,i,width; @p bra SM_MAX_END;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; max.f32 acc,acc,x;
+ add.u32 i,i,256; bra SM_MAX;
+SM_MAX_END:
+ st.shared.f32 [mine],acc; bar.sync 0; mov.u32 half,128;
+SM_R1:
+ setp.eq.u32 p,half,0; @p bra SM_R1_END;
+ setp.ge.u32 p,tid,half; @p bra SM_R1_SKIP;
+ add.u32 index,tid,half; mul.wide.u32 offset,index,4; add.u64 addr,sh,offset;
+ ld.shared.f32 other,[addr]; ld.shared.f32 acc,[mine]; max.f32 acc,acc,other; st.shared.f32 [mine],acc;
+SM_R1_SKIP:
+ bar.sync 0; shr.u32 half,half,1; bra SM_R1;
+SM_R1_END:
+ ld.shared.f32 m,[sh]; bar.sync 0;
+ mov.f32 acc,0f00000000; mov.u32 i,tid;
+SM_SUM:
+ setp.ge.u32 p,i,width; @p bra SM_SUM_END;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; sub.rn.f32 x,x,m; mul.rn.f32 x,x,0f3FB8AA3B; ex2.approx.f32 e,x;
+ st.global.f32 [addr],e; add.rn.f32 acc,acc,e;
+ add.u32 i,i,256; bra SM_SUM;
+SM_SUM_END:
+ st.shared.f32 [mine],acc; bar.sync 0; mov.u32 half,128;
+SM_R2:
+ setp.eq.u32 p,half,0; @p bra SM_R2_END;
+ setp.ge.u32 p,tid,half; @p bra SM_R2_SKIP;
+ add.u32 index,tid,half; mul.wide.u32 offset,index,4; add.u64 addr,sh,offset;
+ ld.shared.f32 other,[addr]; ld.shared.f32 acc,[mine]; add.rn.f32 acc,acc,other; st.shared.f32 [mine],acc;
+SM_R2_SKIP:
+ bar.sync 0; shr.u32 half,half,1; bra SM_R2;
+SM_R2_END:
+ ld.shared.f32 total,[sh]; rcp.rn.f32 total,total;
+ mov.u32 i,tid;
+SM_OUT:
+ setp.ge.u32 p,i,width; @p bra SM_DONE;
+ add.u32 index,start,i; mul.wide.u32 offset,index,4; add.u64 addr,px,offset;
+ ld.global.f32 x,[addr]; mul.rn.f32 x,x,total; st.global.f32 [addr],x;
+ add.u32 i,i,256; bra SM_OUT;
+SM_DONE: ret;
+}
+
+.visible .entry transpose5(.param .u64 t_in,.param .u64 t_out,.param .u32 t_count,
+ .param .u32 t_x,.param .u32 t_mid,.param .u32 t_y,.param .u32 t_inner) {
+ .reg .pred p;
+ .reg .u32 count,x,mid,y,inner,i,e,t,xi,m,yi,o,idx;
+ .reg .u64 pin,pout,offset,addr;
+ .reg .b32 value;
+ ld.param.u64 pin,[t_in]; ld.param.u64 pout,[t_out]; ld.param.u32 count,[t_count];
+ ld.param.u32 x,[t_x]; ld.param.u32 mid,[t_mid]; ld.param.u32 y,[t_y]; ld.param.u32 inner,[t_inner];
+ mov.u32 i,%ctaid.x; mov.u32 t,%ntid.x; mov.u32 e,%tid.x; mad.lo.u32 i,i,t,e;
+ setp.ge.u32 p,i,count; @p bra T5_DONE;
+ rem.u32 e,i,inner; div.u32 t,i,inner;
+ rem.u32 xi,t,x; div.u32 t,t,x;
+ rem.u32 m,t,mid; div.u32 t,t,mid;
+ rem.u32 yi,t,y; div.u32 o,t,y;
+ mad.lo.u32 idx,o,x,xi; mad.lo.u32 idx,idx,mid,m; mad.lo.u32 idx,idx,y,yi; mad.lo.u32 idx,idx,inner,e;
+ mul.wide.u32 offset,idx,4; add.u64 addr,pin,offset; ld.global.b32 value,[addr];
+ mul.wide.u32 offset,i,4; add.u64 addr,pout,offset; st.global.b32 [addr],value;
+T5_DONE: ret;
+}
+
+.visible .entry broadcast_add5(.param .u64 b_pa,.param .u64 b_pb,.param .u64 b_po,.param .u32 b_count,
+ .param .u32 b_d0, .param .u32 b_d1, .param .u32 b_d2, .param .u32 b_d3, .param .u32 b_d4, .param .u32 b_a0, .param .u32 b_a1, .param .u32 b_a2, .param .u32 b_a3, .param .u32 b_a4, .param .u32 b_b0, .param .u32 b_b1, .param .u32 b_b2, .param .u32 b_b3, .param .u32 b_b4) {
+ .reg .pred p;
+ .reg .u32 count,i,t,c,ia,ib,tid,dim,sta,stb;
+ .reg .u64 pa,pb,po,offset,addr;
+ .reg .f32 x,y;
+ ld.param.u64 pa,[b_pa]; ld.param.u64 pb,[b_pb]; ld.param.u64 po,[b_po]; ld.param.u32 count,[b_count];
+ mov.u32 i,%ctaid.x; mov.u32 t,%ntid.x; mov.u32 tid,%tid.x; mad.lo.u32 i,i,t,tid;
+ setp.ge.u32 p,i,count; @p bra B5_DONE;
+ mov.u32 t,i; mov.u32 ia,0; mov.u32 ib,0;
+ ld.param.u32 dim,[b_d4]; ld.param.u32 sta,[b_a4]; ld.param.u32 stb,[b_b4];
+ rem.u32 c,t,dim; div.u32 t,t,dim; mad.lo.u32 ia,c,sta,ia; mad.lo.u32 ib,c,stb,ib;
+ ld.param.u32 dim,[b_d3]; ld.param.u32 sta,[b_a3]; ld.param.u32 stb,[b_b3];
+ rem.u32 c,t,dim; div.u32 t,t,dim; mad.lo.u32 ia,c,sta,ia; mad.lo.u32 ib,c,stb,ib;
+ ld.param.u32 dim,[b_d2]; ld.param.u32 sta,[b_a2]; ld.param.u32 stb,[b_b2];
+ rem.u32 c,t,dim; div.u32 t,t,dim; mad.lo.u32 ia,c,sta,ia; mad.lo.u32 ib,c,stb,ib;
+ ld.param.u32 dim,[b_d1]; ld.param.u32 sta,[b_a1]; ld.param.u32 stb,[b_b1];
+ rem.u32 c,t,dim; div.u32 t,t,dim; mad.lo.u32 ia,c,sta,ia; mad.lo.u32 ib,c,stb,ib;
+ ld.param.u32 dim,[b_d0]; ld.param.u32 sta,[b_a0]; ld.param.u32 stb,[b_b0];
+ rem.u32 c,t,dim; div.u32 t,t,dim; mad.lo.u32 ia,c,sta,ia; mad.lo.u32 ib,c,stb,ib;
+ mul.wide.u32 offset,ia,4; add.u64 addr,pa,offset; ld.global.f32 x,[addr];
+ mul.wide.u32 offset,ib,4; add.u64 addr,pb,offset; ld.global.f32 y,[addr];
+ add.rn.f32 x,x,y;
+ mul.wide.u32 offset,i,4; add.u64 addr,po,offset; st.global.f32 [addr],x;
+B5_DONE: ret;
+}
+
+.visible .entry f32_to_f16(.param .u64 h_in,.param .u64 h_out,.param .u32 h_count) {
+ .reg .pred p;
+ .reg .u32 count,i,t,tid;
+ .reg .u64 pin,pout,offset,addr;
+ .reg .f32 x;
+ .reg .b16 h;
+ ld.param.u64 pin,[h_in]; ld.param.u64 pout,[h_out]; ld.param.u32 count,[h_count];
+ mov.u32 i,%ctaid.x; mov.u32 t,%ntid.x; mov.u32 tid,%tid.x; mad.lo.u32 i,i,t,tid;
+ setp.ge.u32 p,i,count; @p bra H_DONE;
+ mul.wide.u32 offset,i,4; add.u64 addr,pin,offset; ld.global.f32 x,[addr];
+ cvt.rn.f16.f32 h,x;
+ mul.wide.u32 offset,i,2; add.u64 addr,pout,offset; st.global.b16 [addr],h;
+H_DONE: ret;
+}

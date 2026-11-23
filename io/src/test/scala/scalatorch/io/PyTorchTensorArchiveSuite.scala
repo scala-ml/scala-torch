@@ -401,6 +401,15 @@ class PyTorchTensorArchiveSuite extends munit.FunSuite:
     finally Files.deleteIfExists(path)
   }
 
+  test("gathers a dense permuted (channels-last style) view into logical order") {
+    val path=Files.createTempFile("torch-tensor-permuted-", ".pt")
+    try
+      saveArchive(path,pickleTensor(Vector(1f,2f,3f,4f,5f,6f),Vector(2,3),strideOverride=Some(Vector(1,2))),Map("0"->floats(1f,2f,3f,4f,5f,6f)))
+      val tensor=PyTorchTensorArchive.read(path).value.asInstanceOf[PyTorchTensorArchive.TensorValue].tensor
+      assertEquals(tensor.values.toSeq,Seq(1f,3f,5f,2f,4f,6f))
+    finally Files.deleteIfExists(path)
+  }
+
   test("rejects non-contiguous tensor views and views outside their storage") {
     val path=Files.createTempFile("torch-tensor-view-", ".pt")
     try

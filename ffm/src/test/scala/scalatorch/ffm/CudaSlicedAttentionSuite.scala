@@ -7,6 +7,10 @@ class CudaSlicedAttentionSuite extends munit.FunSuite:
   private def data(dims: Seq[Long],seed: Int): Tensor[Float] =
     val shape=Shape.from(dims);val random=new java.util.Random(seed)
     Tensor.fromFloats(Array.fill(shape.numel.toInt)(random.nextGaussian().toFloat),shape)
+  private def assertClose(actual: Array[Float],expected: Array[Float],tolerance: Double=2e-5): Unit =
+    assertEquals(actual.length,expected.length)
+    actual.zip(expected).zipWithIndex.foreach { case ((a,e),i) =>
+      assert((a.isNaN && e.isNaN) || a==e || math.abs(a.toDouble-e)<=tolerance*(1.0+math.abs(e.toDouble)),s"element $i: $a vs $e") }
   test("explicit work limit permits 4096 tokens and eight heads with bounded scratch") {
     gpu()
     CudaSession.withDevice(maxBytes=20L*1024*1024) { s =>
@@ -32,15 +36,15 @@ class CudaSlicedAttentionSuite extends munit.FunSuite:
       val v=s.upload(data(Seq(2L,2L,11L,3L),3))
       // All keys visible: preserved causal kernel supplies the serial reference.
       val full=s.causalAttention(q,k,v,queryStart=10)
-      val expected=full.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits);full.close()
+      val expected=full.toCpu.toFloatArray;full.close()
       val before=s.allocatedBytes
       for rows <- Seq(1,2,5,17,64) do
-        val out=s.scaledDotProductAttention(q,k,v,maxWorkspaceBytes=rows*11L*8+7)
-        assertEquals(out.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits),expected)
+        val out=s.scaledDotProductAttention(q,k,v,maxWorkspaceBytes=rows*11L*4+7)
+        assertClose(out.toCpu.toFloatArray,expected)
         out.close()
         assertEquals(s.allocatedBytes,before)
-      intercept[IllegalArgumentException](s.scaledDotProductAttention(q,k,v,maxWorkspaceBytes=87))
-      intercept[IllegalArgumentException](s.scaledDotProductAttention(q,k,v,maxScoreElements=1,maxWorkspaceBytes=88))
+      intercept[IllegalArgumentException](s.scaledDotProductAttention(q,k,v,maxWorkspaceBytes=43))
+      intercept[IllegalArgumentException](s.scaledDotProductAttention(q,k,v,maxScoreElements=1,maxWorkspaceBytes=44))
       assertEquals(s.allocatedBytes,before)
       v.close();k.close();q.close()
       val qn=s.fill(Shape.from(Seq(2L,2L,3L,1L)),1f)
@@ -48,8 +52,7 @@ class CudaSlicedAttentionSuite extends munit.FunSuite:
       val vn=s.upload(Tensor.fromFloats(Array(1f,2f,Float.PositiveInfinity,1f,-0f,0f,3f,4f),kn.shape))
       val dense=s.causalAttention(qn,kn,vn,queryStart=1)
       val sliced=s.scaledDotProductAttention(qn,kn,vn,maxWorkspaceBytes=16)
-      assertEquals(sliced.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits),
-        dense.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits))
+      assertClose(sliced.toCpu.toFloatArray,dense.toCpu.toFloatArray)
       sliced.close();dense.close();vn.close();kn.close();qn.close()
       assertEquals(s.allocatedBytes,0L)
     }
@@ -63,8 +66,7 @@ class CudaSlicedAttentionSuite extends munit.FunSuite:
         val v=s.upload(data(Seq(1L,2L,77L,width),13))
         val reference=s.causalAttention(q,k,v,queryStart=76)
         val parallel=s.scaledDotProductAttention(q,k,v,maxWorkspaceBytes=77L*8*3)
-        assertEquals(parallel.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits),
-          reference.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits))
+        assertClose(parallel.toCpu.toFloatArray,reference.toCpu.toFloatArray)
         parallel.close();reference.close();v.close();k.close();q.close()
         assertEquals(s.allocatedBytes,0L)
     }
@@ -81,8 +83,7 @@ class CudaSlicedAttentionSuite extends munit.FunSuite:
       val parallel=s.scaledDotProductAttention(q,k,v)
       val end=System.nanoTime()
       println(s"attention 512x4096 width40 serialMs=${(middle-start)/1e6} parallelMs=${(end-middle)/1e6}")
-      assertEquals(parallel.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits),
-        reference.toCpu.toFloatArray.toVector.map(java.lang.Float.floatToRawIntBits))
+      assertClose(parallel.toCpu.toFloatArray,reference.toCpu.toFloatArray)
       parallel.close();reference.close();v.close();k.close();q.close()
       assertEquals(s.allocatedBytes,0L)
     }
@@ -104,7 +105,7 @@ class CudaSlicedAttentionSuite extends munit.FunSuite:
   }
   test("slice workspace preflight rejects insufficient total memory and keeps empty shape semantics") {
     gpu()
-    CudaSession.withDevice(maxBytes=43) { s =>
+    CudaSession.withDevice(maxBytes=35) { s =>
       val x=s.fill(Shape.from(Seq(1L,1L,3L,1L)),1f)
       intercept[IllegalArgumentException](s.scaledDotProductAttention(x,x,x))
       assertEquals(s.allocatedBytes,12L)

@@ -10,10 +10,42 @@ private[ffm] final class CudaDriver private (
 ):
   private val lookup = SymbolLookup.libraryLookup(CudaDriver.libraryName, arena)
   private val linker = Linker.nativeLinker()
+  // Downcall handles are built once per (symbol, signature). Building one per call cost more than the kernel launch it wrapped:
+  // a U-Net pass makes about a thousand driver calls.
+  private val handles = new java.util.concurrent.ConcurrentHashMap[(String, Seq[MemoryLayout]), java.lang.invoke.MethodHandle]()
+  private def handleFor(name: String, layouts: Seq[MemoryLayout]): java.lang.invoke.MethodHandle =
+    val key = (name, layouts)
+    val known = handles.get(key)
+    if known != null then known
+    else
+      val symbol = lookup.find(name).orElseThrow(() => UnsatisfiedLinkError(s"CUDA symbol missing: $name"))
+      val created = linker.downcallHandle(symbol, FunctionDescriptor.of(JAVA_INT, layouts*))
+      handles.put(key, created)
+      created
   private def result(name: String, layouts: Seq[MemoryLayout], args: AnyRef*): Int =
-    val symbol = lookup.find(name).orElseThrow(() => UnsatisfiedLinkError(s"CUDA symbol missing: $name"))
-    val handle = linker.downcallHandle(symbol, FunctionDescriptor.of(JAVA_INT, layouts*))
-    handle.invokeWithArguments(args*).asInstanceOf[Integer].intValue()
+    handleFor(name, layouts).invokeWithArguments(args*).asInstanceOf[Integer].intValue()
+  private val launchLayouts: Seq[MemoryLayout] = Seq(ADDRESS) ++ Seq.fill(7)(JAVA_INT) ++ Seq.fill(3)(ADDRESS)
+  private lazy val launchHandle = handleFor("cuLaunchKernel", launchLayouts)
+  private val syncLayouts: Seq[MemoryLayout] = Seq(ADDRESS)
+  private lazy val syncHandle = handleFor("cuStreamSynchronize", syncLayouts)
+  private val ctxGetLayouts: Seq[MemoryLayout] = Seq(ADDRESS)
+  private lazy val ctxGetHandle = handleFor("cuCtxGetCurrent", ctxGetLayouts)
+  /** Current CUDA context pointer read into caller-owned 8-byte segment, without Arena allocation. */
+  def currentContext(cell: MemorySegment): Long =
+    val code: Int = ctxGetHandle.invokeExact(cell)
+    if code != 0 then throw IllegalStateException(s"cuCtxGetCurrent failed with CUDA status $code")
+    cell.get(ADDRESS, 0).address()
+  /** One-dimensional kernel launch on `stream`, without boxing or a signature lookup. */
+  def launchKernel(kernel: MemorySegment, blocks: Int, threadsPerBlock: Int, stream: MemorySegment, params: MemorySegment): Unit =
+    val code: Int = launchHandle.invokeExact(kernel, blocks, 1, 1, threadsPerBlock, 1, 1, 0, stream, params, MemorySegment.NULL)
+    if code != 0 then throw IllegalStateException(s"cuLaunchKernel failed with CUDA status $code")
+  /** Generalized 3D grid/block kernel launch with dynamic shared memory on `stream`. */
+  def launchKernel3D(kernel: MemorySegment, gx: Int, gy: Int, gz: Int, bx: Int, by: Int, bz: Int, sharedBytes: Int, stream: MemorySegment, params: MemorySegment): Unit =
+    val code: Int = launchHandle.invokeExact(kernel, gx, gy, gz, bx, by, bz, sharedBytes, stream, params, MemorySegment.NULL)
+    if code != 0 then throw IllegalStateException(s"cuLaunchKernel failed with CUDA status $code")
+  def synchronize(stream: MemorySegment): Unit =
+    val code: Int = syncHandle.invokeExact(stream)
+    if code != 0 then throw IllegalStateException(s"cuStreamSynchronize failed with CUDA status $code")
   def call(name: String, layouts: Seq[MemoryLayout], args: AnyRef*): Unit =
     val code=result(name,layouts,args*)
     if code != 0 then throw IllegalStateException(s"$name failed with CUDA status $code")
@@ -46,6 +78,14 @@ private[ffm] final class CudaDriver private (
     val address = pointer.get(JAVA_LONG, 0L)
     cleanup { call("cuMemFree_v2", Seq(JAVA_LONG), Long.box(address)) }
     address
+  private lazy val infoCells=(arena.allocate(JAVA_LONG),arena.allocate(JAVA_LONG))
+  private val infoLayouts: Seq[MemoryLayout] = Seq(ADDRESS, ADDRESS)
+  private lazy val infoHandle = handleFor("cuMemGetInfo_v2", infoLayouts)
+  /** Free device memory in bytes as the driver reports it now. */
+  def freeBytes(): Long =
+    val code: Int = infoHandle.invokeExact(infoCells._1, infoCells._2)
+    if code != 0 then throw IllegalStateException(s"cuMemGetInfo_v2 failed with CUDA status $code")
+    infoCells._1.get(JAVA_LONG, 0L)
   def memoryInfo(): (Long,Long) =
     val free=arena.allocate(JAVA_LONG)
     val total=arena.allocate(JAVA_LONG)
@@ -106,7 +146,82 @@ private[ffm] object CudaDriver:
       val previous = pointerResult("cuCtxGetCurrent", Seq.empty)
       val context = pointerResult("cuDevicePrimaryCtxRetain", Seq(JAVA_INT), Int.box(dev))
       cleanup { call("cuDevicePrimaryCtxRelease_v2", Seq(JAVA_INT), Int.box(dev)) }
+      CudaContextKeeper.enter(dev)
+      cleanup { CudaContextKeeper.exit(dev) }
       call("cuCtxSetCurrent", Seq(ADDRESS), context)
       cleanup { call("cuCtxSetCurrent", Seq(ADDRESS), previous) }
       body(driver, version.get(JAVA_INT, 0L), name.getString(0L))
     }.get
+/** Keeps the CUDA primary context (and the cuBLAS handles created on it) alive between back-to-back sessions. A generation opens several
+  * sessions (text encoder, U-Net, VAE); creating and destroying the context costs about 90 ms and the cuBLAS handle about 150 ms each time.
+  * Once no session has been open for `SCALATORCH_CUDA_KEEP_CONTEXT_SECONDS` (default 60, 0 = never keep) the handles and the extra context
+  * reference are dropped, so the device memory of the context is returned when no generation is running. */
+private[ffm] object CudaContextKeeper:
+  val seconds: Long = sys.env.get("SCALATORCH_CUDA_KEEP_CONTEXT_SECONDS").flatMap(_.trim.toLongOption).getOrElse(60L)
+  def enabled: Boolean = seconds > 0
+  private final class State(var context: MemorySegment, var active: Int, var lastExit: Long, val closers: java.util.ArrayList[() => Unit])
+  private val states = new java.util.HashMap[Int, State]()
+  private val scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r =>
+    val t = new Thread(r, "scala-torch-cuda-context-keeper"); t.setDaemon(true); t
+  }
+  private lazy val handles: (java.lang.invoke.MethodHandle, java.lang.invoke.MethodHandle, java.lang.invoke.MethodHandle, java.lang.invoke.MethodHandle) =
+    val os = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT)
+    val lookup = SymbolLookup.libraryLookup(if os.startsWith("windows") then "nvcuda.dll" else "libcuda.so.1", Arena.global())
+    val linker = Linker.nativeLinker()
+    def find(symbol: String, d: FunctionDescriptor) = linker.downcallHandle(lookup.find(symbol).orElseThrow(), d)
+    (find("cuDevicePrimaryCtxRetain", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT)),
+      find("cuDevicePrimaryCtxRelease_v2", FunctionDescriptor.of(JAVA_INT, JAVA_INT)),
+      find("cuCtxSetCurrent", FunctionDescriptor.of(JAVA_INT, ADDRESS)),
+      find("cuMemFree_v2", FunctionDescriptor.of(JAVA_INT, JAVA_LONG)))
+
+  /** Frees device memory; only valid from a closer registered with [[onRelease]] (the context is current there). */
+  def freeMemory(address: Long): Unit = try handles._4.invokeWithArguments(Long.box(address)) catch case _: Throwable => ()
+
+  /** Releases everything kept for `device` (shared weights, cuBLAS handles, the extra context reference) unless a session is open on it. */
+  def clearDevice(device: Int): Unit = release(device,force=true)
+
+  /** A session starts on `device` (its own context reference is already taken): make sure our extra reference exists. */
+  def enter(device: Int): Unit =
+    if !enabled then return
+    try states.synchronized {
+      val st = states.get(device) match
+        case null =>
+          val created = new State(MemorySegment.NULL, 0, System.nanoTime(), new java.util.ArrayList[() => Unit]())
+          states.put(device, created); created
+        case existing => existing
+      if st.context == MemorySegment.NULL then
+        Using.resource(Arena.ofConfined()) { arena =>
+          val out = arena.allocate(ADDRESS)
+          if handles._1.invokeWithArguments(out, Int.box(device)).asInstanceOf[Integer].intValue() == 0 then st.context = out.get(ADDRESS, 0L)
+        }
+      st.active += 1
+    } catch case _: Throwable => ()
+
+  def exit(device: Int): Unit =
+    if !enabled then return
+    try states.synchronized {
+      val st = states.get(device)
+      if st != null then
+        st.active = math.max(0, st.active - 1)
+        st.lastExit = System.nanoTime()
+        scheduler.schedule(new Runnable { def run(): Unit = release(device) }, seconds, java.util.concurrent.TimeUnit.SECONDS)
+    } catch case _: Throwable => ()
+
+  /** Registers a resource that lives on the kept context (for example a cuBLAS handle); closed before the context is released. */
+  def onRelease(device: Int, closer: () => Unit): Unit =
+    states.synchronized { val st = states.get(device); if st != null then st.closers.add(closer) else closer() }
+
+  private def release(device: Int, force: Boolean = false): Unit =
+    states.synchronized {
+      val st = states.get(device)
+      if st != null && st.active == 0 && st.context != MemorySegment.NULL &&
+          (force || System.nanoTime() - st.lastExit >= seconds * 1_000_000_000L - 100_000_000L) then
+        try
+          handles._3.invokeWithArguments(st.context)
+          st.closers.forEach(c => try c() catch case _: Throwable => ())
+          st.closers.clear()
+          handles._3.invokeWithArguments(MemorySegment.NULL)
+        catch case _: Throwable => ()
+        try handles._2.invokeWithArguments(Int.box(device)) catch case _: Throwable => ()
+        st.context = MemorySegment.NULL
+    }

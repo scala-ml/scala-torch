@@ -54,12 +54,38 @@ object PyTorchTensorArchive:
   case object NoneValue extends Value
   final case class Archive(value: Value)
 
+  /** True when `strides` is a permutation of the dense row-major layout of `shape` (size-1 dimensions are ignored), i.e. the view
+    * covers exactly `prod(shape)` consecutive storage elements without overlap. */
+  private def isDenseLayout(shape: Vector[Long],strides: Vector[Long]): Boolean=
+    val dims=shape.zip(strides).filter(_._1>1).sortBy(-_._2)
+    var expected=1L
+    val ordered=dims.reverse.forall { (d,s) => val ok=s==expected;expected=Math.multiplyExact(expected,d);ok }
+    ordered && strides.forall(_>=0)
+
+  /** Storage-order values of a dense (possibly permuted) view reordered into logical row-major order. */
+  private def logicalOrder(values: Array[Float],shape: Vector[Long],strides: Vector[Long]): Array[Float]=
+    val contiguous=shape.zip(strides).filter(_._1>1).sortBy(-_._2).map(_._2)==shape.zip(strides).filter(_._1>1).map(_._2)
+    if contiguous then values
+    else
+      val n=values.length;val out=new Array[Float](n);val rank=shape.length
+      val dims=shape.map(_.toInt).toArray;val st=strides.map(_.toInt).toArray
+      val index=new Array[Int](rank);var offset=0;var i=0
+      while i<n do
+        out(i)=values(offset)
+        var d=rank-1;var carry=true
+        while carry && d>=0 do
+          index(d)+=1;offset+=st(d)
+          if index(d)<dims(d) then carry=false
+          else { offset-=st(d)*dims(d);index(d)=0;d-=1 }
+        i+=1
+      out
+
   private sealed trait Node
   private final case class Global(module: String,name: String) extends Node
   private final case class Storage(dtype: StorageDType,key: String,declaredElements: Long,order: ByteOrder) extends Node
   private final case class Tensor(tensor: StoredTensor) extends Node
   private final case class IntegerTensor(tensor: StoredIntegerTensor) extends Node
-  private final case class DeferredTensor(store: Storage,offset: Long,shape: Vector[Long],elements: Int) extends Node
+  private final case class DeferredTensor(store: Storage,offset: Long,shape: Vector[Long],elements: Int,strides: Vector[Long]) extends Node
   private class DictNode extends Node:
     val values=mutable.LinkedHashMap.empty[String,Node]
   private final class OrderedDictNode extends DictNode
@@ -231,7 +257,7 @@ object PyTorchTensorArchive:
       def freezeSelected(node: Node,name: String): Value =
         check()
         node match
-          case tensor @ DeferredTensor(store,offset,shape,elements) =>
+          case tensor @ DeferredTensor(store,offset,shape,elements,strides) =>
             if !select.get(name) then TensorMetadataValue(store.dtype,shape)
             else
               val existing=materialized.get(tensor)
@@ -244,7 +270,7 @@ object PyTorchTensorArchive:
                 else
                   val values=new Array[Float](elements)
                   readTensor(store,offset,values,null)
-                  TensorValue(StoredTensor(store.dtype,shape,values))
+                  TensorValue(StoredTensor(store.dtype,shape,logicalOrder(values,shape,strides)))
                 materialized.put(tensor,value)
                 value
           case dict: DictNode => DictValue(dict.values.iterator.map((key,value)=>key->freezeSelected(value,key)).toMap)
@@ -397,11 +423,13 @@ object PyTorchTensorArchive:
       val expectedStrides=shape.indices.reverse.foldLeft(Vector.empty[Long])((acc,index)=>
         val stride=if acc.isEmpty then 1L else Math.multiplyExact(acc.head,shape(index+1))
         stride+:acc)
-      require(strides==expectedStrides,"non-contiguous PyTorch tensor views are unsupported")
+      val contiguous=strides==expectedStrides
+      // a dense permutation of the contiguous layout (e.g. channels-last weights) is gathered into logical order; overlapping or strided views stay rejected
+      require(contiguous || (isDenseLayout(shape,strides) && store.dtype!=StorageDType.Int32 && store.dtype!=StorageDType.Int64),"non-contiguous PyTorch tensor views are unsupported")
       require(offset>=0 && Math.addExact(offset,elements)<=store.declaredElements,"PyTorch tensor view exceeds its storage")
       tensors+=1
       require(tensors<=limits.maxTensors,"PyTorch archive contains too many tensors")
-      if deferTensors then DeferredTensor(store,offset,shape,elements.toInt)
+      if deferTensors then DeferredTensor(store,offset,shape,elements.toInt,strides)
       else if store.dtype==StorageDType.Int32 || store.dtype==StorageDType.Int64 then
         val values=new Array[Long](elements.toInt)
         readTensor(store,offset,null,values)
@@ -409,7 +437,7 @@ object PyTorchTensorArchive:
       else
         val values=new Array[Float](elements.toInt)
         readTensor(store,offset,values,null)
-        Tensor(StoredTensor(store.dtype,shape,values))
+        Tensor(StoredTensor(store.dtype,shape,logicalOrder(values,shape,strides)))
     private def asTupleLong(value: Any): Vector[Long]=value match
       case TupleNode(items) => items.map(asLong)
       case _ => fail("PyTorch tensor shape/stride must be tuples")

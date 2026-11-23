@@ -19,7 +19,7 @@ class CudaBroadcastSuite extends munit.FunSuite:
         out.close();db.close();da.close()
       assertEquals(s.allocatedBytes,0L)
     }
-    CudaSession.withDevice(maxBytes=64) { s =>
+    CudaSession.withDevice(maxBytes=48) { s =>
       val a=s.fill(Shape.from(Seq(2L,3L)),1f);val b=s.fill(Shape.from(Seq(3L)),1f)
       intercept[IllegalArgumentException](s.addBroadcast(a,b))
       assertEquals(s.allocatedBytes,36L)

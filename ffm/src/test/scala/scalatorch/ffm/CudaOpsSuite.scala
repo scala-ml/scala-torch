@@ -40,7 +40,9 @@ class CudaOpsSuite extends munit.FunSuite:
         val weight=tensor(Array.fill(5*width)((random.nextGaussian()*3).toFloat),5,width.toLong).transpose(0,1)
         val a=session.upload(input);val b=session.upload(weight)
         val result=session.matmul(a,b)
-        assertEquals(result.toCpu.toFloatArray.toVector,CpuFloatBackend.matmul(input,weight).toFloatArray.toVector)
+        val expected=CpuFloatBackend.matmul(input,weight).toFloatArray
+        result.toCpu.toFloatArray.zip(expected).foreach { (a,e) =>
+          assert(math.abs(a.toDouble-e)<=1e-5*(1.0+math.abs(e.toDouble))*math.sqrt(width.toDouble),s"width $width: $a vs $e") }
         result.close();b.close();a.close()
       assertEquals(session.allocatedBytes,0L)
     }

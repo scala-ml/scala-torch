@@ -8,6 +8,9 @@ final class Tensor[A] private[scalatorch] (
   val device: Device = Device.Cpu
 
   private[scalatorch] def logicalArray: Array[A] =
+    storage.data match
+      case floats: Array[Float] if !layout.isContiguous => return layout.gatherFloats(floats).asInstanceOf[Array[A]]
+      case _ =>
     val out = storage.allocate(shape.numel.toInt)
     if layout.isContiguous then
       System.arraycopy(storage.data,layout.offset.toInt,out,0,out.length)

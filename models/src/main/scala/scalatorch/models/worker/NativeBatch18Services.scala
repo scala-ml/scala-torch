@@ -180,15 +180,8 @@ private[worker] object NativeBatch18Services:
 
       case "remove_background" =>
         val bg = optStr(p, "background", "transparent").toLowerCase(Locale.ROOT)
-        val det = Adetailer.detect(img, "u2net", 0.25)
         val w = img.getWidth; val h = img.getHeight
-        val alpha = new Array[Int](w * h)
-        if det.masks.nonEmpty then
-          for m <- det.masks do
-            var i = 0
-            while i < alpha.length do { if m(i) > alpha(i) then alpha(i) = m(i); i += 1 }
-        else
-          java.util.Arrays.fill(alpha, 255)
+        val alpha = NativeU2Net.alpha(img)
         val outImg =
           if bg.isEmpty || bg == "transparent" then
             val rgba = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB)
@@ -232,10 +225,12 @@ private[worker] object NativeBatch18Services:
         val w = img.getWidth; val h = img.getHeight
         val depthVals = new Array[Double](w * h)
         var dMin = Double.PositiveInfinity; var dMax = Double.NegativeInfinity
+        // Real Depth Anything V2 depth (near = bright); fails clearly when the annotator weights are missing.
+        val rawDepth = NativeDepthAnything.preprocess(img, () => context.cancelled())
+        val depthImage = if rawDepth.getWidth == w && rawDepth.getHeight == h then rawDepth else DiffusionImageResize(rawDepth, w, h, 0)
         var i = 0
         while i < w * h do
-          val c = img.getRGB(i % w, i / w)
-          val lum = (0.299 * ((c >> 16) & 0xff) + 0.587 * ((c >> 8) & 0xff) + 0.114 * (c & 0xff)) / 255.0
+          val lum = ((depthImage.getRGB(i % w, i / w) >> 8) & 0xff) / 255.0
           depthVals(i) = lum
           if lum < dMin then dMin = lum
           if lum > dMax then dMax = lum
@@ -277,12 +272,15 @@ private[worker] object NativeBatch18Services:
         val noise = optInt(p, "noise", 2)
         val targetW = math.max(1, math.round(img.getWidth * scale).toInt)
         val targetH = math.max(1, math.round(img.getHeight * scale).toInt)
-        val up = DiffusionImageResize(img, targetW, targetH, 0)
+        if noise < 0 || noise > 3 then throw new NativeBackendError("invalid_params", "waifu2x noise must be 0..3")
+        val tile = optInt(p, "tile", 256)
+        // Real waifu2x upconv_7 (NativeWaifu2x); missing weights fail loudly, no resize fallback
+        val up = NativeWaifu2x.upscale(img, targetW, targetH, style, noise, () => context.cancelled(), if tile <= 0 then 256 else tile)
         val dst = saveImg(up, "waifu2x")
         Map(
           "path" -> Str(dst.toString),
           "outputs" -> Obj(Map.empty),
-          "info" -> Obj(Map("model" -> Str(s"waifu2x-${style.toLowerCase(Locale.ROOT)}-n$noise"), "scale" -> Number(scale)))
+          "info" -> Obj(Map("model" -> Str(s"waifu2x-upconv_7-${NativeWaifu2x.styleKey(style)}-noise$noise"), "scale" -> Number(scale)))
         )
 
       case other =>

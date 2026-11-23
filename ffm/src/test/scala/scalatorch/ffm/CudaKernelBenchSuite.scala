@@ -1,0 +1,83 @@
+package scalatorch.ffm
+
+import scalatorch.*
+
+/** Kernel timings on the shapes of an SD1.5 U-Net pass (batch of two, Float16). Run with SCALATORCH_CUDA_BENCH=1; prints microseconds per
+  * call, the fastest of seven runs of many queued calls with one synchronisation at the end. */
+class CudaKernelBenchSuite extends munit.FunSuite:
+  override val munitTimeout=scala.concurrent.duration.Duration(600,"s")
+  private def tensor(dims: Long*): Tensor[Float] =
+    val shape=Shape.from(dims)
+    Tensor.fromFloats(Array.tabulate(shape.numel.toInt)(i => math.sin(i*.37).toFloat),shape)
+
+  test("cost of issuing a kernel: tiny tensors, so the time is the launch and the bookkeeping around it") {
+    assume(sys.env.get("SCALATORCH_CUDA_BENCH").contains("1"),"benchmark disabled")
+    CudaSession.withDevice(maxBytes=1L<<30) { s =>
+      val a=s.uploadHalf(tensor(4,16));val b=s.uploadHalf(tensor(4,16));val w=s.uploadHalf(tensor(16,16));val bias=s.uploadHalf(tensor(16))
+      def time(label: String)(body: => CudaTensor): Unit =
+        def run(n: Int): (Double,Double) =
+          val started=System.nanoTime()
+          var i=0
+          while i<n do { body.close();i+=1 }
+          val issued=System.nanoTime()
+          s.allFinite(s.fillHalf(Shape.from(Seq(1L)),0f))
+          ((issued-started)/1e3/n,(System.nanoTime()-started)/1e3/n)
+        run(2000)
+        val best=Seq.fill(7)(run(20000)).minBy(_._2)
+        println(f"[issue] $label%-34s issued in ${best._1}%6.1f us, finished in ${best._2}%6.1f us per call")
+      time("add (one launch)")(s.add(a,b))
+      time("silu (one launch)")(s.silu(a))
+      time("layerNorm (one launch)")(s.layerNorm(a))
+      time("matmulTransposedB (cuBLAS)")(s.matmulTransposedB(a,w))
+      time("linearWithBias (launch + cuBLAS)")(s.linearWithBias(a,w,bias).get)
+    }
+  }
+
+  test("kernel timings") {
+    assume(sys.env.get("SCALATORCH_CUDA_BENCH").contains("1"),"benchmark disabled")
+    CudaSession.withDevice(maxBytes=6L<<30) { s =>
+      def half(dims: Long*): CudaTensor = s.uploadHalf(tensor(dims*))
+      def time(label: String,rounds: Int)(body: => CudaTensor): Unit =
+        def run(n: Int): Double =
+          val started=System.nanoTime()
+          var i=0
+          while i<n do { body.close();i+=1 }
+          s.allFinite(s.fillHalf(Shape.from(Seq(1L)),0f)) // downloads: waits for the queue
+          (System.nanoTime()-started)/1e3/n
+        run(20)
+        val micros=Seq.fill(7)(run(rounds)).min // the GPU is shared with the desktop: the fastest of several runs
+        println(f"[bench] $label%-46s $micros%8.1f us")
+      for (heads,tokens,width) <- Seq((16L,4096L,40L),(64L,4096L,40L),(16L,1024L,80L),(16L,256L,160L),(20L,4096L,64L),(40L,1024L,64L)) do
+        val q=half(1,heads,tokens,width);val k=half(1,heads,tokens,width);val v=half(1,heads,tokens,width)
+        time(s"self attention     [$heads,$tokens,$width]",20)(s.scaledDotProductAttention(q,k,v))
+        Seq(q,k,v).foreach(_.close())
+      for (heads,qt,kt,width) <- Seq((16L,4096L,77L,40L),(20L,4096L,77L,64L),(40L,1024L,77L,64L),(16L,256L,77L,80L)) do
+        val q=half(1,heads,qt,width);val k=half(1,heads,kt,width);val v=half(1,heads,kt,width)
+        time(s"cross attention    [$heads,$qt,$kt,$width]",20)(s.scaledDotProductAttention(q,k,v))
+        Seq(q,k,v).foreach(_.close())
+      for (n,c,side) <- Seq((2L,320L,128L),(2L,320L,64L),(8L,320L,64L),(2L,640L,32L),(8L,640L,32L),(8L,1280L,16L),(8L,1280L,8L)) do
+        val x=half(n,c,side,side)
+        val w=half(c,c,3,3)
+        time(s"conv 3x3           [$n,$c,$side,$side]",60)(s.conv2dFast(x,w,Conv2dConfig(padding=(1,1))))
+        x.close();w.close()
+      for (c,side) <- Seq((320L,128L),(640L,64L),(1280L,32L)) do
+        val x=half(2,c,side,side);val w=half(c,c,1,1)
+        time(s"conv 1x1 batched   [2,$c,$side,$side]",60)(s.conv2dFast(x,w))
+        x.close();w.close()
+      for (c,side) <- Seq((320L,64L),(640L,32L),(1280L,16L),(1280L,8L)) do
+        val x=half(2,c,side,side)
+        val channelBias=half(1,c,1,1)
+        val gamma=half(c);val beta=half(c)
+        time(s"add channel bias   [2,$c,$side,$side]",300)(s.addBroadcast(x,channelBias))
+        time(s"add same shape     [2,$c,$side,$side]",300)(s.add(x,x))
+        time(s"silu               [2,$c,$side,$side]",300)(s.silu(x))
+        time(s"group norm 32      [2,$c,$side,$side]",300)(s.groupNorm(x,32,1e-5,Some(gamma),Some(beta)))
+        time(s"group norm+silu 32 [2,$c,$side,$side]",300)(s.groupNormSilu(x,32,1e-5,Some(gamma),Some(beta)))
+        val tokens=half(2,side*side,c)
+        val lastBias=half(c)
+        time(s"add last-axis bias [2,${side*side},$c]",300)(s.addBroadcast(tokens,lastBias))
+        val heads=half(2,side*side,8,c/8)
+        time(s"transpose heads    [2,${side*side},8,${c/8}]",300)(s.transpose(heads,1,2))
+        Seq(x,channelBias,gamma,beta,tokens,lastBias,heads).foreach(_.close())
+    }
+  }

@@ -80,7 +80,10 @@ private[worker] object NativeImg2ImgHires:
     require(width>0 && height>0 && width.toLong*height<=maxPixels,"img2img Hires target exceeds pixel limit")
     if cancelled() || Thread.currentThread().isInterrupted then throw new CancellationException("img2img Hires upscale cancelled")
     name match
-      case "Lanczos" | "None" | "LDSR" | "Waifu2x" | "waifu2x" | "waifu2x_anime_art_rgb" | "waifu2x_photo" =>
+      case "Waifu2x" | "waifu2x" | "waifu2x_anime_art_rgb" | "waifu2x_photo" =>
+        // real waifu2x upconv_7 (Anime/art, or Photo for waifu2x_photo), denoise level 2 like the tool's default
+        NativeWaifu2x.upscale(source,width,height,if name=="waifu2x_photo" then "Photo" else "Anime",2,cancelled)
+      case "Lanczos" | "None" | "LDSR" =>
         DiffusionImageResize(source,width,height,0,maxPixels)
       case "Nearest" =>
         val result=new BufferedImage(width,height,BufferedImage.TYPE_INT_RGB)
@@ -102,7 +105,7 @@ private[worker] object NativeImg2ImgHires:
           case value if value.matches("cuda:[0-9]+") => Some(value.drop(5).toInt)
           case "cpu" => None
           case _ => invalidUp("R-ESRGAN model upscaling requires a valid CPU or CUDA U-Net device")
-        val maxBytes=environment.get("SDFX_SCALATORCH_UNET_MAX_BYTES").fold(1073741824L)(_.toLong)
+        val maxBytes=environment.get("SDFX_SCALATORCH_UNET_MAX_BYTES").fold(1073741824L)(scalatorch.ffm.CudaSession.parseBudget)
         val upscaled=deviceOpt match
           case Some(device) => CudaRealEsrganX4Plus.upscale(source,path,cancelled,device,maxBytes)
           case None => CudaRealEsrganX4Plus.upscaleCpu(source,path,cancelled)

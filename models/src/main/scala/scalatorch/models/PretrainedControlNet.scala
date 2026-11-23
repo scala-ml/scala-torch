@@ -82,6 +82,8 @@ object PretrainedControlNet:
       val convIn=conv("conv_in",c.inChannels,c.channels.head)
       val time=DiffusionTimeEmbedding(linear("time_embedding.linear_1",c.channels.head,c.timeWidth),
         linear("time_embedding.linear_2",c.timeWidth,c.timeWidth))
+      val addition=c.additionInputWidth.map(width => DiffusionTimeEmbedding(
+        linear("add_embedding.linear_1",width,c.timeWidth),linear("add_embedding.linear_2",c.timeWidth,c.timeWidth)))
       var current=c.channels.head
       val down=c.channels.indices.toVector.map { i =>
         val out=c.channels(i);val prefix=s"down_blocks.$i"
@@ -111,7 +113,7 @@ object PretrainedControlNet:
       val downProjections=skips.zipWithIndex.map((width,index)=>conv(s"controlnet_down_blocks.$index",width,width,1,padding=0)).toVector
       val middleProjection=conv("controlnet_mid_block",current,current,1,padding=0)
       val model=ConditionalControlNet2d(config,convIn,time,down,mid,
-        ControlNetConditioningEmbedding(conditionIn,conditionBlocks,conditionOut),downProjections,middleProjection,maxScoreElements)
+        ControlNetConditioningEmbedding(conditionIn,conditionBlocks,conditionOut),downProjections,middleProjection,maxScoreElements,addition)
       require(used.toSet==archive.tensors.keySet,
         s"unused ControlNet weights: ${(archive.tensors.keySet--used).toVector.sorted.mkString(", ")}")
       model

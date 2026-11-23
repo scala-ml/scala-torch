@@ -28,6 +28,9 @@ private[models] trait UNetPredictor:
       sagStep: Option[(SagConfig,Double)]=None,
       refStep: Option[(ReferenceOnly.BankState,Tensor[Float])]=None): Tensor[Float]
 
+/** A sample batch of several images met a step that only the single-image path implements; the caller samples image by image instead. */
+final class BatchedSamplingUnsupported(message: String) extends IllegalStateException(message)
+
 /** Placement of U-Net prediction. CUDA weights/contexts live for one denoising loop;
   * CPU schedulers exchange only latent inputs and guided predictions each step.
   */
@@ -254,6 +257,21 @@ object UNetExecution:
           val negativeContext=unconditional.map(x => use(session.upload(x)))
           val positiveAddition=positiveFeatures.map(x => use(session.upload(x)))
           val negativeAddition=negativeFeatures.map(x => use(session.upload(x)))
+          // [negative x N; positive x N] (positive x N without guidance) for batched sampling, built once per denoising loop.
+          var repeated: Option[(Int,Boolean,scalatorch.ffm.CudaTensor,Option[scalatorch.ffm.CudaTensor])]=None
+          def repeatedConditioning(count: Int,pair: Boolean): (scalatorch.ffm.CudaTensor,Option[scalatorch.ffm.CudaTensor]) =
+            repeated match
+              case Some((n,p,context,addition)) if n==count && p==pair => (context,addition)
+              case _ =>
+                // The manager also owns these handles; CudaTensor.close is idempotent.
+                repeated.foreach { case (_,_,context,addition) => context.close();addition.foreach(_.close()) }
+                repeated=None
+                def tile(negative: Option[scalatorch.ffm.CudaTensor],positive: scalatorch.ffm.CudaTensor): scalatorch.ffm.CudaTensor =
+                  use(session.cat((if pair then Seq.fill(count)(negative.get) else Seq.empty)++Seq.fill(count)(positive),0))
+                val context=tile(negativeContext,positiveContext)
+                val addition=positiveAddition.map(p => tile(negativeAddition,p))
+                repeated=Some((count,pair,context,addition))
+                (context,addition)
           body(new UNetPredictor:
             def apply(sample: Tensor[Float],timesteps: Tensor[Float],guidance: Float,
                 controlProgress: Double,rescale: Float,scheduled: Option[Float],detail: Option[DetailDaemon.Adjustment],controlProgressEnd: Double,
@@ -270,6 +288,60 @@ object UNetExecution:
                 refStep: Option[(ReferenceOnly.BankState,Tensor[Float])]): Tensor[Float] =
               VaeExecution.checkCancelled(cancelled)
               require(guidance.isFinite && guidance>=0,"invalid guidance scale")
+              // Plain classifier-free guidance: both passes go through the U-Net as one batch of two. A sample batch of N that shares
+              // one prompt ("batched sampling") runs as one batch of 2N, [negative x N; positive x N], or of N without guidance.
+              def batchedPlain(): Option[Tensor[Float]] =
+                val count=if sample.shape.rank==4 then sample.shape.dims.head.toInt else 0
+                val multi=count>1 && conditional.shape.dims.head==1L && unconditional.forall(_.shape.dims.head==1L)
+                // A CFG schedule gives the guidance of this step. At exactly 1 the result is the positive prediction, so the
+                // negative pass is not needed at all (guidance limited to a part of the steps costs half on the other steps).
+                val effective=scheduled.getOrElse(guidance)
+                val positiveOnly=negativeContext.isDefined && guidance>1f && effective==1f
+                val pair=negativeContext.isDefined && guidance>1f && !positiveOnly
+                val plain=sample.shape.rank==4 && controls.isEmpty &&
+                  detail.isEmpty && cads.isEmpty && refStep.isEmpty && chgState.isEmpty && multiDiffusion.isEmpty && pag.isEmpty && sagStep.isEmpty &&
+                  neutralPlan.isEmpty && segUncond.isEmpty && positiveSigns.isEmpty && negativeSigns.isEmpty && conditionalOverride.isEmpty &&
+                  unconditionalOverride.isEmpty && positiveAddedOverride.isEmpty && negativeAddedOverride.isEmpty && kohyaHrFix.isEmpty &&
+                  tokenDownsampling.isEmpty && guidanceHook.isEmpty && dynamicThresholding.isEmpty && rescale==0f &&
+                  (!pair || positiveAddition.isDefined==negativeAddition.isDefined) && CudaUNet.batchedGuidance
+                val eligible=plain && (if multi then pair || positiveOnly || negativeContext.isEmpty else count==1 && (pair || positiveOnly))
+                if !eligible then
+                  // One context cannot serve N samples on the general path: the caller samples the images one by one instead.
+                  if multi then throw new BatchedSamplingUnsupported("this step cannot run as one U-Net batch")
+                  None
+                else
+                  try
+                    Using.Manager { temporary =>
+                      val input=temporary(session.upload(sample))
+                      val (stacked,context,addition)=
+                        if multi then
+                          val (c,a)=repeatedConditioning(count,pair)
+                          (if pair then temporary(session.cat(Seq(input,input),0)) else input,c,a)
+                        else if !pair then (input,positiveContext,positiveAddition)
+                        else
+                          // the stacked [negative; positive] context is built once and kept between steps (it also lets the
+                          // U-Net keep what it derives from it)
+                          val (c,a)=repeatedConditioning(1,true)
+                          (temporary(session.cat(Seq(input,input),0)),c,a)
+                      val output=temporary(TGate.current.fold(unet.applyPrepared(stacked,timesteps,context,addition,None))(tg =>
+                        tg.withCfgPair(pair)(unet.applyPrepared(stacked,timesteps,context,addition,None))))
+                      VaeExecution.checkCancelled(cancelled)
+                      val both=output.toCpu
+                      if !pair then Some(both)
+                      else
+                        val values=both.toFloatArray
+                        val half=values.length/2
+                        // same operation order as the two-pass path: negative+(positive+(-negative))*guidance
+                        val guided=Array.tabulate(half) { i =>
+                          val n=values(i);val p=values(half+i)
+                          n+(p+(-n))*effective
+                        }
+                        Some(Tensor.fromFloats(guided,Shape.from(Seq(count.toLong)++both.shape.dims.drop(1))))
+                    }.get
+                  catch
+                    // A single image falls back to two passes; a batch goes back to the caller, which samples the images one by one.
+                    case error: Throwable if !multi && CudaUNet.memoryFailure(error) => None
+              batchedPlain().getOrElse(
               KohyaHrFix.withStep(kohyaHrFix,timesteps.toFloatArray(0)) {
               val tdStep=tokenDownsampling.getOrElse((TokenDownsamplingConfig(),false,0,1))
               TokenDownsampling.withStep(tokenDownsampling.map(_._1),tdStep._2,tdStep._3,tdStep._4,model.downBlocks.size) {
@@ -277,12 +349,12 @@ object UNetExecution:
                 val input=temporary(session.upload(sample))
                 val controlSample=if controls.nonEmpty && sample.shape.dims(1)!=4 then
                   temporary(session.upload(controlInput(sample))) else input
-                def residuals(context: scalatorch.ffm.CudaTensor,includeConditionalOnly: Boolean): Option[CudaControlNetResiduals]=
+                def residuals(context: scalatorch.ffm.CudaTensor,includeConditionalOnly: Boolean,addition: Option[scalatorch.ffm.CudaTensor]=None): Option[CudaControlNetResiduals]=
                   var combined: Option[CudaControlNetResiduals]=None
                   controls.foreach { case (request,runtime,image) =>
                     if includeConditionalOnly || !request.conditionalOnly then
                       request.scales(controlProgress,controlProgressEnd).foreach { values =>
-                        val contribution=temporary(runtime.controlNet(controlSample,request.model,timesteps,context,image,values))
+                        val contribution=temporary(runtime.controlNet(controlSample,request.model,timesteps,context,image,values,addition))
                         combined match
                           case None => combined=Some(contribution)
                           case Some(previous) =>
@@ -301,7 +373,7 @@ object UNetExecution:
                 val baseUncond=unconditionalOverride.orElse(unconditional)
                 val baseNegCtx=unconditionalOverride.fold(negativeContext)(u => Some(temporary(session.upload(u))))
                 val baseNegAddition=negativeAddedOverride.fold(negativeAddition)(na => baseUncond.flatMap(u => model.addedFeatures(u.shape.dims.head,Some(na)).map(x => temporary(session.upload(x)))))
-                val positiveControl=residuals(basePosCtx,true)
+                val positiveControl=residuals(basePosCtx,true,basePosAddition)
                 def adjusted(isPositive: Boolean): (scalatorch.ffm.CudaTensor,Tensor[Float]) =
                   val selected=detail.filter(d=>baseNegCtx.isEmpty || d.mode=="both" || (isPositive && d.mode=="cond") || (!isPositive && d.mode=="uncond"))
                   selected.fold((input,timesteps))(d=>(temporary(session.scale(input,d.scale)),Tensor.fromFloats(Array(d.timestep),Shape.from(Seq(1L)))))
@@ -364,7 +436,7 @@ object UNetExecution:
                     st.stepCorrection(stepIdx,timesteps.toFloatArray(0),guidance,sample.shape,(uIn,cIn) => {
                       val uGpu=temporary(session.upload(uIn))
                       val cGpu=temporary(session.upload(cIn))
-                      val uOut=NegPip.withSigns(negativeSigns)(evalCudaModel(uGpu,positiveTime,effNegCtx.get,baseNegAddition,residuals(effNegCtx.get,false))).toCpu
+                      val uOut=NegPip.withSigns(negativeSigns)(evalCudaModel(uGpu,positiveTime,effNegCtx.get,baseNegAddition,residuals(effNegCtx.get,false,baseNegAddition))).toCpu
                       val cOut=NegPip.withSigns(positiveSigns)(evalCudaModel(cGpu,positiveTime,effPosCtx,basePosAddition,positiveControl)).toCpu
                       (uOut,cOut)
                     },sample,prediction)
@@ -392,7 +464,7 @@ object UNetExecution:
                   val degGpu=temporary(session.upload(degSample))
                   val degCtx=effNegCtx.getOrElse(effPosCtx)
                   val degAdd=if effNegCtx.isDefined then baseNegAddition else basePosAddition
-                  val degCtrl=if effNegCtx.isDefined then residuals(degCtx,false) else positiveControl
+                  val degCtrl=if effNegCtx.isDefined then residuals(degCtx,false,degAdd) else positiveControl
                   val degOut=evalCudaModel(degGpu,positiveTime,degCtx,degAdd,degCtrl).toCpu
                   (posCpuForSag,degOut,sagCfg.scale)
                 }
@@ -408,7 +480,7 @@ object UNetExecution:
                 var scheduledResult: Option[Tensor[Float]]=None
                 VaeExecution.checkCancelled(cancelled)
                 val predicted=effNegCtx.fold(positive) { context =>
-                  val negativeControl=residuals(context,false)
+                  val negativeControl=residuals(context,false,baseNegAddition)
                   val (negativeInputBase,negativeTime)=adjusted(false)
                   val negativeInput=chgShifted.fold(negativeInputBase)(s => temporary(session.upload(s._1)))
                   val negativeWithRef=Incantations.withSeg(segUncond) {
@@ -456,14 +528,14 @@ object UNetExecution:
                 val result=predicted.toCpu
                 VaeExecution.checkCancelled(cancelled)
                 addPagAndSag(scheduledResult.getOrElse(positiveCpu.fold(result)(positive=>GuidanceRescale(result,positive,rescale))))
-              }.get } }
+              }.get } })
           )
         }.get
       }
 
   def fromEnvironment(environment: Map[String,String]): UNetExecution =
     val device=environment.getOrElse("SDFX_SCALATORCH_UNET_DEVICE","cpu")
-    def cuda(index: Int)=Cuda(index,environment.get("SDFX_SCALATORCH_UNET_MAX_BYTES").fold(1073741824L)(_.toLong),
+    def cuda(index: Int)=Cuda(index,environment.get("SDFX_SCALATORCH_UNET_MAX_BYTES").fold(1073741824L)(scalatorch.ffm.CudaSession.parseBudget),
       VaeExecution.offloadFromEnvironment(environment,"SDFX_SCALATORCH_UNET_OFFLOAD_WEIGHTS"))
     device match
       case "cpu" => Cpu

@@ -31,7 +31,7 @@ final case class VaeModel(config: VaeConfig,encoder: VaeEncoder,decoder: VaeDeco
 /** All encoder/decoder weights, materialized as CPU Float32; no posterior sampling or pipeline scaling. */
 object PretrainedVae:
   def load(directory: Path,trainable: Boolean=false,maxParameters: Long=1000000000L,
-      maxFeatureElements: Long=134217728L,maxScoreElements: Long=16777216L,
+      maxFeatureElements: Long=536870912L,maxScoreElements: Long=16777216L,
       configOverride: Option[VaeConfig]=None,filename: String="diffusion_pytorch_model.safetensors"): VaeModel =
     require(maxParameters>=0 && maxFeatureElements>=0 && maxScoreElements>=0,"negative VAE allocation limit")
     val c=configOverride.getOrElse(VaeConfig.read(directory.resolve("config.json")))
@@ -41,29 +41,29 @@ object PretrainedVae:
     }
 
   private[models] def loadSingleFile(archive: SafeTensorSet,trainable: Boolean=false,
-      maxParameters: Long=1000000000L,maxFeatureElements: Long=134217728L,
+      maxParameters: Long=1000000000L,maxFeatureElements: Long=536870912L,
       maxScoreElements: Long=16777216L): VaeModel =
     SingleFileSd1Config.inspect(archive)
     loadFromView(SingleFileTensorView.vae(archive),SingleFileSd1Config.vaeConfig,
       trainable,maxParameters,maxFeatureElements,maxScoreElements)
 
   private[models] def loadSd1View(archive: SingleFileTensorView,maxScoreElements: Long): VaeModel =
-    loadFromView(archive,SingleFileSd1Config.vaeConfig,false,1000000000L,134217728L,maxScoreElements)
+    loadFromView(archive,SingleFileSd1Config.vaeConfig,false,1000000000L,536870912L,maxScoreElements)
 
   /** Loads the SD2 VAE from a checkpoint whose archive remains owned by the caller. */
   private[models] def loadSd2SingleFile(archive: SafeTensorSet,trainable: Boolean=false,
-      maxParameters: Long=1000000000L,maxFeatureElements: Long=134217728L,
+      maxParameters: Long=1000000000L,maxFeatureElements: Long=536870912L,
       maxScoreElements: Long=16777216L): VaeModel =
     SingleFileSd2Config.inspect(archive)
     loadFromView(SingleFileTensorView.vae(archive),SingleFileSd1Config.vaeConfig,
       trainable,maxParameters,maxFeatureElements,maxScoreElements)
 
   private[models] def loadSdxlView(archive: SingleFileTensorView,maxScoreElements: Long): VaeModel =
-    loadFromView(archive,SingleFileSdxlConfig.vaeConfig,false,1000000000L,134217728L,maxScoreElements)
+    loadFromView(archive,SingleFileSdxlConfig.vaeConfig,false,1000000000L,536870912L,maxScoreElements)
 
   /** Loads the SDXL VAE from a checkpoint whose archive remains owned by the caller. */
   private[models] def loadSdxlSingleFile(archive: SafeTensorSet,trainable: Boolean=false,
-      maxParameters: Long=1000000000L,maxFeatureElements: Long=134217728L,
+      maxParameters: Long=1000000000L,maxFeatureElements: Long=536870912L,
       maxScoreElements: Long=16777216L): VaeModel =
     SingleFileSdxlConfig.inspect(archive)
     loadFromView(SingleFileTensorView.vae(archive),SingleFileSdxlConfig.vaeConfig,

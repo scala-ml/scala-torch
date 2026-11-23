@@ -13,6 +13,43 @@ private[scalatorch] final class Layout private (
       d -= 1
     out.toInt
 
+  /** The elements in logical order, read from `source`. Same positions as `index(0), index(1), ...`, but found by stepping
+    * (one addition per element) instead of a division and a remainder per axis and element; rows with stride 1 are copied as
+    * blocks. Broadcast axes (stride 0) and sliced views included. */
+  def gatherFloats(source: Array[Float]): Array[Float] =
+    val total = shape.numel.toInt
+    val out = new Array[Float](total)
+    val rank = shape.rank
+    if total == 0 then return out
+    if rank == 0 then { out(0) = source(offset.toInt); return out }
+    val sizes = new Array[Int](rank)
+    val steps = new Array[Long](rank)
+    var d = 0
+    while d < rank do { sizes(d) = shape.dims(d).toInt; steps(d) = strides(d); d += 1 }
+    val inner = sizes(rank - 1)
+    val innerStep = steps(rank - 1)
+    val counter = new Array[Int](rank)
+    var base = offset
+    var o = 0
+    while o < total do
+      if innerStep == 1L then System.arraycopy(source, base.toInt, out, o, inner)
+      else
+        var p = base
+        var j = 0
+        while j < inner do { out(o + j) = source(p.toInt); p += innerStep; j += 1 }
+      o += inner
+      var axis = rank - 2
+      var carry = true
+      while axis >= 0 && carry do
+        counter(axis) += 1
+        base += steps(axis)
+        if counter(axis) == sizes(axis) then
+          base -= steps(axis) * sizes(axis)
+          counter(axis) = 0
+          axis -= 1
+        else carry = false
+    out
+
   def isContiguous: Boolean =
     if shape.numel == 0 then true
     else

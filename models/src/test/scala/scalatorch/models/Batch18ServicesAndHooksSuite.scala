@@ -6,17 +6,20 @@ import java.nio.file.{ Files, Path }
 import javax.imageio.ImageIO
 import munit.FunSuite
 import scalatorch.models.*
+import scalatorch.models.worker.NativeBackendError
 import scalatorch.models.worker.NativeJson.*
 
 final class Batch18ServicesAndHooksSuite extends FunSuite:
+  override val munitTimeout: scala.concurrent.duration.Duration = scala.concurrent.duration.Duration(3, "minutes") // real aesthetic scorers run CPU transformers when their weights are present
 
   private def tinyModelRoot: Path =
     Seq(
       Path.of(".superpowers/models/tiny-sd-pipe"),
       Path.of("../.superpowers/models/tiny-sd-pipe")
-    ).find(p => Files.isDirectory(p.resolve("text_encoder"))).getOrElse(
-      sys.error("missing tiny-sd-pipe fixture")
-    ).toRealPath()
+    ).find(p => Files.isDirectory(p.resolve("text_encoder"))).getOrElse {
+      assume(false,"tiny-sd-pipe fixture not present (.superpowers/models/tiny-sd-pipe)")
+      Path.of(".")
+    }.toRealPath()
 
   private def makeBackend(): NativeDiffusionBackend =
     val root = tinyModelRoot
@@ -39,8 +42,10 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
 
   test("Adetailer and BatchFaceSwap detect, filter, mask, matchColors, and expand prompts") {
     val img = createSalientTestImage(64, 64)
-    val det = Adetailer.detect(img, "face_yolov8n.pt", 0.3)
-    assert(det.boxes.nonEmpty, "expected at least one salient region detected")
+    // detection itself is covered by YoloV8Suite (real trained weights); here a fixed detection exercises the post-processing
+    val boxes = Vector((16.0, 16.0, 48.0, 48.0))
+    val det = Adetailer.Detection(boxes, Adetailer.boxMasks(64, 64, boxes), Vector(0.9), 64, 64)
+    assert(det.boxes.nonEmpty)
 
     val filtered = Adetailer.filterByRatio(det, 0.01, 0.95)
     assertEquals(filtered.boxes.size, det.boxes.size)
@@ -90,15 +95,21 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
       assertEquals(out.getHeight, 64)
 
     val cfg = NsfwChecker.NsfwConfig(genFilterType = "Fill color", fillColor = "#000000", saveBeforeCensor = true, saveMask = true)
-    val (censored, aux) = NsfwChecker.censorFinal(img, cfg)
-    assertEquals(censored.getWidth, 64)
-    assertEquals(aux.map(_._1), Vector("-before-censor", "-censor-mask"))
+    // the NudeNet detector needs its converted weights (NudeNetSuite covers real detections): without them the checker fails loudly, never guesses
+    val nudenetMissing = scalatorch.models.worker.NativeAnnotatorFiles.candidates(Adetailer.NudeNetWeights).forall(!Files.isRegularFile(_))
+    if nudenetMissing then
+      val missing = intercept[IllegalStateException](NsfwChecker.censorFinal(img, cfg))
+      assert(missing.getMessage.contains("NudeNet") && missing.getMessage.contains("weights not found"))
+    // with the detector switched off the checker is a no-op
+    val (passthrough, noAux) = NsfwChecker.censorFinal(img, cfg.copy(nudenet = false))
+    assertEquals(passthrough.getWidth, 64)
+    assert(noAux.isEmpty)
 
     val tmpDir = Files.createTempDirectory("batch18-nsfw-")
     val srcFile = tmpDir.resolve("input.png")
     ImageIO.write(img, "png", srcFile.toFile)
     val backend = makeBackend()
-    val res = backend.execute(
+    def runChecker() = backend.execute(
       NativeRequest("1", "image_tool", Map(
         "tool" -> Str("nsfw_checker"),
         "image_path" -> Str(srcFile.toString),
@@ -108,8 +119,8 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
       ), None),
       makeWorkContext()
     )
-    assert(Files.isRegularFile(Path.of(res("path").asInstanceOf[Str].value)))
-    assert(res("outputs").asInstanceOf[Obj].fields.contains("mask"))
+    if nudenetMissing then assert(intercept[Throwable](runChecker()).getMessage.contains("weights not found"))
+    else runChecker()
   }
 
   test("AestheticScore and additional image tools (person_mask, remove_background, depth_mask, waifu2x) work") {
@@ -124,7 +135,29 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
       generationFields = true,
       hash = true
     )
-    val scores = AestheticScore.scoreImage(img, aCfg)
+    // Real scorers: with the weights present they run (value ranges are checked here, parity lives in AestheticModelsSuite); without them they
+    // fail loudly with "weights not found" (no invented numbers). Formatting is checked on literal scores below.
+    val aestheticFiles = Vector(AestheticModels.ClipLargeFile, AestheticModels.ImprovedFile, AestheticModels.simulacraFile("l14"),
+      AestheticModels.cafeFile("cafe_aesthetic"), AestheticModels.cafeFile("cafe_style"), AestheticModels.cafeFile("cafe_waifu"))
+    val aestheticWeights = aestheticFiles.forall(f => scalatorch.models.worker.NativeAnnotatorFiles.candidates(f).exists(Files.isRegularFile(_)))
+    if aestheticWeights then
+      val real = AestheticScore.scoreImage(img, aCfg)
+      assertEquals(real.map(_._1), aCfg.scorers)
+      real.foreach {
+        case ("improved", AestheticScore.NumericScore(v)) => assert(v > -5.0 && v < 15.0, s"improved $v")
+        case (n, AestheticScore.NumericScore(v)) => assert(n.startsWith("simulacra_") && v > -5.0 && v < 15.0, s"$n $v")
+        case (n, AestheticScore.DistributionScore(ps)) =>
+          assertEquals(ps.map(_._1), AestheticScore.CafeLabels(n))
+          assertEqualsDouble(ps.map(_._2).sum, 1.0, 1e-3)
+      }
+    else
+      val err = intercept[IllegalStateException](AestheticScore.scoreImage(img, aCfg))
+      assert(err.getMessage.contains("weights not found"), err.toString)
+    val scores = Vector[(String, AestheticScore.ScoreValue)](
+      "improved" -> AestheticScore.NumericScore(5.0), "simulacra_l14" -> AestheticScore.NumericScore(5.1),
+      "cafe_aesthetic" -> AestheticScore.DistributionScore(Vector("not_aesthetic" -> 0.4, "aesthetic" -> 0.6)),
+      "cafe_style" -> AestheticScore.DistributionScore(Vector("anime" -> 0.5, "real_life" -> 0.2, "3d" -> 0.1, "manga_like" -> 0.1, "other" -> 0.1)),
+      "cafe_waifu" -> AestheticScore.DistributionScore(Vector("not_waifu" -> 0.3, "waifu" -> 0.7)))
     assertEquals(scores.size, 5)
     val infoFields = AestheticScore.infotextFields(scores).toMap
     assert(infoFields.contains("aesthetic_score"))
@@ -143,7 +176,29 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
     val backend = makeBackend()
     val ctx = makeWorkContext()
 
-    for toolName <- Vector("aesthetic_score", "person_mask", "remove_background", "depth_mask", "waifu2x") do
+    // person_mask needs the YOLOv8 person-seg weights and remove_background the U2-Net weights: without them both fail loudly (no fake fallback)
+    val personWeights = scalatorch.models.worker.NativeAnnotatorFiles.candidates("adetailer/person_yolov8n-seg.safetensors").exists(Files.isRegularFile(_))
+    def toolReq(toolName: String) = NativeRequest(s"tool-$toolName", "image_tool", Map(
+      "tool" -> Str(toolName), "image_path" -> Str(srcFile.toString), "output_dir" -> Str(tmpDir.toString)), None)
+    val u2Weights = scala.util.Try(scalatorch.models.worker.NativeU2Net.locate()).isSuccess
+    if !u2Weights then
+      val bgErr = intercept[Throwable](backend.execute(toolReq("remove_background"), ctx))
+      assert(bgErr.getMessage.contains("weights not found"), bgErr.toString)
+    // waifu2x is the real upconv_7 network: without its weights it fails loudly, with them it runs for real (64x64 -> 128x128 here; parity and
+    // real-image checks live in NativeWaifu2xSuite)
+    val w2xWeights = scala.util.Try(scalatorch.models.worker.NativeWaifu2x.locate("art", 2)).isSuccess
+    if !w2xWeights then
+      val w2Err = intercept[Throwable](backend.execute(toolReq("waifu2x").copy(params = toolReq("waifu2x").params + ("scale" -> Number(2.0))), ctx))
+      assert(w2Err.getMessage.contains("weights not found"), w2Err.toString)
+    if !personWeights then
+      val pmErr = intercept[Throwable](backend.execute(toolReq("person_mask"), ctx))
+      assert(pmErr.getMessage.contains("weights not found"), pmErr.toString)
+
+    if !aestheticWeights then
+      val aeErr = intercept[Throwable](backend.execute(toolReq("aesthetic_score"), ctx))
+      assert(aeErr.getMessage.contains("weights not found"), aeErr.toString)
+
+    for toolName <- (if w2xWeights then Vector("waifu2x") else Vector.empty) ++ (if aestheticWeights then Vector("aesthetic_score") else Vector.empty) ++ (if sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") then Vector("depth_mask") else Vector.empty) ++ (if personWeights then Vector("person_mask") else Vector.empty) ++ (if u2Weights then Vector("remove_background") else Vector.empty) do
       val extra = if toolName == "waifu2x" then Map("scale" -> Number(2.0)) else Map.empty[String, NativeJson]
       val r = backend.execute(
         NativeRequest(s"tool-$toolName", "image_tool", Map(
@@ -370,10 +425,9 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
           "cfg_scale" -> Number(7.0),
           "sampler_name" -> Str("Euler"),
           "hooks" -> Obj(Map(
-            "adetailer" -> Obj(Map("enabled" -> Bool(true), "model" -> Str("face_yolov8n.pt"), "confidence" -> Number(0.1), "denoising_strength" -> Number(0.2))),
-            "face_restore" -> Obj(Map("enabled" -> Bool(true), "visibility" -> Number(0.5))),
-            "nsfw_checker" -> Obj(Map("enabled" -> Bool(true), "gen_filter_type" -> Str("Gaussian Blur"))),
-            "aesthetic_score" -> Obj(Map("enabled" -> Bool(true), "improved" -> Bool(true), "generation_fields" -> Bool(true), "hash" -> Bool(true)))
+            // adetailer (needs the YOLOv8 face weights) and nsfw_checker (NudeNet, not implemented) fail loudly and are covered separately
+            // aesthetic_score needs the real CLIP ViT-L/14 weights (about 1.2 GB, tens of seconds on the CPU): covered by the image-tool test, left out of this 30 s test
+            "face_restore" -> Obj(Map("enabled" -> Bool(true), "visibility" -> Number(0.5)))
           ))
         ))
       ), None),
@@ -381,9 +435,6 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
     )
     val firstImgObj = genRes("images").asInstanceOf[Arr].values.head.asInstanceOf[Obj].fields
     assert(Files.isRegularFile(Path.of(firstImgObj("path").asInstanceOf[Str].value)))
-    assert(firstImgObj.contains("aesthetic_scores"))
-    assert(firstImgObj.contains("aesthetic_score"))
-    assert(firstImgObj.contains("png_chunks"))
 
     // 8. batch_interrogate_prepare & batch_interrogate_execute + extra preprocessors & upscalers
     assert(backend.features.contains("batch_interrogate_wd_v3_partial"))
@@ -462,7 +513,12 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
     }
 
     // Extra ControlNet preprocessors & LDSR/Waifu2x upscalers
-    for pre <- Vector("depth", "depth_marigold", "normal_marigold", "openpose", "lineart", "lineart_anime", "softedge_hed", "mlsd", "normal_bae") do
+    val needsWeights = Set("depth", "depth_marigold", "normal_marigold", "openpose", "lineart", "lineart_anime", "softedge_hed", "mlsd", "normal_bae")
+    // normal_marigold runs an SD2-size diffusion U-Net: only exercised here when the weights are reachable and the U-Net runs on CUDA (CPU takes minutes)
+    val marigoldRunnable = scala.util.Try(scalatorch.models.worker.NativeMarigoldNormals.locate()).isSuccess &&
+      sys.env.get("SDFX_SCALATORCH_UNET_DEVICE").exists(_.startsWith("cuda"))
+    for pre <- Vector("depth", "depth_marigold", "normal_marigold", "openpose", "lineart", "lineart_anime", "softedge_hed", "mlsd", "normal_bae")
+        if (sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") || !needsWeights(pre)) && (pre != "normal_marigold" || marigoldRunnable) do
       val preRes = backend.execute(
         NativeRequest(s"pre-$pre", "preprocess", Map(
           "preprocessor" -> Str(pre),
@@ -473,7 +529,36 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
       )
       assert(Files.isRegularFile(Path.of(preRes("path").asInstanceOf[Str].value)))
 
-    for up <- Vector("LDSR", "Waifu2x") do
+    // normal_bae is the real NormalBAE network now: without its weights it must say so instead of approximating a normal map
+    if !sys.env.contains("SDFX_SCALATORCH_ANNOTATOR_DIR") && scala.util.Try(scalatorch.models.worker.NativeNormalBae.locate()).isFailure then
+      val missing = intercept[Exception] {
+        backend.execute(
+          NativeRequest("pre-normal_bae-missing", "preprocess", Map(
+            "preprocessor" -> Str("normal_bae"),
+            "image_path" -> Str(sampleImg.toString),
+            "output_dir" -> Str(tmpDir.toString)
+          ), None),
+          ctx
+        )
+      }
+      assert(missing.getMessage.contains("weights not found"), missing.getMessage)
+
+    // normal_marigold is the real Marigold diffusion model now: without its weights it must say so instead of approximating a normal map
+    if scala.util.Try(scalatorch.models.worker.NativeMarigoldNormals.locate()).isFailure then
+      val missing = intercept[Exception] {
+        backend.execute(
+          NativeRequest("pre-normal_marigold-missing", "preprocess", Map(
+            "preprocessor" -> Str("normal_marigold"),
+            "image_path" -> Str(sampleImg.toString),
+            "output_dir" -> Str(tmpDir.toString)
+          ), None),
+          ctx
+        )
+      }
+      assert(missing.getMessage.contains("weights not found"), missing.getMessage)
+
+    val w2xAvailable = scala.util.Try(scalatorch.models.worker.NativeWaifu2x.locate("art", 2)).isSuccess
+    for up <- Vector("LDSR", "Waifu2x") if up != "Waifu2x" || w2xAvailable do
       val upRes = backend.execute(
         NativeRequest(s"up-$up", "upscale", Map(
           "upscaler" -> Str(up),
@@ -484,4 +569,8 @@ final class Batch18ServicesAndHooksSuite extends FunSuite:
         ctx
       )
       assert(Files.isRegularFile(Path.of(upRes("path").asInstanceOf[Str].value)))
+    if !w2xAvailable then
+      val w2Err = intercept[Throwable](backend.execute(
+        NativeRequest("up-w2x", "upscale", Map("upscaler" -> Str("Waifu2x"), "scale" -> Number(1.5), "image_path" -> Str(sampleImg.toString), "output_dir" -> Str(tmpDir.toString)), None), ctx))
+      assert(w2Err.getMessage.contains("weights not found"), w2Err.toString)
   }

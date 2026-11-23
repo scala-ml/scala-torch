@@ -56,7 +56,8 @@ object Adetailer:
       masks: Vector[Array[Int]],                      // grayscale 0..255 of size w * h
       confidences: Vector[Double],
       width: Int,
-      height: Int
+      height: Int,
+      classes: Vector[Int] = Vector.empty // detector class index per box (NudeNet: index into NsfwChecker.Labels); empty for single-class detectors
   )
 
   val HfModels: Set[String] = Set(
@@ -83,99 +84,47 @@ object Adetailer:
       m
     }
 
-  /** Detect candidate face/hand/person regions using skin/salience connected components, or full center fallback when requested. */
+  /** Weights file of a trained detector (converted by scripts/convert_yolov8_to_safetensors.py), relative to the annotator folder. */
+  private val YoloName = """((?:face|hand|person|deepfashion2)_yolov8[nsmlx](?:-seg)?)\.pt""".r
+  private val yoloCache = new java.util.concurrent.ConcurrentHashMap[java.nio.file.Path, YoloV8]()
+
+  /** Whether `model` names a detector this runtime implements (YOLOv8 face/hand/person/deepfashion2 checkpoints). */
+  def isImplemented(model: String): Boolean = YoloName.matches(model) || model == NudeNetModel
+
+  /** NudeNet v3 (320n) detector id and its converted weights, relative to the annotator folder. NudeNet and its weights are AGPL-3.0
+    * (notAI-tech/NudeNet); this runtime re-implements the documented pre/post-processing and ships no upstream code. */
+  val NudeNetModel = "nudenet"
+  val NudeNetWeights = "nudenet/320n.safetensors"
+  val NudeNetSize = 320
+  val NudeNetNmsIou = 0.45
+
+  /** NudeNet v3: zero-pad to a square, resize to 320, YOLOv8n with 18 classes (indices = NsfwChecker.Labels), best-class score >= `confidence`,
+    * class-agnostic NMS at IoU 0.45. Boxes are box masks; `classes` carries the class index of each box. */
+  private def detectNudeNet(image: BufferedImage, confidence: Double): Detection =
+    val file = scalatorch.models.worker.NativeAnnotatorFiles.locate(NudeNetWeights, "NudeNet v3 320n")
+    val net = yoloCache.computeIfAbsent(file.toAbsolutePath.normalize, f => YoloV8.load(f))
+    require(net.spec.nc == NsfwChecker.Labels.size && !net.spec.segment, s"NudeNet weights must be an 18-class detector (got nc=${net.spec.nc})")
+    val r = net.detect(image, confidence, iou = NudeNetNmsIou, imgsz = NudeNetSize, withMasks = false, squarePad = true, agnostic = true)
+    Detection(r.boxes, boxMasks(image.getWidth, image.getHeight, r.boxes), r.scores, image.getWidth, image.getHeight, r.classes)
+
+  /** Detect regions with a real YOLOv8 detector (face/hand/person; `-seg` models give instance masks, others box masks). The weights are
+    * `<annotator dir>/adetailer/<name>.safetensors` (SDFX_SCALATORCH_ANNOTATOR_DIR or models/annotators); there is no heuristic fallback:
+    * unavailable weights throw IllegalStateException and models without an implementation throw NativeBackendError("unsupported"). */
   def detect(image: BufferedImage, model: String, confidence: Double): Detection =
-    val w = image.getWidth
-    val h = image.getHeight
-    val visited = new Array[Boolean](w * h)
-    val salient = new Array[Boolean](w * h)
+    if model == NudeNetModel then return detectNudeNet(image, confidence)
+    val stem = model match
+      case YoloName(s) => s
+      case other =>
+        throw new scalatorch.models.worker.NativeBackendError("unsupported",
+          s"detection model '$other' is not implemented (no trained network or weights available in the native runtime); only YOLOv8 face/hand/person models and nudenet are supported")
+    val file = scalatorch.models.worker.NativeAnnotatorFiles.locate(s"adetailer/$stem.safetensors", s"YOLOv8 $stem")
+    val net = yoloCache.computeIfAbsent(file.toAbsolutePath.normalize, f => YoloV8.load(f))
+    val r = net.detect(image, confidence, withMasks = stem.endsWith("-seg"))
+    val boxes = r.boxes
+    val masks = r.masks.getOrElse(boxMasks(image.getWidth, image.getHeight, boxes))
+    Detection(boxes, masks, r.scores, image.getWidth, image.getHeight)
 
-    // Compute mean luminance and skin/contrast salience
-    var sumL = 0.0
-    var y = 0
-    while y < h do
-      var x = 0
-      while x < w do
-        val rgb = image.getRGB(x, y)
-        val r = (rgb >> 16) & 0xff
-        val g = (rgb >> 8) & 0xff
-        val b = rgb & 0xff
-        sumL += 0.299 * r + 0.587 * g + 0.114 * b
-        x += 1
-      y += 1
-    val meanL = sumL / math.max(1, w * h)
-
-    y = 0
-    while y < h do
-      var x = 0
-      while x < w do
-        val rgb = image.getRGB(x, y)
-        val r = (rgb >> 16) & 0xff
-        val g = (rgb >> 8) & 0xff
-        val b = rgb & 0xff
-        val lum = 0.299 * r + 0.587 * g + 0.114 * b
-        // Skin-tone heuristic (YCbCr / RGB rule) OR strong local object contrast from background
-        val cb = 128.0 - 0.168736 * r - 0.331264 * g + 0.5 * b
-        val cr = 128.0 + 0.5 * r - 0.418688 * g - 0.081312 * b
-        val isSkin = (r > 60 && g > 40 && b > 20 && r > g && r > b && math.abs(r - g) > 10 && cr >= 133 && cr <= 177 && cb >= 77 && cb <= 127)
-        val isHighContrast = (lum - meanL) > 28.0
-        salient(y * w + x) = isSkin || isHighContrast
-        x += 1
-      y += 1
-
-    val boxes = new ArrayBuffer[(Double, Double, Double, Double)]()
-    val confs = new ArrayBuffer[Double]()
-    val minArea = math.max(4, (w * h) / 256)
-
-    val queue = new Array[Int](w * h)
-    var idx = 0
-    while idx < w * h do
-      if salient(idx) && !visited(idx) then
-        var qHead = 0
-        var qTail = 0
-        queue(qTail) = idx
-        qTail += 1
-        visited(idx) = true
-        var minX = idx % w
-        var maxX = minX
-        var minY = idx / w
-        var maxY = minY
-        var count = 0
-        while qHead < qTail do
-          val cur = queue(qHead)
-          qHead += 1
-          count += 1
-          val cx = cur % w
-          val cy = cur / w
-          if cx < minX then minX = cx
-          if cx > maxX then maxX = cx
-          if cy < minY then minY = cy
-          if cy > maxY then maxY = cy
-          val neighbors = Array(
-            if cx > 0 then cur - 1 else -1,
-            if cx + 1 < w then cur + 1 else -1,
-            if cy > 0 then cur - w else -1,
-            if cy + 1 < h then cur + w else -1
-          )
-          var ni = 0
-          while ni < 4 do
-            val nb = neighbors(ni)
-            if nb >= 0 && salient(nb) && !visited(nb) then
-              visited(nb) = true
-              queue(qTail) = nb
-              qTail += 1
-            ni += 1
-        val boxArea = (maxX - minX + 1) * (maxY - minY + 1)
-        if count >= minArea && boxArea >= minArea then
-          val fillRatio = count.toDouble / math.max(1, boxArea).toDouble
-          val score = math.min(0.99, 0.35 + 0.6 * fillRatio)
-          if score >= confidence then
-            boxes += ((minX.toDouble, minY.toDouble, maxX.toDouble, maxY.toDouble))
-            confs += score
-      idx += 1
-
-    val finalBoxes = boxes.toVector
-    Detection(finalBoxes, boxMasks(w, h, finalBoxes), confs.toVector, w, h)
+  private def keepClasses(d: Detection, idx: Seq[Int]): Vector[Int] = if d.classes.isEmpty then Vector.empty else idx.map(d.classes).toVector
 
   def filterByRatio(d: Detection, lo: Double, hi: Double): Detection =
     val area = math.max(1.0, (d.width * d.height).toDouble)
@@ -184,7 +133,7 @@ object Adetailer:
       val r = (x2 - x1) * (y2 - y1) / area
       r >= lo && r <= hi
     }.toVector
-    Detection(keep.map(d.boxes), keep.map(d.masks), keep.map(d.confidences), d.width, d.height)
+    Detection(keep.map(d.boxes), keep.map(d.masks), keep.map(d.confidences), d.width, d.height, keepClasses(d, keep))
 
   def filterKLargest(d: Detection, k: Int): Detection =
     if k <= 0 || d.boxes.size <= k then d
@@ -194,11 +143,11 @@ object Adetailer:
         -((x2 - x1) * (y2 - y1))
       }
       val keep = order.take(k).sorted.toVector
-      Detection(keep.map(d.boxes), keep.map(d.masks), keep.map(d.confidences), d.width, d.height)
+      Detection(keep.map(d.boxes), keep.map(d.masks), keep.map(d.confidences), d.width, d.height, keepClasses(d, keep))
 
   def sortLeftToRight(d: Detection): Detection =
     val order = d.boxes.indices.sortBy(i => (d.boxes(i)._1, d.boxes(i)._2)).toVector
-    Detection(order.map(d.boxes), order.map(d.masks), order.map(d.confidences), d.width, d.height)
+    Detection(order.map(d.boxes), order.map(d.masks), order.map(d.confidences), d.width, d.height, keepClasses(d, order))
 
   def offsetDilate(mask: Array[Int], width: Int, height: Int, x: Int, y: Int, dilateErode: Int): Array[Int] =
     var a = mask.clone()
@@ -784,10 +733,13 @@ object NsfwChecker:
     val minActiveThreshold = cfg.thresholds.min
     if minActiveThreshold >= 1.0f then return None
     val det = Adetailer.detect(img, "nudenet", minActiveThreshold.toDouble)
-    if det.boxes.isEmpty then None
+    // a detection counts only when its own class threshold is met (thresholds of 1.0 switch a category off)
+    val active = det.boxes.indices.filter(i => det.confidences(i) >= cfg.thresholds(det.classes(i)).toDouble)
+    if active.isEmpty then None
     else
-      val expanded = det.boxes.zipWithIndex.map { case ((x1, y1, x2, y2), i) =>
-        val cIdx = i % Labels.size
+      val expanded = active.map { i =>
+        val (x1, y1, x2, y2) = det.boxes(i)
+        val cIdx = det.classes(i)
         val eh = cfg.expandHorizontal(cIdx).toDouble
         val ev = cfg.expandVertical(cIdx).toDouble
         val w = (x2 - x1) * eh
@@ -795,7 +747,7 @@ object NsfwChecker:
         val cx = (x1 + x2) / 2.0
         val cy = (y1 + y2) / 2.0
         (cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
-      }
+      }.toVector
       Some(drawMaskShape(img.getWidth, img.getHeight, expanded, cfg.maskShape, cfg.rectangleRoundRadius))
 
   /** Run final generation censoring; returns `(censoredImage, Vector[(suffix, auxiliaryImage)])`. */
@@ -869,69 +821,18 @@ object AestheticScore:
   final case class NumericScore(value: Double) extends ScoreValue
   final case class DistributionScore(probs: Vector[(String, Double)]) extends ScoreValue
 
+  /** Runs the real scorers (see [[AestheticModels]]): `improved` = LAION improved aesthetic predictor (CLIP ViT-L/14 + MLP, rounded to 0.1),
+    * `simulacra_l14` / `simulacra_b16` = Simulacra aesthetic models (rounded to 0.01), `cafe_*` = cafeai BEiT classifiers (probabilities rounded
+    * to 4 places). Missing weights throw IllegalStateException ("weights not found"); nothing is invented. */
   def scoreImage(image: BufferedImage, cfg: AestheticScoreConfig): Vector[(String, ScoreValue)] =
-    val w = image.getWidth
-    val h = image.getHeight
-    val n = math.max(1, w * h)
-    var sumR = 0.0; var sumG = 0.0; var sumB = 0.0
-    var sumL = 0.0; var sumLSq = 0.0; var sumSat = 0.0; var edgeEnergy = 0.0
-    var y = 0
-    while y < h do
-      var x = 0
-      while x < w do
-        val rgb = image.getRGB(x, y)
-        val r = ((rgb >> 16) & 0xff) / 255.0
-        val g = ((rgb >> 8) & 0xff) / 255.0
-        val b = (rgb & 0xff) / 255.0
-        sumR += r; sumG += g; sumB += b
-        val lum = 0.299 * r + 0.587 * g + 0.114 * b
-        sumL += lum
-        sumLSq += lum * lum
-        val maxC = math.max(r, math.max(g, b))
-        val minC = math.min(r, math.min(g, b))
-        sumSat += (if maxC > 1e-6 then (maxC - minC) / maxC else 0.0)
-        if x + 1 < w then
-          val rgbR = image.getRGB(x + 1, y)
-          val lumR = (0.299 * ((rgbR >> 16) & 0xff) + 0.587 * ((rgbR >> 8) & 0xff) + 0.114 * (rgbR & 0xff)) / 255.0
-          edgeEnergy += math.abs(lum - lumR)
-        x += 1
-      y += 1
-    val meanL = sumL / n
-    val stdL = math.sqrt(math.max(0.0, sumLSq / n - meanL * meanL))
-    val meanSat = sumSat / n
-    val meanEdge = edgeEnergy / n
-    val rawQuality = math.max(1.0, math.min(9.5, 4.5 + stdL * 4.0 + meanSat * 1.8 + meanEdge * 3.0 - math.abs(meanL - 0.5) * 1.5))
-
     cfg.scorers.map {
       case "improved" =>
-        "improved" -> NumericScore(math.rint(rawQuality * 10.0) / 10.0)
+        "improved" -> NumericScore(math.rint(AestheticModels.improved(image) * 10.0) / 10.0)
       case name if name.startsWith("simulacra_") =>
-        val offset = if name.endsWith("l14") then 0.15 else -0.10
-        val v = math.max(0.0, math.min(10.0, rawQuality + offset))
-        name -> NumericScore(math.rint(v * 100.0) / 100.0)
-      case "cafe_aesthetic" =>
-        val pAes = math.rint(math.max(0.01, math.min(0.99, rawQuality / 10.0)) * 10000.0) / 10000.0
-        val pNot = math.rint((1.0 - pAes) * 10000.0) / 10000.0
-        "cafe_aesthetic" -> DistributionScore(Vector("not_aesthetic" -> pNot, "aesthetic" -> pAes))
-      case "cafe_style" =>
-        val logits = Vector(
-          0.5 + meanSat * 1.5,
-          0.4 + stdL * 1.2,
-          0.2 + meanEdge * 0.8,
-          0.3 + (1.0 - meanSat) * 1.0,
-          0.1
-        )
-        val maxLog = logits.max
-        val exps = logits.map(l => math.exp(l - maxLog))
-        val sumExp = exps.sum
-        val probs = CafeLabels("cafe_style").zip(exps).map { case (lbl, e) =>
-          lbl -> (math.rint((e / sumExp) * 10000.0) / 10000.0)
-        }
-        "cafe_style" -> DistributionScore(probs)
-      case "cafe_waifu" =>
-        val pW = math.rint(math.max(0.01, math.min(0.99, 0.35 + meanSat * 0.45)) * 10000.0) / 10000.0
-        val pNot = math.rint((1.0 - pW) * 10000.0) / 10000.0
-        "cafe_waifu" -> DistributionScore(Vector("not_waifu" -> pNot, "waifu" -> pW))
+        name -> NumericScore(math.rint(AestheticModels.simulacra(image, name.stripPrefix("simulacra_")) * 100.0) / 100.0)
+      case name =>
+        val probs = AestheticModels.cafe(image, name, CafeLabels(name))
+        name -> DistributionScore(probs.map((l, p) => l -> math.rint(p * 10000.0) / 10000.0))
     }
 
   def infotextFields(scores: Vector[(String, ScoreValue)]): Vector[(String, String)] =

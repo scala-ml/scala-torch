@@ -15,8 +15,10 @@ final case class ControlNetConditioningEmbedding(convIn: Conv2d,blocks: Vector[C
 final case class ConditionalControlNet2d(config: ControlNetConfig,convIn: Conv2d,
     timeEmbedding: DiffusionTimeEmbedding,downBlocks: Vector[DiffusionDownBlock],midBlock: DiffusionMidBlock,
     conditionEmbedding: ControlNetConditioningEmbedding,downProjections: Vector[Conv2d],
-    middleProjection: Conv2d,maxElements: Long=134217728L) derives Module:
+    middleProjection: Conv2d,maxElements: Long=134217728L,
+    additionEmbedding: Option[DiffusionTimeEmbedding]=None) derives Module:
   require(maxElements>=0,"negative ControlNet attention budget")
+  require(additionEmbedding.isDefined==config.unet.additionInputWidth.isDefined,"ControlNet additional embedding mismatch")
   require(downBlocks.size==config.unet.channels.size && downProjections.nonEmpty,
     "ControlNet block count does not match its configuration")
   require(downProjections.size==1+downBlocks.map(_.layers.size).sum+downBlocks.dropRight(1).size,
@@ -61,8 +63,9 @@ final case class ConditionalControlNet2d(config: ControlNetConfig,convIn: Conv2d
       Tensor.fromFloats(reordered,image.shape)
 
   def apply(sample: Tensor[Float],timesteps: Tensor[Float],context: Tensor[Float],image: Tensor[Float],
-      scales: Vector[Float]=Vector.empty): ControlNetResiduals =
+      scales: Vector[Float]=Vector.empty,added: Option[Tensor[Float]]=None): ControlNetResiduals =
     checkImage(sample,context,image)
+    require(added.isDefined==additionEmbedding.isDefined,"ControlNet additional conditioning presence mismatch")
     require(scales.isEmpty || scales.size==downProjections.size+1,"ControlNet scale count mismatch")
     require(scales.forall(_.isFinite),"ControlNet scales must be finite")
     require(timesteps.shape.rank==1 && (timesteps.shape.dims.head==1 || timesteps.shape.dims.head==sample.shape.dims.head),
@@ -71,7 +74,8 @@ final case class ConditionalControlNet2d(config: ControlNetConfig,convIn: Conv2d
       else timesteps.broadcastTo(Shape.from(Seq(sample.shape.dims.head)))
     val features=DiffusionTimesteps.sinusoidal(times,featureWidth,c.flipSinToCos,c.frequencyShift,
       phaseScale=1.0,maxPeriod=10000.0,maxElements=maxElements)
-    val time=timeEmbedding(Variable(features,requiresGrad=false))
+    val baseTime=timeEmbedding(Variable(features,requiresGrad=false))
+    val time=additionEmbedding.fold(baseTime)(a => baseTime+a(Variable(added.get,requiresGrad=false)))
     val text=Variable(context,requiresGrad=false)
     var hidden=convIn(Variable(sample,requiresGrad=false))+
       conditionEmbedding(Variable(orderedImage(image),requiresGrad=false))

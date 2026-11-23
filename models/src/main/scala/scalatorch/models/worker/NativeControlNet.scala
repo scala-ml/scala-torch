@@ -226,71 +226,24 @@ private[worker] object NativeControlNet:
           NativeControlNetImageOps.bicubic(small,source.getWidth,source.getHeight,cancelled)
       case "tile_colorfix" => NativeControlNetImageOps.gaussian(source,math.max(1,numeric("variation",8).toInt).toDouble,cancelled)
       case "blur_gaussian" => NativeControlNetImageOps.gaussian(source,numeric("sigma",9.0),cancelled)
-      case "depth" | "depth_marigold" =>
-        val blurred=NativeControlNetImageOps.gaussian(source,2.0,cancelled)
-        val w=source.getWidth;val h=source.getHeight
-        val out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB)
-        for y <- 0 until h do
-          if cancelled() then throw new java.util.concurrent.CancellationException("preprocess cancelled")
-          val vCue=(y.toDouble/math.max(1,h-1))*40.0
-          for x <- 0 until w do
-            val c=blurred.getRGB(x,y)
-            val lum=0.299*((c>>>16)&255)+0.587*((c>>>8)&255)+0.114*(c&255)
-            val d=math.max(0,math.min(255,math.round(lum*0.85+vCue).toInt))
-            out.setRGB(x,y,0xff000000.toInt|(d<<16)|(d<<8)|d)
-        out
-      case "normal_marigold" | "normal_bae" =>
-        val w=source.getWidth;val h=source.getHeight
-        val out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB)
-        def lumAt(x: Int,y: Int): Double =
-          val cx=math.max(0,math.min(w-1,x));val cy=math.max(0,math.min(h-1,y))
-          val c=source.getRGB(cx,cy)
-          (0.299*((c>>>16)&255)+0.587*((c>>>8)&255)+0.114*(c&255))/255.0
-        for y <- 0 until h do
-          if cancelled() then throw new java.util.concurrent.CancellationException("preprocess cancelled")
-          for x <- 0 until w do
-            val gx=(lumAt(x+1,y)-lumAt(x-1,y))*2.0
-            val gy=(lumAt(x,y+1)-lumAt(x,y-1))*2.0
-            val gz=1.0
-            val norm=math.sqrt(gx*gx+gy*gy+gz*gz)
-            val nx=(-gx/norm*0.5+0.5)*255.0
-            val ny=(-gy/norm*0.5+0.5)*255.0
-            val nz=(gz/norm*0.5+0.5)*255.0
-            val r=math.max(0,math.min(255,math.round(nx).toInt))
-            val g=math.max(0,math.min(255,math.round(ny).toInt))
-            val b=math.max(0,math.min(255,math.round(nz).toInt))
-            out.setRGB(x,y,0xff000000.toInt|(r<<16)|(g<<8)|b)
-        out
-      case "lineart" | "lineart_anime" | "softedge_hed" | "mlsd" =>
-        val w=source.getWidth;val h=source.getHeight
-        val out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB)
-        def lumAt(x: Int,y: Int): Double =
-          val cx=math.max(0,math.min(w-1,x));val cy=math.max(0,math.min(h-1,y))
-          val c=source.getRGB(cx,cy)
-          0.299*((c>>>16)&255)+0.587*((c>>>8)&255)+0.114*(c&255)
-        for y <- 0 until h do
-          if cancelled() then throw new java.util.concurrent.CancellationException("preprocess cancelled")
-          for x <- 0 until w do
-            val gx=lumAt(x+1,y)-lumAt(x-1,y)
-            val gy=lumAt(x,y+1)-lumAt(x,y-1)
-            val mag=math.min(255,math.round(math.hypot(gx,gy)*1.5).toInt)
-            val v=if name=="mlsd" && mag<32 then 0 else mag
-            out.setRGB(x,y,0xff000000.toInt|(v<<16)|(v<<8)|v)
-        out
-      case "openpose" =>
-        val w=source.getWidth;val h=source.getHeight
-        val out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB)
-        val g=out.createGraphics()
-        try
-          g.setColor(java.awt.Color.BLACK)
-          g.fillRect(0,0,w,h)
-          val cx=w/2;val headY=h/4;val neckY=h*3/8;val hipY=h*5/8
-          g.setStroke(new java.awt.BasicStroke(math.max(1f,math.min(w,h)/32f)))
-          g.setColor(new java.awt.Color(255,0,0));g.drawLine(cx,headY,cx,neckY)
-          g.setColor(new java.awt.Color(0,255,0));g.drawLine(cx,neckY,cx,hipY)
-          g.setColor(new java.awt.Color(0,0,255));g.drawLine(cx-w/6,neckY,cx+w/6,neckY)
-        finally g.dispose()
-        out
+      case "depth" | "depth_marigold" => NativeDepthAnything.preprocess(source,cancelled)
+      case "normal_bae" => NativeNormalBae.preprocess(source,resolution,cancelled)
+      case "normal_marigold" =>
+        // the model is trained for a 768 px longer side, so processor_res is not used; preprocessor_args can override it
+        NativeMarigoldNormals.preprocess(source,cancelled,
+          numeric("denoising_steps",scalatorch.models.MarigoldNormals.DefaultSteps).toInt,
+          numeric("processing_resolution",scalatorch.models.MarigoldNormals.DefaultResolution).toInt,
+          numeric("seed",0).toLong)
+      case "softedge_hed" =>
+        val safe=args.get("safe") match { case Some(Bool(true)) => true; case _ => false }
+        NativeHed.preprocess(source,resolution,safe,cancelled)
+      case "lineart" => NativeLineart.preprocess(source,resolution,cancelled)
+      case "lineart_anime" => NativeLineartAnime.preprocess(source,cancelled)
+      case "mlsd" =>
+        val thrV=args.get("thr_v") match { case Some(Number(v)) if v>=0 => v.toFloat; case None => 0.1f; case _ => throw IllegalArgumentException("ControlNet mlsd thr_v must be a non-negative number") }
+        val thrD=args.get("thr_d") match { case Some(Number(v)) if v>=0 => v.toFloat; case None => 0.1f; case _ => throw IllegalArgumentException("ControlNet mlsd thr_d must be a non-negative number") }
+        NativeMlsd.preprocess(source,resolution,thrV,thrD,cancelled)
+      case "openpose" => NativeOpenPose.preprocess(source,resolution,cancelled)
       case other => throw new NativeBackendError("unsupported",s"preprocessor '$other' is not available")
 
   def prepare(value: Option[NativeJson],modelPaths: Map[String,String],fallbackImage: Option[String],

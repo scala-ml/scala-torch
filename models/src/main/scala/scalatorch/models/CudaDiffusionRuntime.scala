@@ -7,11 +7,29 @@ import scala.util.Using
 
 /** Shared inference executor for a snapshot of a diffusion parameter tree. */
 private[models] final class CudaDiffusionRuntime private (session: CudaSession,
-    weights: Map[Parameter,CudaTensor],private var host: Map[Parameter,Tensor[Float]],cancelled: () => Boolean) extends AutoCloseable:
+    weights: Map[Parameter,CudaTensor],private var host: Map[Parameter,Tensor[Float]],cancelled: () => Boolean,val half: Boolean=false) extends AutoCloseable:
   private var closed=false
+  private def up(t: Tensor[Float]): CudaTensor = if half then session.uploadHalf(t) else session.upload(t)
+  private def fillZero(shape: Shape,value: Float): CudaTensor = if half then session.fillHalf(shape,value) else session.fill(shape,value)
   private val offloadedWeights=scala.collection.mutable.LinkedHashMap.empty[Parameter,CudaTensor]
   private var offloadedWeightBytes=0L
-  private val offloadedWeightLimit=CudaDiffusionRuntime.offloadedWeightLimit(session.maxBytes)
+  private val unit=if half then 2L else 4L
+  private var offloadedWeightLimit=
+    if host.isEmpty then 0L else CudaDiffusionRuntime.offloadedWeightLimit(session.maxBytes,session.availableBytes)
+  // Offloaded weights handed out inside the running operation: its kernels read them, so they must not be evicted before it ends.
+  private val pinned=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[Parameter,java.lang.Boolean]())
+  private var scopeDepth=0
+  /** Closes the kept offloaded weight that was added last and is not in use by the running operation. */
+  private def evictNewest(): Boolean =
+    offloadedWeights.keysIterator.toVector.reverseIterator.find(p => !pinned.contains(p)) match
+      case None => false
+      case Some(parameter) =>
+        val tensor=offloadedWeights.remove(parameter).get
+        offloadedWeightBytes-=math.max(tensor.shape.numel*unit,1L)
+        offloadedWeightEvictions+=1
+        tensor.close()
+        true
+
   private val profileEnabled=sys.env.get("SCALATORCH_CUDA_PROFILE").contains("1")
   private var offloadedWeightCacheHits=0L
   private var offloadedWeightCacheHitBytes=0L
@@ -27,6 +45,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       try clearOffloadedWeights() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
   private def scope(body: Using.Manager => CudaTensor): CudaTensor =
+    scopeDepth+=1
     try
       check()
       Using.Manager { use =>
@@ -37,6 +56,9 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     catch case error: Throwable =>
       try clearOffloadedWeights() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
+    finally
+      scopeDepth-=1
+      if scopeDepth==0 then pinned.clear()
 
   private def weightShape(p: Parameter): Shape =
     host.get(p).fold(weights(p).shape)(_.shape)
@@ -49,29 +71,25 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
   private def weight(p: Parameter,use: Using.Manager): CudaTensor =
     check()
     host.get(p) match
-      case None => weights.get(p).fold(use(session.upload(p.data)))(identity)
+      case None => weights.get(p).fold(use(up(p.data)))(identity)
       case Some(snapshot) =>
         offloadedWeights.get(p) match
           case Some(cached) =>
             offloadedWeightCacheHits+=1
-            offloadedWeightCacheHitBytes+=math.max(cached.shape.numel*4,1L)
+            offloadedWeightCacheHitBytes+=math.max(cached.shape.numel*unit,1L)
+            pinned.add(p)
             cached
           case None =>
-            val bytes=math.max(snapshot.shape.numel*4,1L)
+            val bytes=math.max(snapshot.shape.numel*unit,1L)
             val retain=bytes<=offloadedWeightLimit && bytes<=offloadedWeightLimit-offloadedWeightBytes
-            def evictNewest(): Unit =
-              val (parameter,tensor)=offloadedWeights.last
-              offloadedWeights.remove(parameter)
-              offloadedWeightBytes-=math.max(tensor.shape.numel*4,1L)
-              offloadedWeightEvictions+=1
-              tensor.close()
-            while offloadedWeights.nonEmpty && bytes>session.maxBytes-session.allocatedBytes do evictNewest()
-            val uploaded=session.upload(snapshot)
+            while bytes>session.maxBytes-session.allocatedBytes && evictNewest() do ()
+            val uploaded=if half then session.uploadHalfBits(snapshot.shape,HalfWeightCache.bits(p,snapshot)) else up(snapshot)
             offloadedWeightUploads+=1
             offloadedWeightUploadBytes+=bytes
             if retain then
               offloadedWeights(p)=uploaded
-              offloadedWeightBytes+=math.max(uploaded.shape.numel*4,1L)
+              pinned.add(p)
+              offloadedWeightBytes+=math.max(uploaded.shape.numel*unit,1L)
               uploaded
             else
               offloadedWeightTransientUploads+=1
@@ -83,10 +101,16 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     use(session.groupNorm(x,n.groups,n.epsilon,n.weight.map(p => weight(p,use)),n.bias.map(p => weight(p,use))))
   }
 
-  def conv(x: CudaTensor,c: Conv2d): CudaTensor = scope { use =>
+  def normSilu(x: CudaTensor,n: GroupNorm): CudaTensor = scope { use =>
+    check()
+    require(session.shape(x).rank>=2 && x.shape.dims(1)==n.channels,"GroupNorm input channel mismatch")
+    use(session.groupNormSilu(x,n.groups,n.epsilon,n.weight.map(p => weight(p,use)),n.bias.map(p => weight(p,use))))
+  }
+
+  private def convRaw(x: CudaTensor,c: Conv2d): CudaTensor = scope { use =>
     val (effX,effConfig)=CircularConvPadding.current match
       case Some(tiling) if c.config.padding._1>0 || c.config.padding._2>0 =>
-        (use(session.upload(CircularConvPadding.pad(x.toCpu,c.config.padding._1,c.config.padding._2,tiling.tileX,tiling.tileY))),
+        (use(up(CircularConvPadding.pad(x.toCpu,c.config.padding._1,c.config.padding._2,tiling.tileX,tiling.tileY))),
           c.config.copy(padding=(0,0)))
       case _ => (x,c.config)
     val base=use(session.conv2dFast(effX,weight(c.weight,use),effConfig))
@@ -100,22 +124,119 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       down.close();up.close();scaled.close();sum.close()
       combined
     }
+    if out eq base then out else out
+  }
+
+  def conv(x: CudaTensor,c: Conv2d): CudaTensor = scope { use =>
+    val out=use(convRaw(x,c))
     c.bias.fold(out) { p =>
-      val bias=use(session.reshape(weight(p,use),Shape.from(Seq(1L,weightShape(p).numel,1L,1L))))
-      val result=use(session.addBroadcast(out,bias))
-      bias.close();out.close()
+      val result=if out.half then use(session.addNchwBias(out,weight(p,use))) else
+        val bias=use(session.reshape(weight(p,use),Shape.from(Seq(1L,weightShape(p).numel,1L,1L))))
+        val added=use(session.addBroadcast(out,bias))
+        bias.close();added
+      out.close()
       result
     }
   }
 
-  private def project(x: CudaTensor,p: Parameter): CudaTensor = scope { use =>
+  private def project(x: CudaTensor,p: Parameter): CudaTensor =
+    if session.hasCublas && weightShape(p).rank==2 && session.shape(x).rank==2 then scope { use =>
+      use(session.matmulTransposedB(x,weight(p,use)))
+    } else projectGeneric(x,p)
+
+  private def projectGeneric(x: CudaTensor,p: Parameter): CudaTensor = scope { use =>
     val transposed=use(session.transpose(weight(p,use),0,1))
     val out=use(session.matmul(x,transposed))
     transposed.close()
     out
   }
 
-  def linear(x: CudaTensor,l: Linear): CudaTensor = scope { use =>
+  // LoRA merged into a private copy of the Float16 weight: one GEMM per step instead of five kernels. Rebuilt whenever
+  // the adapter set or a multiplier changes (per-step LoRA schedules), and disabled with SCALATORCH_LORA_MERGE=0.
+  private val mergedWeights=scala.collection.mutable.HashMap.empty[Parameter,(Vector[(AnyRef,Float)],CudaTensor)]
+  // Key and value projections of the text context per cross-attention layer (by the key weight): (context, keys, values).
+  // Key and value projections of a text context in the tokens-major form of the fused attention, by the key weight: the
+  // context does not change between the steps of a sampling, so the two matrix products per layer are done once. At most two
+  // contexts per layer are kept (conditional and unconditional when they are not batched).
+  private val contextTokens=
+    scala.collection.mutable.HashMap.empty[Parameter,scala.collection.mutable.ArrayBuffer[(CudaTensor,CudaTensor,CudaTensor)]]
+  private val contextProjections=
+    scala.collection.mutable.HashMap.empty[Parameter,scala.collection.mutable.ArrayBuffer[(CudaTensor,CudaTensor,CudaTensor)]]
+  // Query, key and value weights of a self-attention layer stacked into one matrix, by the query weight. Built on first use.
+  private val packedWeights=scala.collection.mutable.HashMap.empty[Parameter,CudaTensor]
+  private val mergeEnabled= !sys.env.get("SCALATORCH_LORA_MERGE").contains("0")
+
+  private def mergedWeight(l: Linear,adapters: Vector[(LowRankAdapter,Float)]): CudaTensor =
+    val signature=adapters.map((a,m)=>(a:AnyRef,m))
+    mergedWeights.get(l.weight) match
+      case Some((sig,w)) if sig.size==signature.size && sig.zip(signature).forall((x,y)=>(x._1 eq y._1) && x._2==y._2) => w
+      case old =>
+        old.foreach(_._2.close())
+        mergedWeights.remove(l.weight)
+        val base=weights(l.weight)
+        var acc=session.scale(base,1f)
+        try
+          adapters.foreach { (a,multiplier) =>
+            val rank=weightShape(a.a).dims.head
+            val at=session.transpose(weights(a.a),0,1)
+            val delta=try session.matmulTransposedB(weights(a.b),at) finally at.close()
+            val scaled=try session.scale(delta,multiplier*(a.alpha/rank).toFloat) finally delta.close()
+            val sum=try session.add(acc,scaled) finally scaled.close()
+            acc.close();acc=sum
+          }
+        catch case e: Throwable => { acc.close();throw e }
+        mergedWeights(l.weight)=(signature,acc)
+        acc
+
+  def linear(x: CudaTensor,l: Linear): CudaTensor =
+    val adapters=l.lora.toVector.map(a=>(a,1f))++LinearAdapterScope.forWeight(l.weight).toVector
+    if mergeEnabled && adapters.nonEmpty && host.isEmpty && session.hasCublas && session.shape(x).rank==2 &&
+        weightShape(l.weight).rank==2 && weights.contains(l.weight) && adapters.forall((a,_)=>weights.contains(a.a) && weights.contains(a.b)) then
+      scope { use =>
+        val merged=mergedWeight(l,adapters)
+        val fused=l.bias.flatMap(p => session.linearWithBias(x,merged,weight(p,use)))
+        if fused.nonEmpty then use(fused.get)
+        else
+         val out=use(session.matmulTransposedB(x,merged))
+         l.bias.fold(out) { p =>
+          val withBias=use(session.addBroadcast(out,weight(p,use)))
+          out.close()
+          withBias
+         }
+      }
+    else linearPlain(x,l)
+
+  /** The weight of a linear layer with a bias when the product and the bias can be issued separately: Float16 rows, cuBLAS,
+    * and adapters (if any) merged into the weight. */
+  private def separableWeight(x: CudaTensor,l: Linear,use: Using.Manager): Option[CudaTensor] =
+    if !(l.bias.nonEmpty && x.half && session.hasCublas && session.shape(x).rank==2 && weightShape(l.weight).rank==2) then None
+    else
+      val adapters=l.lora.toVector.map(a=>(a,1f))++LinearAdapterScope.forWeight(l.weight).toVector
+      if adapters.isEmpty then Some(weight(l.weight,use))
+      else if mergeEnabled && host.isEmpty && weights.contains(l.weight) &&
+          adapters.forall((a,_)=>weights.contains(a.a) && weights.contains(a.b)) then Some(mergedWeight(l,adapters))
+      else None
+
+  /** `residual + linear(x)` for rows [m, width]: one pass over the output where the fused form applies, else linear and add. */
+  private def linearAdd(x: CudaTensor,l: Linear,residual: CudaTensor): CudaTensor = scope { use =>
+    separableWeight(x,l,use).flatMap(w => session.linearWithBias(x,w,weight(l.bias.get,use),Some(residual))) match
+      case Some(out) => use(out)
+      case None =>
+        val out=use(linear(x,l))
+        val sum=use(session.add(residual,out));out.close()
+        sum
+  }
+
+  private def linearPlain(x: CudaTensor,l: Linear): CudaTensor = scope { use =>
+    // no adapter: product and bias in one pass over the output
+    val direct=
+      if l.lora.isEmpty && l.bias.nonEmpty && session.hasCublas && weightShape(l.weight).rank==2 && session.shape(x).rank==2 &&
+          LinearAdapterScope.forWeight(l.weight).isEmpty then session.linearWithBias(x,weight(l.weight,use),weight(l.bias.get,use))
+      else None
+    if direct.nonEmpty then use(direct.get) else linearRest(x,l,use)
+  }
+
+  private def linearRest(x: CudaTensor,l: Linear,use: Using.Manager): CudaTensor =
     val base=use(project(x,l.weight))
     val attached=l.lora.fold(base) { a =>
       val first=use(project(x,a.a));val second=use(project(first,a.b))
@@ -140,7 +261,6 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       adapted.close()
       out
     }
-  }
 
   def resnet(input: CudaTensor,model: DiffusionResnet2d,timeEmbedding: Option[CudaTensor]): CudaTensor =
     check()
@@ -152,29 +272,63 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         "timestep embedding batch/width mismatch")
     }
     scope { use =>
-      val normalized1=use(norm(input,model.norm1))
-      val activated1=use(session.silu(normalized1));normalized1.close()
-      val hidden=use(conv(activated1,model.conv1));activated1.close()
-      val conditioned=model.timeEmbProj.fold(hidden) { projection =>
-        val activatedTime=use(session.silu(timeEmbedding.get))
-        val projected=use(linear(activatedTime,projection));activatedTime.close()
-        val expanded=use(session.reshape(projected,Shape.from(Seq(shape.dims.head,model.norm2.channels.toLong,1L,1L))))
-        projected.close()
-        val out=use(session.addBroadcast(hidden,expanded))
-        expanded.close();hidden.close()
+      if input.half then
+        val activated1=use(normSilu(input,model.norm1))
+        val rawHidden=use(convRaw(activated1,model.conv1));activated1.close()
+        val conditioned=model.timeEmbProj.fold {
+          model.conv1.bias.fold(rawHidden) { bp =>
+            val r=use(session.addNchwBias(rawHidden,weight(bp,use)));rawHidden.close();r
+          }
+        } { projection =>
+          val activatedTime=use(session.silu(timeEmbedding.get))
+          val projected=use(linear(activatedTime,projection));activatedTime.close()
+          val out=use(session.addNchwBiasTime(rawHidden,model.conv1.bias.map(p => weight(p,use)),projected))
+          projected.close();rawHidden.close()
+          out
+        }
+        val activated2=use(normSilu(conditioned,model.norm2));conditioned.close()
+        val rawResidual=use(convRaw(activated2,model.conv2));activated2.close()
+        val shortcut=model.convShortcut.fold(input)(c => use(conv(input,c)))
+        val out=use(session.addNchwBiasRes(rawResidual,model.conv2.bias.map(p => weight(p,use)),shortcut,(1.0/model.outputScale).toFloat))
+        rawResidual.close()
+        if model.convShortcut.isDefined then shortcut.close()
         out
-      }
-      val normalized2=use(norm(conditioned,model.norm2));conditioned.close()
-      val activated2=use(session.silu(normalized2));normalized2.close()
-      val residual=use(conv(activated2,model.conv2));activated2.close()
-      val shortcut=model.convShortcut.fold(input)(c => use(conv(input,c)))
-      val sum=use(session.add(shortcut,residual));residual.close()
-      if model.convShortcut.isDefined then shortcut.close()
-      val result=use(session.scale(sum,(1.0/model.outputScale).toFloat));sum.close()
-      result
+      else
+        val normalized1=use(norm(input,model.norm1))
+        val activated1=use(session.silu(normalized1));normalized1.close()
+        val hidden=use(conv(activated1,model.conv1));activated1.close()
+        val conditioned=model.timeEmbProj.fold(hidden) { projection =>
+          val activatedTime=use(session.silu(timeEmbedding.get))
+          val projected=use(linear(activatedTime,projection));activatedTime.close()
+          val expanded=use(session.reshape(projected,Shape.from(Seq(shape.dims.head,model.norm2.channels.toLong,1L,1L))))
+          projected.close()
+          val out=use(session.addBroadcast(hidden,expanded))
+          expanded.close();hidden.close()
+          out
+        }
+        val normalized2=use(norm(conditioned,model.norm2));conditioned.close()
+        val activated2=use(session.silu(normalized2));normalized2.close()
+        val residual=use(conv(activated2,model.conv2));activated2.close()
+        val shortcut=model.convShortcut.fold(input)(c => use(conv(input,c)))
+        val sum=use(session.add(shortcut,residual));residual.close()
+        if model.convShortcut.isDefined then shortcut.close()
+        if model.outputScale==1.0 then sum
+        else
+          val result=use(session.scale(sum,(1.0/model.outputScale).toFloat));sum.close()
+          result
     }
 
-  def attention(input: CudaTensor,model: DiffusionAttention,context: Option[CudaTensor]): CudaTensor =
+  /** With `residual` (the shape of the result) the result is `residual + attention`; the plain Float16 paths fold the add into
+    * the output projection. */
+  def attention(input: CudaTensor,model: DiffusionAttention,context: Option[CudaTensor],residual: Option[CudaTensor]=None,cacheContextKV: Boolean=false): CudaTensor =
+    val folded=Array(false)
+    val out=attentionInner(input,model,context,residual,folded,cacheContextKV)
+    residual match
+      case Some(r) if !folded(0) => try session.add(r,out) finally out.close()
+      case _ => out
+
+  private def attentionInner(input: CudaTensor,model: DiffusionAttention,context: Option[CudaTensor],residual: Option[CudaTensor],
+      folded: Array[Boolean],cacheContextKV: Boolean=false): CudaTensor =
     check()
     val source=context.getOrElse(input)
     val x=session.shape(input);val c=session.shape(source)
@@ -186,12 +340,66 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     val batch=x.dims(0);val queries=x.dims(1);val keys=c.dims(1)
     AttentionLayout.validate(Shape.from(Seq(batch,model.heads.toLong,queries,inner/model.heads)),
       Shape.from(Seq(batch,model.heads.toLong,keys,inner/model.heads)),
-      Shape.from(Seq(batch,model.heads.toLong,keys,inner/model.heads)),0,model.maxScoreElements)
+      Shape.from(Seq(batch,model.heads.toLong,keys,inner/model.heads)),0,model.maxScoreElements,!input.half)
     if context.isEmpty && Pag.isCurrentLayerPerturbed then
       return scope { use =>
         val flat=use(session.reshape(input,Shape.from(Seq(batch*queries,queryWidth))))
         val v=use(linear(flat,model.toV));flat.close()
         val projected=use(linear(v,model.toOut));v.close()
+        val result=use(session.reshape(projected,Shape.from(Seq(batch,queries,queryWidth))))
+        projected.close()
+        result
+      }
+    // Plain Float16 self-attention: the fused kernels read the heads where the projections put them, without transposed copies.
+    val special=(context.isEmpty && Pag.currentSection=="mid" && (Sag.currentStore.isDefined || Incantations.currentSeg.isDefined)) ||
+      (context.isDefined && NegPip.currentSigns.isDefined)
+    // Self-attention whose three projections are plain resident weights: one matrix product with the weights stacked instead of
+    // three (a cuBLAS call costs about 50 microseconds on the CPU whatever its size), and the kernel reads the three parts in place.
+    def plainWeight(l: Linear): Boolean =
+      l.bias.isEmpty && l.lora.isEmpty && weights.contains(l.weight) && LinearAdapterScope.forWeight(l.weight).isEmpty
+    if input.half && !special && context.isEmpty && host.isEmpty && CudaDiffusionRuntime.packedProjections &&
+        plainWeight(model.toQ) && plainWeight(model.toK) && plainWeight(model.toV) &&
+        session.canAttendTokensMajor(queries,queries,inner/model.heads) then
+      return scope { use =>
+        val stacked=packedWeights.getOrElseUpdate(model.toQ.weight,
+          session.cat(Seq(weights(model.toQ.weight),weights(model.toK.weight),weights(model.toV.weight)),0))
+        val flat=use(session.reshape(input,Shape.from(Seq(batch*queries,queryWidth))))
+        val projected=use(session.matmulTransposedB(flat,stacked));flat.close()
+        val packed=use(session.reshape(projected,Shape.from(Seq(batch,queries,3*inner))));projected.close()
+        val attended=use(session.attentionPacked(packed,model.heads));packed.close()
+        val merged=use(session.reshape(attended,Shape.from(Seq(batch*queries,inner))));attended.close()
+        val out=use(outProjection(merged,model.toOut,residual,folded,use));merged.close()
+        val result=use(session.reshape(out,Shape.from(Seq(batch,queries,queryWidth))))
+        out.close()
+        result
+      }
+    if input.half && !special && session.canAttendTokensMajor(queries,keys,inner/model.heads) then
+      return scope { use =>
+        def project(value: CudaTensor,l: Linear,tokens: Long): CudaTensor =
+          val flat=use(session.reshape(value,Shape.from(Seq(batch*tokens,value.shape.dims(2)))))
+          val projected=use(linear(flat,l));flat.close()
+          val view=use(session.reshape(projected,Shape.from(Seq(batch,tokens,inner))));projected.close()
+          view
+        val q=project(input,model.toQ,queries)
+        val keep=cacheContextKV && context.isDefined && CudaDiffusionRuntime.contextTokensCache && plainWeight(model.toK) && plainWeight(model.toV)
+        val (k,v)=
+          if !keep then (project(source,model.toK,keys),project(source,model.toV,keys))
+          else
+            val entries=contextTokens.getOrElseUpdate(model.toK.weight,scala.collection.mutable.ArrayBuffer.empty)
+            entries.find(_._1 eq source) match
+              case Some(entry) => (entry._2,entry._3)
+              case None =>
+                // views that outlive this scope; closed when a newer context replaces them or with the runtime
+                val kk=session.reshape(project(source,model.toK,keys),Shape.from(Seq(batch,keys,inner)))
+                val vv=try session.reshape(project(source,model.toV,keys),Shape.from(Seq(batch,keys,inner)))
+                  catch case error: Throwable => { kk.close();throw error }
+                while entries.size>=2 do { val old=entries.remove(0);old._2.close();old._3.close() }
+                entries+=((source,kk,vv))
+                (kk,vv)
+        val attended=use(session.attentionTokensMajor(q,k,v,model.heads))
+        q.close();if !keep then { k.close();v.close() }
+        val flat=use(session.reshape(attended,Shape.from(Seq(batch*queries,inner))));attended.close()
+        val projected=use(outProjection(flat,model.toOut,residual,folded,use));flat.close()
         val result=use(session.reshape(projected,Shape.from(Seq(batch,queries,queryWidth))))
         projected.close()
         result
@@ -204,19 +412,31 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         projected.close()
         val out=use(session.transpose(view,1,2));view.close()
         out
-      val qRaw=heads(input,model.toQ,queries);val k=heads(source,model.toK,keys)
+      // Cross-attention: keys and values are projections of the text context, which does not change between the steps of a
+      // sampling. They are computed once per context tensor and layer and kept (two matrix products and two transposes less per
+      // layer and step). Only for plain resident weights, so a LoRA that changes between steps is never served from here.
+      val keepContext=cacheContextKV && context.isDefined && !special && CudaDiffusionRuntime.contextProjectionCache &&
+        plainWeight(model.toK) && plainWeight(model.toV)
+      val kept=if keepContext then contextProjections.get(model.toK.weight).flatMap(_.find(_._1 eq source)) else None
+      val qRaw=heads(input,model.toQ,queries);val k=kept.fold(heads(source,model.toK,keys))(_._2)
       val q=if context.isEmpty && Pag.currentSection=="mid" then
         if Sag.currentStore.isDefined then Sag.recordFromQK(qRaw.toCpu,k.toCpu)
         Incantations.currentSeg match
           case Some((sigma,ih,iw)) =>
-            val blurred=use(session.upload(Incantations.segBlurQuery(qRaw.toCpu,sigma,ih,iw)))
+            val blurred=use(up(Incantations.segBlurQuery(qRaw.toCpu,sigma,ih,iw)))
             qRaw.close();blurred
           case None => qRaw
       else qRaw
-      val vRaw=heads(source,model.toV,keys)
+      val vRaw=kept.fold(heads(source,model.toV,keys))(_._3)
+      if keepContext && kept.isEmpty then
+        // Up to three contexts per layer (a two-pass step alternates between the negative and the positive one); the oldest goes.
+        val entries=contextProjections.getOrElseUpdate(model.toK.weight,scala.collection.mutable.ArrayBuffer.empty)
+        while entries.size>=3 do { val old=entries.remove(0);old._2.close();old._3.close() }
+        // own handles on the same memory: the scope closes its handles when it ends
+        entries+=((source,session.reshape(k,k.shape),session.reshape(vRaw,vRaw.shape)))
       val v=if context.isDefined then NegPip.currentSigns match
         case Some(signs) =>
-          val signed=use(session.upload(NegPip.applySigns(vRaw.toCpu,signs)))
+          val signed=use(up(NegPip.applySigns(vRaw.toCpu,signs)))
           vRaw.close();signed
         case None => vRaw
       else vRaw
@@ -224,7 +444,8 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       // diffusion images. CudaSession still caps scratch to its available
       // allocation budget, so low-memory sessions retain automatic slicing.
       val attended=use(session.scaledDotProductAttention(q,k,v,model.maxScoreElements,maxWorkspaceBytes=64L*1024*1024))
-      q.close();k.close();v.close()
+      q.close()
+      if kept.isEmpty then { k.close();v.close() }
       val packed=use(session.transpose(attended,1,2));attended.close()
       val flat=use(session.reshape(packed,Shape.from(Seq(batch*queries,inner))));packed.close()
       val projected=use(linear(flat,model.toOut));flat.close()
@@ -256,6 +477,50 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     use(session.layerNorm(input,model.epsilon,model.weight.map(p => weight(p,use)),model.bias.map(p => weight(p,use))))
   }
 
+  /** Output projection of an attention layer on rows; with a residual the add is folded into it and `folded` is set. */
+  private def outProjection(rows: CudaTensor,l: Linear,residual: Option[CudaTensor],folded: Array[Boolean],use: Using.Manager): CudaTensor =
+    residual match
+      case Some(r) =>
+        val flat=use(session.reshape(r,Shape.from(Seq(session.shape(rows).dims(0),session.shape(r).numel/session.shape(rows).dims(0)))))
+        val out=linearAdd(rows,l,flat);flat.close()
+        folded(0)=true
+        out
+      case None => linear(rows,l)
+
+  /** With `residual` (the shape of the result) the result is `residual + feedForward(input)`. */
+  def feedForward(input: CudaTensor,model: DiffusionFeedForward,residual: Option[CudaTensor]): CudaTensor =
+    if residual.isEmpty then return feedForward(input,model)
+    check()
+    val shape=session.shape(input)
+    require(shape.rank>0 && shape.dims.last==model.inputWidth,"GEGLU input width mismatch")
+    require(session.shape(residual.get).dims==shape.dims.updated(shape.rank-1,model.outputWidth),"residual shape mismatch")
+    scope { use =>
+      val rows=shape.numel/model.inputWidth
+      val flat=use(session.reshape(input,Shape.from(Seq(rows,model.inputWidth))))
+      val gated=use(gatedProjection(flat,model,use));flat.close()
+      val rest=use(session.reshape(residual.get,Shape.from(Seq(rows,model.outputWidth))))
+      val output=use(linearAdd(gated,model.output,rest));gated.close();rest.close()
+      val result=use(session.reshape(output,Shape.from(shape.dims.updated(shape.rank-1,model.outputWidth))))
+      output.close()
+      result
+    }
+
+  /** GEGLU of the projection of rows; the bias of the projection is added inside the GEGLU kernel where that applies. */
+  private def gatedProjection(flat: CudaTensor,model: DiffusionFeedForward,use: Using.Manager): CudaTensor =
+    val fused=separableWeight(flat,model.projection,use).flatMap { w =>
+      val bias=weight(model.projection.bias.get,use)
+      val product=use(session.matmulTransposedB(flat,w))
+      if session.canGegluBias(product,bias) then
+        val gated=session.gegluBias(product,bias);product.close()
+        Some(gated)
+      else { product.close();None }
+    }
+    fused.getOrElse {
+      val projected=use(linear(flat,model.projection))
+      val gated=session.geglu(projected,fast=true);projected.close()
+      gated
+    }
+
   def feedForward(input: CudaTensor,model: DiffusionFeedForward): CudaTensor =
     check()
     val shape=session.shape(input)
@@ -263,7 +528,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     scope { use =>
       val flat=use(session.reshape(input,Shape.from(Seq(shape.numel/model.inputWidth,model.inputWidth))))
       val projected=use(linear(flat,model.projection));flat.close()
-      val gated=use(session.geglu(projected));projected.close()
+      val gated=use(session.geglu(projected,fast=true));projected.close()
       val output=use(linear(gated,model.output));gated.close()
       val result=use(session.reshape(output,Shape.from(shape.dims.updated(shape.rank-1,model.outputWidth))))
       output.close()
@@ -278,19 +543,27 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       contextShape.dims(2)==weightShape(model.attn2.toK.weight).dims(1),"Transformer context batch/width mismatch")
     scope { use =>
       val norm1=use(layerNorm(input,model.norm1))
+      // Plain Float16 blocks: every residual add is folded into the projection before it (see linearAdd).
+      val foldResiduals=CudaDiffusionRuntime.foldedResiduals && input.half
+      var selfFolded=false
       val attn1=HyperTile.currentUnscoped.flatMap(_.split(shape.dims(1).toInt)) match
         case Some((nh,nw,h,w)) =>
           val b=shape.dims(0).toInt
-          val tiled=use(session.upload(HyperTile.tileTokens(norm1.toCpu,nh,nw,h,w)))
+          val tiled=use(up(HyperTile.tileTokens(norm1.toCpu,nh,nw,h,w)))
           val tiledOut=use(attention(tiled,model.attn1,None))
-          use(session.upload(HyperTile.untileTokens(tiledOut.toCpu,b,nh,nw,h,w)))
+          use(up(HyperTile.untileTokens(tiledOut.toCpu,b,nh,nw,h,w)))
         case None =>
           val tdCtx=for
             td <- TokenDownsampling.current
             (sh,sw) <- TokenDownsampling.currentSpatialShape
             factor = td.factorForSection(Pag.currentSection)
             if factor > 1.0 && sh.toLong * sw == shape.dims(1)
-          yield use(session.upload(TokenDownsampling.resampleTokens(norm1.toCpu,sh,sw,factor)))
+            dstH = math.max(1,(sh/factor).toInt)
+            dstW = math.max(1,(sw/factor).toInt)
+            if dstH != sh || dstW != sw
+          yield
+            if norm1.half then use(session.downsampleTokensExact(norm1,sh,sw,dstH,dstW))
+            else use(up(TokenDownsampling.resampleTokens(norm1.toCpu,sh,sw,factor)))
           val aaOut=if tdCtx.isEmpty then
             for
               aa <- AgentAttention.current
@@ -309,31 +582,57 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
                 case Some(ag) if ag.shape.dims(1)*2 < features.shape.dims(1) =>
                   AgentAttention.applyAgentAttention(model.attn1,features,ag)
                 case _ =>
-                  val fGpu=use(session.upload(features))
+                  val fGpu=use(up(features))
                   val mGpu=use(attention(fGpu,model.attn1,None))
                   mGpu.toCpu
-              use(session.upload(AgentAttention.unmerge(plan,mergedOut)))
+              use(up(AgentAttention.unmerge(plan,mergedOut)))
           else None
           val refOrLlliteOut=if aaOut.isEmpty && tdCtx.isEmpty && (ReferenceOnly.current.isDefined || ControlLLLite.current.isDefined) then
-            Some(use(session.upload(model.attn1(scalatorch.autograd.Variable(norm1.toCpu,requiresGrad=false),None).data)))
+            Some(use(up(model.attn1(scalatorch.autograd.Variable(norm1.toCpu,requiresGrad=false),None).data)))
           else None
-          val out=aaOut.orElse(refOrLlliteOut).getOrElse(use(attention(norm1,model.attn1,tdCtx)))
+          val out=aaOut.orElse(refOrLlliteOut).getOrElse {
+            if foldResiduals then selfFolded=true
+            use(attention(norm1,model.attn1,tdCtx,if foldResiduals then Some(input) else None))
+          }
           tdCtx.foreach(_.close())
           out
       norm1.close()
-      val self=use(session.add(input,attn1));attn1.close()
-      val norm2=use(layerNorm(self,model.norm2))
-      val attn2=if IpAdapter.current.isDefined || ControlLLLite.current.isDefined then
-        val res=model.attn2(scalatorch.autograd.Variable(norm2.toCpu,requiresGrad=false),Some(scalatorch.autograd.Variable(context.toCpu,requiresGrad=false))).data
-        norm2.close()
-        use(session.upload(res))
-      else
-        val res=use(attention(norm2,model.attn2,Some(context)));norm2.close();res
-      val cross=use(session.add(self,attn2));self.close();attn2.close()
+      val self=if selfFolded then attn1 else { val sum=use(session.add(input,attn1));attn1.close();sum }
+      val tgReused=if half && IpAdapter.current.isEmpty && ControlLLLite.current.isEmpty then
+        for state <- TGate.current; slot <- state.activeSlot; cached <- state.shouldReuse(slot,model.attn2,self.shape) yield cached
+      else None
+      val cross=tgReused match
+        case Some(cached) =>
+          val sum=use(session.tgateAddBroadcast(self,cached))
+          self.close()
+          sum
+        case None =>
+          val norm2=use(layerNorm(self,model.norm2))
+          var crossFolded=false
+          val canCaptureTGate=half && IpAdapter.current.isEmpty && ControlLLLite.current.isEmpty && NegPip.currentSigns.isEmpty
+          val tgCapture=if !canCaptureTGate then None else
+            for state <- TGate.current; slot <- state.activeSlot; if state.shouldRecord(slot,model.attn2,DeepCache.current.map(_.config.interval),Some(self.shape))
+            yield (state,slot)
+          val attn2=if IpAdapter.current.isDefined || ControlLLLite.current.isDefined then
+            val res=model.attn2(scalatorch.autograd.Variable(norm2.toCpu,requiresGrad=false),Some(scalatorch.autograd.Variable(context.toCpu,requiresGrad=false))).data
+            norm2.close()
+            use(up(res))
+          else if tgCapture.isEmpty then
+            crossFolded=foldResiduals
+            val res=use(attention(norm2,model.attn2,Some(context),if foldResiduals then Some(self) else None,cacheContextKV=true));norm2.close();res
+          else
+            val res=use(attention(norm2,model.attn2,Some(context),None,cacheContextKV=true));norm2.close();res
+          tgCapture.foreach { (state,slot) =>
+            val avg=session.tgateAvgHalf(attn2,state.isCfgPair)
+            state.record(slot,model.attn2,avg)
+          }
+          if crossFolded then { self.close();attn2 } else { val sum=use(session.add(self,attn2));self.close();attn2.close();sum }
       val norm3=use(layerNorm(cross,model.norm3))
-      val ff=use(feedForward(norm3,model.feedForward));norm3.close()
-      val result=use(session.add(cross,ff));cross.close();ff.close()
-      result
+      val result=use(feedForward(norm3,model.feedForward,if foldResiduals then Some(cross) else None));norm3.close()
+      if foldResiduals then { cross.close();result }
+      else
+        val sum=use(session.add(cross,result));cross.close();result.close()
+        sum
     }
 
   def spatialTransformer(input: CudaTensor,model: DiffusionSpatialTransformer,context: CudaTensor): CudaTensor =
@@ -364,9 +663,9 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     if model.conv.config.padding==(1,1) then conv(input,model.conv)
     else scope { use =>
       val shape=session.shape(input)
-      val column=use(session.fill(Shape.from(shape.dims.updated(3,1L)),0f))
+      val column=use(fillZero(Shape.from(shape.dims.updated(3,1L)),0f))
       val wider=use(session.cat(Seq(input,column),3));column.close()
-      val row=use(session.fill(Shape.from(wider.shape.dims.updated(2,1L)),0f))
+      val row=use(fillZero(Shape.from(wider.shape.dims.updated(2,1L)),0f))
       val padded=use(session.cat(Seq(wider,row),2));wider.close();row.close()
       val result=use(conv(padded,model.conv));padded.close()
       result
@@ -374,8 +673,9 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
 
   /** Computes one ControlNet pass in this CUDA session and returns caller-owned residual tensors. */
   def controlNet(sample: CudaTensor,model: ConditionalControlNet2d,timesteps: Tensor[Float],
-      context: CudaTensor,image: CudaTensor,scales: Vector[Float]): CudaControlNetResiduals =
+      context: CudaTensor,image: CudaTensor,scales: Vector[Float],added: Option[CudaTensor]=None): CudaControlNetResiduals =
     check()
+    require(added.isDefined==model.additionEmbedding.isDefined,"ControlNet additional conditioning presence mismatch")
     val shape=session.shape(sample)
     val contextShape=session.shape(context)
     val imageShape=session.shape(image)
@@ -396,10 +696,17 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     var outputMiddle: Option[CudaTensor]=None
     try
       val result=Using.Manager { use =>
-        val embedded=use(session.upload(features))
+        val embedded=use(up(features))
         val projected=use(linear(embedded,model.timeEmbedding.linear1));embedded.close()
         val activated=use(session.silu(projected));projected.close()
-        val time=use(linear(activated,model.timeEmbedding.linear2));activated.close()
+        val baseTime=use(linear(activated,model.timeEmbedding.linear2));activated.close()
+        val time=model.additionEmbedding.fold(baseTime) { embedding =>
+          val addProjected=use(linear(added.get,embedding.linear1))
+          val addActivated=use(session.silu(addProjected));addProjected.close()
+          val addEmbedded=use(linear(addActivated,embedding.linear2));addActivated.close()
+          val sum=use(session.add(baseTime,addEmbedded));baseTime.close();addEmbedded.close()
+          sum
+        }
         var hidden=use(conv(sample,model.convIn))
         def next(value: CudaTensor): Unit =
           val owned=use(value)
@@ -448,8 +755,71 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         outputMiddle.foreach(t=>try t.close() catch case cleanup: Throwable=>error.addSuppressed(cleanup))
         throw error
 
+  /** Float32 in, Float32 out; runs in Float16 inside when this runtime was uploaded with half=true. */
+  // SCALATORCH_UNET_GAP_STATS=1: how long the device has nothing to do between two U-Net passes (the sampler step on the CPU,
+  // downloads and uploads). Every pass is waited for, so the sum of the passes is the pure device time.
+  private val gapStats=sys.env.get("SCALATORCH_UNET_GAP_STATS").contains("1")
+  private var gapPasses=0;private var gapNanos=0L;private var passNanos=0L;private var lastPassEnd=0L
   def unet(input: CudaTensor,model: ConditionalUNet2d,timesteps: Tensor[Float],context: CudaTensor,
       added: Option[CudaTensor]=None,control: Option[CudaControlNetResiduals]=None): CudaTensor =
+    if !gapStats then return unetTimed(input,model,timesteps,context,added,control)
+    session.waitForDevice()
+    val started=System.nanoTime()
+    if lastPassEnd!=0L then gapNanos+=started-lastPassEnd
+    val out=unetTimed(input,model,timesteps,context,added,control)
+    session.waitForDevice()
+    lastPassEnd=System.nanoTime();passNanos+=lastPassEnd-started;gapPasses+=1
+    out
+  private def unetTimed(input: CudaTensor,model: ConditionalUNet2d,timesteps: Tensor[Float],context: CudaTensor,
+      added: Option[CudaTensor],control: Option[CudaControlNetResiduals]): CudaTensor =
+    if !half then unetCore(input,model,timesteps,context,added,control)
+    else scope { use =>
+      def h(t: CudaTensor): CudaTensor = if t.half then t else use(session.castToHalf(t))
+      val residuals=control.map(c => CudaControlNetResiduals(c.down.map(h),h(c.middle)))
+      val out=use(unetCore(h(input),model,timesteps,keptContext(context).getOrElse(h(context)),added.map(h),residuals))
+      use(session.castToFloat(out))
+    }
+
+  // Float16 copies of the text contexts of this sampling. UNetExecution.Cuda already keeps the uploaded positive/negative
+  // and repeated [neg; pos] CudaTensor objects across steps, so reference equality (eq) avoids per-step toCpu DMA and GPU sync.
+  private val valueCacheContext=sys.env.get("SCALATORCH_CUDA_CONTEXT_VALUE_CACHE").contains("1")
+  private val keptContexts=scala.collection.mutable.ArrayBuffer.empty[(Array[Float],CudaTensor)]
+  private val keptContextsByRef=scala.collection.mutable.ArrayBuffer.empty[(CudaTensor,CudaTensor)]
+  private def evictKeptContext(old: CudaTensor): Unit =
+    contextTokens.values.foreach { entries =>
+      entries.filter(_._1 eq old).foreach { e => e._2.close();e._3.close() }
+      entries.filterInPlace(e => !(e._1 eq old))
+    }
+    contextProjections.values.foreach { entries =>
+      entries.filter(_._1 eq old).foreach { e => e._2.close();e._3.close() }
+      entries.filterInPlace(e => !(e._1 eq old))
+    }
+    old.close()
+  private def keptContext(context: CudaTensor): Option[CudaTensor] =
+    if !CudaDiffusionRuntime.contextTokensCache || context.half then None
+    else if !valueCacheContext then
+      keptContextsByRef.find(e => (e._1 eq context) && !e._1.isReleased).map(_._2).orElse {
+        while keptContextsByRef.size>=3 do
+          val old=keptContextsByRef.remove(0)._2
+          evictKeptContext(old)
+        val kept=session.castToHalf(context)
+        keptContextsByRef+=((context,kept))
+        Some(kept)
+      }
+    else
+      val values=context.toCpu.toFloatArray
+      val dims=session.shape(context).dims
+      keptContexts.find(e => session.shape(e._2).dims==dims && java.util.Arrays.equals(e._1,values)).map(_._2).orElse {
+        while keptContexts.size>=2 do
+          val old=keptContexts.remove(0)._2
+          evictKeptContext(old)
+        val kept=session.castToHalf(context)
+        keptContexts+=((values,kept))
+        Some(kept)
+      }
+
+  private def unetCore(input: CudaTensor,model: ConditionalUNet2d,timesteps: Tensor[Float],context: CudaTensor,
+      added: Option[CudaTensor],control: Option[CudaControlNetResiduals]): CudaTensor =
     check()
     require(added.isDefined==model.additionEmbedding.isDefined,"U-Net additional conditioning presence mismatch")
     val features=model.timestepFeatures(session.shape(input),timesteps,session.shape(context))
@@ -459,8 +829,8 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     }
     // Small deterministic sinusoidal conditioning constants are prepared on CPU.
     // Learned timestep projections and every image/context operation run on CUDA.
-    scope { use =>
-      val f=use(session.upload(features))
+    def evalCore(): CudaTensor = scope { use =>
+      val f=use(up(features))
       val first=use(linear(f,model.timeEmbedding.linear1));f.close()
       val activated=use(session.silu(first));first.close()
       val baseTime=use(linear(activated,model.timeEmbedding.linear2));activated.close()
@@ -473,11 +843,19 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       }
       var hidden=use(conv(input,model.convIn))
       FooocusInpaint.current.foreach { fi =>
-        val updated=use(session.upload(FooocusInpaint.applyConvInResidual(input.toCpu,hidden.toCpu,fi)))
+        val updated=use(up(FooocusInpaint.applyConvInResidual(input.toCpu,hidden.toCpu,fi)))
         hidden.close();hidden=updated
       }
       val skips=scala.collection.mutable.ArrayBuffer.empty[CudaTensor]
       var skipIndex=0
+      // DeepCache / TaylorSeer: reuse or forecast deep features recorded on the last full steps.
+      val dcState=if control.isEmpty then DeepCache.current else None
+      val dcDims=session.shape(input).dims.toSeq
+      val (dcSlot,dcReuse)=dcState.fold((0,false))(st => st.beginCall(timesteps.toFloatArray(0),dcDims))
+      val dcBranch=dcState.fold(0)(_.config.branch)
+      require(dcState.isEmpty || dcBranch<=model.downBlocks.size-2,"DeepCache branch is too deep for this U-Net")
+      val dcUpKeep=model.upBlocks.size-1-dcBranch
+      val dcNeededSkips=model.upBlocks.drop(math.max(dcUpKeep,0)).map(_.layers.size).sum
       control.foreach(c=>require(c.down.size==1+model.downBlocks.map(_.layers.size).sum+model.downBlocks.dropRight(1).size,
         "ControlNet down residual count mismatch"))
       def saveSkip(): Unit=
@@ -502,8 +880,8 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       def shrinkHiddenIfActive(): Unit =
         val (cfg,t)=kohya.get
         if KohyaHrFix.isActive(cfg,t) && cfg.downscaleFactor!=1.0 then
-          next(session.upload(KohyaHrFix.shrinkIfActive(hidden.toCpu,cfg,t)))
-      model.downBlocks.zipWithIndex.foreach { (block,blockIdx) => Pag.withSection(s"down.$blockIdx") {
+          next(up(KohyaHrFix.shrinkIfActive(hidden.toCpu,cfg,t)))
+      model.downBlocks.zipWithIndex.foreach { (block,blockIdx) => if !(dcReuse && blockIdx>dcBranch) then Pag.withSection(s"down.$blockIdx") {
         block.layers.zipWithIndex.foreach { (l,layerIdx) =>
           layer(l)
           if kohyaLoc.contains((blockIdx,layerIdx)) then
@@ -525,16 +903,24 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       }
       control.foreach(c=>require(skipIndex==c.down.size,
         s"ControlNet down residual count mismatch: expected $skipIndex, got ${c.down.size}"))
-      next(resnet(hidden,model.midBlock.first,Some(time)))
-      next(Pag.withSection("mid")(spatialTransformer(hidden,model.midBlock.attention,context)))
-      next(resnet(hidden,model.midBlock.second,Some(time)))
-      control.foreach { residuals =>
-        val residual=residuals.middle
-        require(session.shape(residual)==hidden.shape,"ControlNet middle residual shape mismatch")
-        next(session.add(hidden,residual))
-      }
+      if !dcReuse then
+        next(resnet(hidden,model.midBlock.first,Some(time)))
+        next(Pag.withSection("mid")(spatialTransformer(hidden,model.midBlock.attention,context)))
+        next(resnet(hidden,model.midBlock.second,Some(time)))
+        control.foreach { residuals =>
+          val residual=residuals.middle
+          require(session.shape(residual)==hidden.shape,"ControlNet middle residual shape mismatch")
+          next(session.add(hidden,residual))
+        }
       val freeU=FreeU.current
-      model.upBlocks.zipWithIndex.foreach { (block,stageIndex) => Pag.withSection(s"up.$stageIndex") {
+      model.upBlocks.zipWithIndex.foreach { (block,stageIndex) => if !(dcReuse && stageIndex<dcUpKeep) then Pag.withSection(s"up.$stageIndex") {
+        dcState.foreach { st =>
+          if stageIndex==dcUpKeep then
+            if dcReuse then
+              while skips.size>dcNeededSkips do skips.remove(skips.size-1).close()
+              next(st.forecast(dcSlot,session))
+            else st.recordWithSession(dcSlot,dcDims,hidden,session)
+        }
         kohya.foreach { case (cfg,_) =>
           val startIdx=skips.size-block.layers.size
           val (_,maxH,maxW)=(startIdx until skips.size).map { k =>
@@ -545,11 +931,11 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
             val d=skips(k).shape.dims
             if d(2).toInt!=maxH || d(3).toInt!=maxW then
               val old=skips(k)
-              skips(k)=use(session.upload(KohyaHrFix.interpolate2d(old.toCpu,maxH,maxW,cfg.upscaleMethod)))
+              skips(k)=use(up(KohyaHrFix.interpolate2d(old.toCpu,maxH,maxW,cfg.upscaleMethod)))
               old.close()
           val hd=hidden.shape.dims
           if hd(2).toInt!=maxH || hd(3).toInt!=maxW then
-            next(session.upload(KohyaHrFix.interpolate2d(hidden.toCpu,maxH,maxW,cfg.upscaleMethod)))
+            next(up(KohyaHrFix.interpolate2d(hidden.toCpu,maxH,maxW,cfg.upscaleMethod)))
         }
         block.layers.foreach { l =>
           val skip=skips.remove(skips.size-1)
@@ -557,8 +943,8 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
             case Some(cfg) if stageIndex==0 || stageIndex==1 =>
               val (scaledHidden,filteredSkip)=FreeU(cfg,stageIndex,hidden.toCpu,skip.toCpu)
               skip.close()
-              val devHidden=use(session.upload(scaledHidden))
-              val devSkip=use(session.upload(filteredSkip))
+              val devHidden=use(up(scaledHidden))
+              val devSkip=use(up(filteredSkip))
               next(session.cat(Seq(devHidden,devSkip),1))
               devHidden.close();devSkip.close()
             case _ =>
@@ -574,26 +960,34 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       require(skips.isEmpty,"U-Net leaves unused skip tensors")
       time.close()
       val preOutCpu=Llul.current.filter(ctx => ctx.isActive && ctx.cfg.applyTo.contains("out")).flatMap(ctx => Llul.cutRegion(hidden.toCpu,ctx.cfg,ctx.fx,ctx.fy).map(part => (ctx,part)))
-      next(norm(hidden,model.normOut))
-      next(session.silu(hidden))
+      if hidden.half then next(normSilu(hidden,model.normOut)) else { next(norm(hidden,model.normOut)); next(session.silu(hidden)) }
       next(conv(hidden,model.convOut))
       preOutCpu.foreach { case (ctx,part) =>
-        val pGpu=use(session.upload(part))
+        val pGpu=use(up(part))
         val pNorm=use(norm(pGpu,model.normOut))
         val pAct=use(session.silu(pNorm))
         val pConv=use(conv(pAct,model.convOut))
-        next(session.upload(Llul.mixRegion(hidden.toCpu,pConv.toCpu,ctx.cfg,ctx.fx,ctx.fy)))
+        next(up(Llul.mixRegion(hidden.toCpu,pConv.toCpu,ctx.cfg,ctx.fx,ctx.fy)))
       }
       hidden
     }
+    TGate.current.fold(evalCore())(tg => tg.withCall(timesteps.toFloatArray(0))(evalCore()))
 
+  /** Float32 in and out; Float16 inside when this runtime was uploaded with half=true. */
   def encode(input: CudaTensor,model: VaeEncoder): CudaTensor =
+    if !half then encodeCore(input,model)
+    else scope { use =>
+      val out=use(encodeCore(if input.half then input else use(session.castToHalf(input)),model))
+      use(session.castToFloat(out))
+    }
+
+  private def encodeCore(input: CudaTensor,model: VaeEncoder): CudaTensor =
     check()
     model.preflight(session.shape(input))
     scope { use =>
       var hidden=use(conv(input,model.convIn))
       FooocusInpaint.current.foreach { fi =>
-        val updated=use(session.upload(FooocusInpaint.applyConvInResidual(input.toCpu,hidden.toCpu,fi)))
+        val updated=use(up(FooocusInpaint.applyConvInResidual(input.toCpu,hidden.toCpu,fi)))
         hidden.close();hidden=updated
       }
       def next(value: CudaTensor): Unit =
@@ -607,14 +1001,21 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
       next(resnet(hidden,model.midBlock.first,None))
       model.midBlock.attention.foreach(a => next(vaeAttention(hidden,a)))
       next(resnet(hidden,model.midBlock.second,None))
-      next(norm(hidden,model.normOut))
-      next(session.silu(hidden))
+      if hidden.half then next(normSilu(hidden,model.normOut)) else { next(norm(hidden,model.normOut)); next(session.silu(hidden)) }
       next(conv(hidden,model.convOut))
       model.quantConv.foreach(c => next(conv(hidden,c)))
       hidden
     }
 
+  /** Float32 in and out; Float16 inside when this runtime was uploaded with half=true. */
   def decode(input: CudaTensor,model: VaeDecoder): CudaTensor =
+    if !half then decodeCore(input,model)
+    else scope { use =>
+      val out=use(decodeCore(if input.half then input else use(session.castToHalf(input)),model))
+      use(session.castToFloat(out))
+    }
+
+  private def decodeCore(input: CudaTensor,model: VaeDecoder): CudaTensor =
     check()
     model.preflight(session.shape(input))
     scope { use =>
@@ -637,13 +1038,71 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
           next(conv(hidden,up.conv))
         }
       }
-      next(norm(hidden,model.normOut))
-      next(session.silu(hidden))
+      if hidden.half then next(normSilu(hidden,model.normOut)) else { next(norm(hidden,model.normOut)); next(session.silu(hidden)) }
       next(conv(hidden,model.convOut))
       hidden
     }
 
+  private def clipActivation(x: CudaTensor,activation: ClipActivation): CudaTensor = activation match
+    case ClipActivation.QuickGelu => session.quickGelu(x)
+    case ClipActivation.Gelu => session.geluErf(x)
+    case ClipActivation.GeluTanh => throw UnsupportedOperationException("CLIP tanh GELU has no CUDA kernel")
+
+  /** One pre-norm causal CLIP layer on a (batch,tokens,width) activation; the caller keeps ownership of `input`. */
+  def clipLayer(input: CudaTensor,layer: ClipTextLayer,maxScoreElements: Long): CudaTensor = scope { use =>
+    val shape=session.shape(input)
+    val b=shape.dims(0);val t=shape.dims(1);val width=layer.width.toLong
+    val rows=Shape.from(Seq(b*t,width))
+    val headDim=width/layer.heads
+    val normalized=use(layerNorm(input,layer.norm1))
+    val flat=use(session.reshape(normalized,rows));normalized.close()
+    def heads(l: Linear): CudaTensor =
+      val projected=use(linear(flat,l))
+      val view=use(session.reshape(projected,Shape.from(Seq(b,t,layer.heads.toLong,headDim))));projected.close()
+      val out=use(session.transpose(view,1,2));view.close()
+      out
+    val q=heads(layer.qProj);val k=heads(layer.kProj);val v=heads(layer.vProj)
+    flat.close()
+    val attended=use(session.causalAttention(q,k,v,0,maxScoreElements))
+    q.close();k.close();v.close()
+    val packed=use(session.transpose(attended,1,2));attended.close()
+    val packedFlat=use(session.reshape(packed,rows));packed.close()
+    val projected=use(linear(packedFlat,layer.outProj));packedFlat.close()
+    val projectedView=use(session.reshape(projected,shape));projected.close()
+    val hidden=use(session.add(input,projectedView));projectedView.close()
+    val norm2=use(layerNorm(hidden,layer.norm2))
+    val flat2=use(session.reshape(norm2,rows));norm2.close()
+    val up=use(linear(flat2,layer.fc1));flat2.close()
+    val activated=use(clipActivation(up,layer.activation));up.close()
+    val down=use(linear(activated,layer.fc2));activated.close()
+    val downView=use(session.reshape(down,shape));down.close()
+    val result=use(session.add(hidden,downView))
+    hidden.close();downView.close()
+    result
+  }
+
+  /** Runs the whole stack; consumes `embedded`. selected is the state after `selectedDepth` layers. */
+  def clipStates(model: ClipStack,embedded: CudaTensor,selectedDepth: Int,maxScoreElements: Long): ClipCuda.States =
+    var hidden=if half && !embedded.half then
+      val converted=session.castToHalf(embedded)
+      embedded.close()
+      converted
+    else embedded
+    var selected: Option[Tensor[Float]]=if selectedDepth==0 then Some(hidden.toCpu) else None
+    try
+      model.layers.zipWithIndex.foreach { (layer,index) =>
+        val next=clipLayer(hidden,layer,maxScoreElements)
+        hidden.close();hidden=next
+        if index+1==selectedDepth then selected=Some(hidden.toCpu)
+      }
+      val normalized=layerNorm(hidden,model.finalNorm)
+      try ClipCuda.States(selected.getOrElse(hidden.toCpu),normalized.toCpu)
+      finally normalized.close()
+    finally hidden.close()
+
   def close(): Unit =
+    if gapStats && gapPasses>0 then
+      System.err.println(f"[scala-torch U-Net gaps] $gapPasses passes ${passNanos/1e6}%.0f ms, between them ${gapNanos/1e6}%.0f ms")
     if !closed then
       session.allocatedBytes
       if profileEnabled && (offloadedWeightUploads>0 || offloadedWeightCacheHits>0) then
@@ -652,30 +1111,120 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
           f"uploaded=${offloadedWeightUploadBytes/1048576.0}%.1f MiB retained=${offloadedWeightBytes/1048576.0}%.1f MiB " +
           f"transient=$offloadedWeightTransientUploads evictions=$offloadedWeightEvictions")
       weights.values.foreach(_.close())
+      mergedWeights.values.foreach(_._2.close());mergedWeights.clear()
+      packedWeights.values.foreach(_.close());packedWeights.clear()
+      contextProjections.values.foreach(_.foreach { v => v._2.close();v._3.close() });contextProjections.clear()
+      contextTokens.values.foreach(_.foreach { v => v._2.close();v._3.close() });contextTokens.clear()
+      keptContexts.foreach(_._2.close());keptContexts.clear()
+      keptContextsByRef.foreach(_._2.close());keptContextsByRef.clear()
       clearOffloadedWeights()
       host=Map.empty
       closed=true
 
 private[models] object CudaDiffusionRuntime:
   private val MaximumOffloadedWeightBytes=512L*1024L*1024L
+  /** Precision chosen for the loaded model (`load_model` dtype). None = follow the environment default. */
+  @volatile private var precisionOverride: Option[Boolean]=None
+  /** Self-attention projections as one matrix product, only with `SCALATORCH_CUDA_PACKED_PROJECTIONS=1`. Measured on an RTX 3090:
+    * no gain (SD1.5 1.6 s and 4.1 s for 20 and 60 steps either way, SDXL 7.5 s) and more memory for the stacked weights, so off. */
+  /** Residual adds of a transformer block folded into the projection before them, and the GEGLU bias into the GEGLU kernel;
+    * `SCALATORCH_CUDA_FUSED_RESIDUAL=0` keeps the separate passes. */
+  private[models] val foldedResiduals: Boolean = !sys.env.get("SCALATORCH_CUDA_FUSED_RESIDUAL").contains("0")
+  /** Key and value projections of the text context kept between steps (fused cross-attention);
+    * `SCALATORCH_CUDA_CONTEXT_TOKENS_CACHE=0` computes them in every step. */
+  private[models] val contextTokensCache: Boolean = !sys.env.get("SCALATORCH_CUDA_CONTEXT_TOKENS_CACHE").contains("0")
+  private[models] val packedProjections: Boolean = sys.env.get("SCALATORCH_CUDA_PACKED_PROJECTIONS").contains("1")
+  /** Keep the key and value projections of the text context between steps, only with `SCALATORCH_CUDA_CONTEXT_CACHE=1`. The images
+    * are pixel-identical with and without, and so are the times (RTX 3090: SD1.5 60 steps 4.1 s, batch of 4 4.5 s, SDXL 7.5-7.6 s),
+    * so it is off. */
+  private[models] val contextProjectionCache: Boolean = sys.env.get("SCALATORCH_CUDA_CONTEXT_CACHE").contains("1")
+  private[models] def environmentFp16: Boolean = !sys.env.get("SCALATORCH_CUDA_FP16").contains("0")
+  private[models] def setHalfPrecision(value: Option[Boolean]): Unit = precisionOverride=value
+  /** Float16 U-Net / VAE / CLIP (weights, activations, tensor-core GEMM): the dtype of the loaded model (`load_model`), else
+    * Float16 unless `SCALATORCH_CUDA_FP16=0`. CPU execution is always Float32. */
+  private[models] def fp16Default: Boolean = precisionOverride.getOrElse(environmentFp16) && halfPossible
+  /** Float16 needs cuBLAS. Without it the request used to fail in the middle ("broadcast add needs one element type"); now the
+    * model runs in Float32 and says once what is missing. */
+  private lazy val halfPossible: Boolean =
+    val found=CudaSession.cublasLoadable
+    if !found then System.err.println("[scala-torch] cuBLAS (cublas64_12.dll) was not found, so Float16 is not available: running in " +
+      "Float32, which is slower and needs more memory. Install the CUDA Toolkit, or point SCALATORCH_CUDNN_PATH (Settings > scala-torch " +
+      "cuDNN folder) at a folder that holds cuBLAS, for example a PyTorch torch\\lib folder.")
+    found
   private[models] def offloadedWeightLimit(sessionMaxBytes: Long): Long =
     require(sessionMaxBytes>=0,"negative CUDA session budget")
     math.min(sessionMaxBytes/4,MaximumOffloadedWeightBytes)
+  /** Room for activations that weights must leave free: SDXL at 1024 x 1024 needs about 0.75 GiB of chunks. */
+  private[models] val ActivationReserve=1280L*1024L*1024L
+  /** Offloaded weights that stay on the device for the whole run: as many as fit beside a fixed reserve for the activations. The rest is
+    * sent again on every use, so a model that is larger than the free memory still runs, at the cost of the transfers.
+    * (Giving up kept weights when the activations needed the room kept more of them, but changed the images: not used.) */
+  private[models] def offloadedWeightLimit(sessionMaxBytes: Long,availableBytes: Long): Long =
+    math.max(offloadedWeightLimit(sessionMaxBytes),math.min(sessionMaxBytes,availableBytes)-ActivationReserve)
+  /** True when the weights of `model` do not fit the device beside the activations: they are then offloaded (see above). */
+  private[models] def shouldOffload[A: Module](session: CudaSession,model: A,half: Boolean,label: String): Boolean =
+    val parameters=Module.parameters(model).distinct
+    val unit=if half then 2L else 4L
+    val total=parameters.iterator.map(p => math.max(p.data.shape.numel*unit,1L)).sum
+    val missing=total-session.sharedInUseBytes(parameters,half)
+    val available=session.availableBytes
+    val offload=missing>0 && missing+ActivationReserve>available
+    if offload then
+      CudaSession.markMemoryTight()
+      System.err.println(s"[scala-torch] $label weights (${total/1048576} MiB) do not fit the free device memory (${available/1048576} MiB): " +
+        s"keeping up to ${math.max(0L,offloadedWeightLimit(session.maxBytes,available))/1048576} MiB on the device and sending the rest on every use")
+    offload
 
   def upload[A: Module](session: CudaSession,model: A,cancelled: () => Boolean=() => false,offloadWeights: Boolean=false,
-      includeAdapters: Boolean=true): CudaDiffusionRuntime =
+      includeAdapters: Boolean=true,half: Boolean=false,extraParameters: Vector[Parameter]=Vector.empty): CudaDiffusionRuntime =
     session.allocatedBytes
+    val uploadStart=System.nanoTime()
     val host=scala.collection.mutable.LinkedHashMap.empty[Parameter,Tensor[Float]]
     val uploaded=scala.collection.mutable.LinkedHashMap.empty[Parameter,CudaTensor]
     try
-      (Module.parameters(model) ++ (if includeAdapters then LinearAdapterScope.parameters else Vector.empty)).distinct.foreach { p =>
+      val base=Module.parameters(model).distinct
+      val baseSet=base.toSet
+      // Model weights stay on the device between sessions (shared); LoRA adapters differ per request and are uploaded privately.
+      base.foreach { p =>
         VaeExecution.checkCancelled(cancelled)
-        if offloadWeights then host(p)=p.data else uploaded(p)=session.upload(p.data)
+        if offloadWeights then host(p)=p.data else uploaded(p)=session.sharedUpload(p,p.data,half,if half then Some(() => HalfWeightCache.bits(p,p.data)) else None)
+      }
+      // `extraParameters`: adapter factors of this model alone, for a caller that does not want every adapter in scope.
+      ((if includeAdapters then LinearAdapterScope.parameters else Vector.empty)++extraParameters).filterNot(baseSet.contains).distinct.foreach { p =>
+        VaeExecution.checkCancelled(cancelled)
+        if offloadWeights then host(p)=p.data else uploaded(p)=(if half then session.uploadHalf(p.data) else session.upload(p.data))
       }
       VaeExecution.checkCancelled(cancelled)
-      new CudaDiffusionRuntime(session,uploaded.toMap,host.toMap,cancelled)
+      // A Float16 upload stages every tensor as Float32 on the device first; those blocks are of no use to the sampling that follows.
+      if !offloadWeights then session.trimFreed()
+      if sys.env.get("SCALATORCH_LOAD_PROFILE").contains("1") then
+        System.err.println(f"[scala-torch load] CUDA weight upload (${model.getClass.getSimpleName}, half=$half): ${(System.nanoTime()-uploadStart)/1e9}%.2f s, ${uploaded.size} tensors")
+      new CudaDiffusionRuntime(session,uploaded.toMap,host.toMap,cancelled,half)
     catch case error: Throwable =>
       uploaded.values.toVector.reverse.foreach { t =>
         try t.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       }
       throw error
+
+/** Float16 copies of offloaded weights in native memory, converted once per parameter and reused by every later upload (a low-VRAM run uploads
+  * the weights on every use). Entries disappear with their parameter; the memory is GC-managed (`Arena.ofAuto`). */
+private[models] object HalfWeightCache:
+  private val cache=new java.util.WeakHashMap[Parameter,java.lang.foreign.MemorySegment]()
+  private val arena=java.lang.foreign.Arena.ofAuto()
+  def bits(p: Parameter,source: Tensor[Float]): java.lang.foreign.MemorySegment=
+    cache.synchronized(cache.get(p)) match
+      case null =>
+        val values=source.toFloatArray
+        val segment=arena.allocate(math.max(values.length.toLong*2,2L),2)
+        val shorts=segment.asByteBuffer().order(java.nio.ByteOrder.nativeOrder()).asShortBuffer()
+        if values.length<65536 then
+          var i=0;while i<values.length do { shorts.put(i,java.lang.Float.floatToFloat16(values(i)));i+=1 }
+        else
+          val block=32768
+          java.util.stream.IntStream.range(0,(values.length+block-1)/block).parallel().forEach { (b: Int) =>
+            val start=b*block;val end=math.min(values.length,start+block)
+            var i=start;while i<end do { shorts.put(i,java.lang.Float.floatToFloat16(values(i)));i+=1 }
+          }
+        cache.synchronized { cache.put(p,segment) }
+        segment
+      case found => found

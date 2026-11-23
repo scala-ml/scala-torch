@@ -13,10 +13,10 @@ object DiffusionImageResize:
     }
   private val precision=1 << 22
   private case class Filter(start: Int,weights: Array[Int])
-  private def filters(input: Int,output: Int,bicubic: Boolean): Array[Filter] =
+  private def filters(input: Int,output: Int,bicubic: Boolean,bilinear: Boolean=false): Array[Filter] =
     val scale=input.toDouble/output
     val filterScale=math.max(1.0,scale)
-    val support=(if bicubic then 2 else 3)*filterScale
+    val support=(if bilinear then 1 else if bicubic then 2 else 3)*filterScale
     Array.tabulate(output) { position =>
       val center=(position+.5)*scale
       val start=math.max(0,(center-support+.5).toInt)
@@ -34,7 +34,7 @@ object DiffusionImageResize:
         else 0.0
       val weights=Array.tabulate(end-start) { i =>
         val x=(start+i-center+.5)/filterScale
-        if bicubic then cubic(x) else lanczos(x)
+        if bilinear then math.max(0.0,1.0-math.abs(x)) else if bicubic then cubic(x) else lanczos(x)
       }
       val total=weights.sum
       Filter(start,weights.map { w =>
@@ -42,7 +42,7 @@ object DiffusionImageResize:
         (scaled+(if scaled<0 then -.5 else .5)).toInt
       })
     }
-  private def resize(input: BufferedImage,width: Int,height: Int,maxPixels: Long,bicubic: Boolean=false): BufferedImage =
+  private def resize(input: BufferedImage,width: Int,height: Int,maxPixels: Long,bicubic: Boolean=false,bilinear: Boolean=false): BufferedImage =
     val verticalFirst=input.getHeight>height && input.getHeight.toLong-height>2L*(input.getWidth.toLong-width)
     val intermediate=if verticalFirst then input.getWidth.toLong*height else width.toLong*input.getHeight
     require(intermediate<=maxPixels,"resize intermediate exceeds pixel limit")
@@ -52,7 +52,7 @@ object DiffusionImageResize:
       else
         val out=new BufferedImage(if horizontal then size else source.getWidth,
           if horizontal then source.getHeight else size,BufferedImage.TYPE_INT_RGB)
-        val coefficients=filters(old,size,bicubic)
+        val coefficients=filters(old,size,bicubic,bilinear)
         for y <- 0 until out.getHeight; x <- 0 until out.getWidth do
           val filter=coefficients(if horizontal then x else y)
           var rgb=0
@@ -74,6 +74,18 @@ object DiffusionImageResize:
     require(width>0 && height>0 && maxPixels>=0 && width.toLong*height<=maxPixels &&
       input.getWidth.toLong*input.getHeight<=maxPixels,"bicubic resize exceeds pixel limit")
     resize(input,width,height,maxPixels,bicubic=true)
+
+  /** Pillow `Image.resize(..., BILINEAR)` (antialiased triangle filter, 8-bit intermediate); used by the cafe BEiT preprocessor. */
+  def bilinear(input: BufferedImage,width: Int,height: Int,maxPixels: Long=16777216L): BufferedImage =
+    require(width>0 && height>0 && maxPixels>=0 && width.toLong*height<=maxPixels &&
+      input.getWidth.toLong*input.getHeight<=maxPixels,"bilinear resize exceeds pixel limit")
+    resize(input,width,height,maxPixels,bilinear=true)
+
+  /** Pillow `Image.resize(..., LANCZOS)` to an exact size (no aspect handling). */
+  def lanczos(input: BufferedImage,width: Int,height: Int,maxPixels: Long=16777216L): BufferedImage =
+    require(width>0 && height>0 && maxPixels>=0 && width.toLong*height<=maxPixels &&
+      input.getWidth.toLong*input.getHeight<=maxPixels,"lanczos resize exceeds pixel limit")
+    resize(input,width,height,maxPixels)
 
   def apply(input: BufferedImage,width: Int,height: Int,mode: Int,maxPixels: Long=16777216L): BufferedImage =
     require(width>0 && height>0 && mode>=0 && mode<=2 && maxPixels>=0,"invalid image resize settings")
