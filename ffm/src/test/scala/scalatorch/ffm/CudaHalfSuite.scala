@@ -450,5 +450,27 @@ class CudaHalfSuite extends FunSuite:
       val out=Using.resource(s.tgateAddBroadcast(self,avg))(_.toCpu.toFloatArray)
       assert(out.forall(v => math.abs(v-2.5f)<1e-3))
       Seq(attn,avg,self).foreach(_.close())
+
+      // sliceBatch on FP16 and FP32 [2, 4, 4, 4]
+      val batchSrc=Array.tabulate(2*4*4*4)(i => (i % 64).toFloat + (if i >= 64 then 100f else 0f))
+      val f16=s.uploadHalf(tensor(batchSrc,2,4,4,4))
+      val f32=s.upload(tensor(batchSrc,2,4,4,4))
+      try
+        Using.resource(s.sliceBatch(f16,0,1)) { s0 =>
+          assertEquals(s0.shape,Shape.from(Seq(1L,4L,4L,4L)))
+          assert(s0.half)
+          assertEquals(s0.toCpu.toFloatArray.toSeq,batchSrc.take(64).toSeq)
+        }
+        Using.resource(s.sliceBatch(f16,1,1)) { s1 =>
+          assertEquals(s1.shape,Shape.from(Seq(1L,4L,4L,4L)))
+          assert(s1.half)
+          assertEquals(s1.toCpu.toFloatArray.toSeq,batchSrc.drop(64).toSeq)
+        }
+        Using.resource(s.sliceBatch(f32,1,1)) { s1f =>
+          assertEquals(s1f.shape,Shape.from(Seq(1L,4L,4L,4L)))
+          assert(!s1f.half)
+          assertEquals(s1f.toCpu.toFloatArray.toSeq,batchSrc.drop(64).toSeq)
+        }
+      finally { f16.close(); f32.close() }
     }
   }

@@ -241,6 +241,24 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     live+=view
     view
 
+  /** Slices `[start, start + length)` along batch axis 0 via async device-to-device copy on this session's stream. */
+  def sliceBatch(value: CudaTensor,start: Long,length: Long): CudaTensor =
+    validate(value)
+    val dims=value.shape.dims
+    require(dims.nonEmpty && start>=0L && length>0L && start+length<=dims.head,
+      s"invalid sliceBatch range [$start, ${start+length}) for shape ${value.shape}")
+    val stride=dims.drop(1).product
+    val elemBytes=if value.half then 2L else 4L
+    val outShape=Shape.from(length +: dims.drop(1))
+    val result=allocate(outShape,value.half)
+    try
+      driver.copyDeviceToDevice(result.address,value.address+start*stride*elemBytes,length*stride*elemBytes,stream)
+      if syncEveryLaunch then driver.synchronize(stream)
+      result
+    catch case error: Throwable =>
+      try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
   /** Private integer staging allocation, charged to the same device byte budget. */
   private def withInts[A](values: Array[Int])(body: Long => A): A =
     val buffer=allocate(Shape.from(Seq(values.length.toLong)))

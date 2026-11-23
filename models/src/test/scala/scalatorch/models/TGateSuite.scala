@@ -41,8 +41,12 @@ class TGateSuite extends munit.FunSuite:
             assert(cached.isDefined)
             // Single-branch shape (CFG=1 later in denoising) is also compatible with the averaged cache
             assert(state.shouldReuse(state.activeSlot.get,dummyLayer,Shape.from(Seq(1L,1L,2L))).isDefined)
-            // Different spatial token count is incompatible and triggers fallback computation
+            // Different spatial token count is incompatible, falls back cleanly, and enforces 2-step warmup
             assertEquals(state.shouldReuse(state.activeSlot.get,dummyLayer,Shape.from(Seq(2L,4L,2L))),None)
+            // After spatial transition at step 3, effective gate moves to step 5 -> step 4 must also not reuse
+            state.withStep(4) {
+              assertEquals(state.shouldReuse(0,dummyLayer,Shape.from(Seq(2L,4L,2L))),None)
+            }
             scala.util.Using.resource(session.uploadHalf(Tensor.fromFloats(Array(0.5f,0.5f,0.25f,0.25f),sFull))) { self =>
               val out=scala.util.Using.resource(session.tgateAddBroadcast(self,cached.get))(_.toCpu.toFloatArray.toSeq)
               assertEquals(out,Seq(2.5f,2.5f,2.25f,2.25f))

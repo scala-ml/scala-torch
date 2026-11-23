@@ -58,11 +58,14 @@ class DeepCacheSuite extends FunSuite:
         if !reuse then state.record(slot,dims,null)
         reuse
       }.toVector
+    // PostDiff spatial switch: full -> reuse -> spatial change clears entries and enforces 2 full warmup steps before resuming
     try
-      assertEquals(pair(1000f,low),Vector(false,false))
-      assertEquals(pair(900f,low),Vector(true,true))
+      assert(!pair(1000f,low).exists(identity))
+      assert(pair(900f,low).forall(identity))
       assertEquals(pair(800f,high),Vector(false,false))
-      assertEquals(pair(700f,high),Vector(true,true))
+      assertEquals(pair(700f,high),Vector(false,false))
+      assertEquals(pair(600f,high),Vector(false,false))
+      assertEquals(pair(500f,high),Vector(true,true))
     finally state.close()
   }
 
@@ -72,7 +75,9 @@ class DeepCacheSuite extends FunSuite:
     intercept[IllegalArgumentException](DeepCacheConfig(3,0,51))
     intercept[IllegalArgumentException](DeepCacheConfig(3,0,5,-1))
     intercept[IllegalArgumentException](DeepCacheConfig(3,0,5,3))
-    assertEquals(DeepCacheConfig(3,0,5,2).order,2)
+    intercept[IllegalArgumentException](DeepCacheConfig(3,0,5,1,0.0))
+    intercept[IllegalArgumentException](DeepCacheConfig(3,0,5,1,1.1))
+    assertEquals(DeepCacheConfig(3,0,5,2,0.7).contraction,0.7)
   }
 
   test("TaylorSeer order 1 and 2 forecast recovers linear and quadratic feature trajectories on GPU") {
@@ -104,5 +109,63 @@ class DeepCacheSuite extends FunSuite:
         val out2=scala.util.Using.resource(state2.forecast(0,session))(_.toCpu.toFloatArray)
         assert(out2.forall(v => math.abs(v-4.75f)<1e-2),s"order 2 got ${out2.head}")
       finally state2.close()
+
+      // 2N -> N transition (CFG pair cached, then positive-only CFG-Cache step), and N -> 2N invalidation
+      val fullShape=scalatorch.Shape.from(Seq(2L,4L,8L,8L))
+      val halfShape=scalatorch.Shape.from(Seq(1L,4L,8L,8L))
+      val halfVals=Array.fill(256)(1.0f) ++ Array.fill(256)(3.0f)
+      val halfVals2=Array.fill(256)(2.0f) ++ Array.fill(256)(5.0f)
+      val stateMix=new DeepCacheState(DeepCacheConfig(interval=4,branch=0,fullFirst=2,order=1))
+      try
+        assert(!stateMix.beginCall(1000f,fullShape.dims)._2)
+        scala.util.Using.resource(session.uploadHalf(scalatorch.Tensor.fromFloats(halfVals,fullShape))) { t =>
+          stateMix.recordWithSession(0,fullShape.dims,t,session)
+        }
+        assert(!stateMix.beginCall(900f,fullShape.dims)._2)
+        scala.util.Using.resource(session.uploadHalf(scalatorch.Tensor.fromFloats(halfVals,fullShape))) { t =>
+          stateMix.recordWithSession(0,fullShape.dims,t,session)
+        }
+        assert(!stateMix.beginCall(800f,fullShape.dims)._2)
+        scala.util.Using.resource(session.uploadHalf(scalatorch.Tensor.fromFloats(halfVals2,fullShape))) { t =>
+          stateMix.recordWithSession(0,fullShape.dims,t,session)
+        }
+        // Step 3: CFG-Cache positive-only step reuses [1..2) positive half (step 1 pos=3 -> step 2 pos=5 => step 3 forecast = 7.0)
+        assert(stateMix.beginCall(700f,halfShape.dims)._2)
+        val fHalf=scala.util.Using.resource(stateMix.forecast(0,1L,session)) { out =>
+          assertEquals(out.shape,halfShape)
+          out.toCpu.toFloatArray
+        }
+        assert(fHalf.forall(v => math.abs(v-7.0f)<1e-2),s"2N->N forecast got ${fHalf.head}")
+        // HiCache contraction dampens forecast (sigma=0.5 on y(1)=3 -> y(2)=5 => 5 + 0.5*1*2 = 6.0)
+        val stateHi=new DeepCacheState(DeepCacheConfig(interval=4,branch=0,fullFirst=2,order=1,contraction=0.5))
+        try
+          for (t,arr) <- Seq((1000f,halfVals),(900f,halfVals),(800f,halfVals2)) do
+            stateHi.beginCall(t,fullShape.dims)
+            scala.util.Using.resource(session.uploadHalf(scalatorch.Tensor.fromFloats(arr,fullShape))) { ten =>
+              stateHi.recordWithSession(0,fullShape.dims,ten,session)
+            }
+          assert(stateHi.beginCall(700f,halfShape.dims)._2)
+          val hiOut=scala.util.Using.resource(stateHi.forecast(0,1L,session))(_.toCpu.toFloatArray)
+          assert(hiOut.forall(v => math.abs(v-6.0f)<1e-2),s"HiCache contraction got ${hiOut.head}")
+        finally stateHi.close()
+        // Now record N and verify N -> 2N forces full refresh on what would otherwise be a reuse step
+        val stateN2N=new DeepCacheState(DeepCacheConfig(interval=4,branch=0,fullFirst=0,order=1))
+        try
+          assert(!stateN2N.beginCall(1000f,halfShape.dims)._2)
+          scala.util.Using.resource(session.uploadHalf(scalatorch.Tensor.fromFloats(Array.fill(256)(1.0f),halfShape))) { t =>
+            stateN2N.recordWithSession(0,halfShape.dims,t,session)
+          }
+          assert(!stateN2N.beginCall(900f,fullShape.dims)._2)
+        finally stateN2N.close()
+      finally stateMix.close()
     }
+  }
+
+  test("deferUntil aligns PostDiff high-res warmup and scheduled interval") {
+    val state = new DeepCacheState(DeepCacheConfig(interval = 4, branch = 0, fullFirst = 4, order = 2))
+    try
+      state.deferUntil(11) // e.g. PostDiff transitionIndex=8 -> steps 0..8 low-res full, 9..11 high-res full, 12..14 reuse
+      assertEquals((0 to 15).map(state.isScheduledFullStep).toList,
+        List(true, true, true, true, true, true, true, true, true, true, true, true, false, false, false, true))
+    finally state.close()
   }

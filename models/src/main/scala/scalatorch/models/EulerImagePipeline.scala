@@ -54,6 +54,7 @@ final case class DiffusionImageRequest(prompt: String,negativePrompt: String,wid
     fooocusInpaint: Option[FooocusInpaintConfig]=None,
     compile: Option[CompileConfig]=None,
     tgate: Option[TGateConfig]=None,
+    cfgCache: Option[CfgCacheConfig]=None,
     controlNetPaths: Map[String,String]=Map.empty,
     onWarning: String=>Unit=_ => (),
     /** Batched sampling: one seed per image of a batch that shares this request (`seed` is then unused). The latent-returning
@@ -95,7 +96,7 @@ object EulerImagePipeline:
     * so a feature added later is excluded until it is listed here. */
   private val batchableFields=Set("prompt","negativePrompt","width","height","seed","guidanceScale","truncatePrompt","clipSkip","sdxlSize",
     "torchCpuNoise","trainingSigmas","promptScheduleSteps","latentHookSeed","latentHookBatchSize","latentHookBatchIndex","loraStepFilter",
-    "onWarning","controlNetPaths","batchSeeds","cfgSchedule","sada","postDiff","tgate")
+    "onWarning","controlNetPaths","batchSeeds","cfgSchedule","cfgCache","sada","postDiff","tgate")
   private[models] def batchable(request: DiffusionImageRequest): Boolean =
     request.productElementNames.zip(request.productIterator).forall { (name,value) =>
       batchableFields(name) || (value match
@@ -328,15 +329,17 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
     val pixels=BigInt(request.width)*request.height
     require(pixels<=maxImagePixels && pixels*vae.config.outChannels<=Int.MaxValue,"image exceeds allocation limit")
     val latentShape=Shape.from(Seq(1,vae.config.latentChannels,request.height/factor,request.width/factor))
+    val postDiffSupportedSampler=(samplerKind=="Euler" && !heun) || samplerKind=="DPM++ 2M SDE" ||
+      samplerKind=="DPM++ 2M SDE Heun" || samplerKind=="DPM++ 3M SDE" || samplerKind=="UniPC" || ddim.nonEmpty
     val postPlan=request.postDiff.map { config =>
-      require(ancestral && samplerKind=="Euler" && !dpm && prediction==DiffusionPrediction.Epsilon && source.isEmpty && latentSource.isEmpty && noise.isEmpty &&
+      require(postDiffSupportedSampler && prediction==DiffusionPrediction.Epsilon && source.isEmpty && latentSource.isEmpty && noise.isEmpty &&
         request.initialNoiseOverride.isEmpty && !nineChannelInput && request.variationStrength==0 && request.noiseResizeFrom.isEmpty &&
-        request.sada.isEmpty && request.cfgSchedule.isEmpty && DeepCache.current.isEmpty &&
-        request.controlNet.isEmpty && request.controlNets.isEmpty &&
+        request.sada.isEmpty && request.controlNet.isEmpty && request.controlNets.isEmpty &&
         EulerImagePipeline.batchable(request.copy(onStepObservation=None)),
-        "PostDiff currently supports plain Euler ancestral text-to-image only")
-      PostDiffTransition.plan((request.width/factor),(request.height/factor),fullSchedule.timesteps.size,
-        config.scale,config.portion,1 << (unet.downBlocks.size-1))
+        "PostDiff supports plain text-to-image on Euler, Euler a, DPM++ 2M, DPM++ 2M SDE, DDIM, and UniPC only")
+      val align=1 << (unet.downBlocks.size-1)
+      if config.snap then PostDiffTransition.planSnapped((request.width/factor),(request.height/factor),fullSchedule.timesteps.size,config.scale,config.portion,align)
+      else PostDiffTransition.plan((request.width/factor),(request.height/factor),fullSchedule.timesteps.size,config.scale,config.portion,align)
     }
     val samplingStartShape=postPlan.fold(latentShape)(p => Shape.from(Seq(1,vae.config.latentChannels,p.lowHeight,p.lowWidth)))
     require(latentShape.numel<=maxLatentElements && latentShape.numel<=Int.MaxValue,"latent exceeds allocation limit")
@@ -784,10 +787,21 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
       request.multiDiffusion.isEmpty && request.incantations.forall(ic => !ic.hasSeg && !ic.hasPag)
     if request.tgate.isDefined && !tgateAllowed then
       request.onWarning("T-GATE skipped because incompatible attention/guidance hooks are active")
+    val cfgCacheAllowed=request.cfgCache.isDefined && request.guidanceScale>1f &&
+      request.sag.forall(!_.enabled) && request.reference.forall(!_.enabled) &&
+      request.characteristicGuidance.isEmpty && neutralStaticPlan.isEmpty
+    if request.cfgCache.isDefined && !cfgCacheAllowed && request.guidanceScale>1f then
+      request.onWarning("CFG-Cache skipped because incompatible guidance hooks are active")
     scalatorch.nn.CircularConvPadding.withConfig(tilingConfig) { HyperTile.withState(hyperTileState) {
     unetExecution.withPredictor(unet,conditional.data,unconditional.map(_.data),cancelled,positiveAdded,negativeAdded,
       request.controlNet.toVector++request.controlNets) { predict =>
       TGate.withConfig(if tgateAllowed then request.tgate else None) {
+      CfgCache.withConfig(if cfgCacheAllowed then request.cfgCache.map((_,schedule.timesteps.size)) else None) {
+      postPlan.foreach { pp =>
+        DeepCache.current.foreach(dc => dc.deferUntil(pp.transitionIndex+(if dc.config.order>=2 then 3 else 2)))
+        CfgCache.current.foreach(_.deferUntil(pp.transitionIndex+2))
+        TGate.current.foreach(_.deferUntil(pp.transitionIndex+3))
+      }
       // SADA step skipping: the plain Euler sampler with noise prediction only (an ODE trajectory in sigma space).
       val sadaState=request.sada.filter(_ => samplerKind=="Euler" && !dpm && !ancestral && prediction==DiffusionPrediction.Epsilon &&
         heunSolver.isEmpty && lmsSolver.isEmpty && kdpm2Solver.isEmpty && dpm2SaSolver.isEmpty && dpmSdeSolver.isEmpty &&
@@ -899,7 +913,8 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
                   Llul.withStep(request.llul,i+1,schedule.timesteps.size,request.width,request.height) {
                     AgentAttention.withStep(request.agentAttention,i,request.isHiresPass,request.height/factor,request.width/factor,request.seed) {
                       def invoke()=predict(modelInput,time,request.guidanceScale,controlStart,request.guidanceRescale,effScheduled,detail,controlEnd,request.dynamicThresholding,prediction,cadsStep,guidanceHookState,effPag,condOvr,posAddedOvr,uncondOvr,negAddedOvr,stepEncoded.posSigns,stepEncoded.negSigns,request.kohyaHrFix,tdStep,request.multiDiffusion,segUncond,chgStep,stepNeutralPlan,sagStepOpt,refStepOpt)
-                      TGate.current.fold(invoke())(tg => tg.withStep(i)(invoke()))
+                      def withTGate()=TGate.current.fold(invoke())(tg => tg.withStep(i)(invoke()))
+                      CfgCache.current.fold(withTGate())(cc => cc.withStep(i)(withTGate()))
                     }
                   }
                 }
@@ -916,9 +931,14 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
         val heunEnd=(2*i+2).toDouble/(2*schedule.timesteps.size)
         val transitionNoise=if postPlan.exists(_.transitionIndex==i) then
           val lowPredicted=predictAt(latent,i,i.toDouble/schedule.timesteps.size,(i+1).toDouble/schedule.timesteps.size)
-          val clean=SamplerPrediction.toOriginalEuler(schedule.sigmas(i),prediction,lowPredicted,latent).data
+          val clean=if dpm || ddim.nonEmpty then SamplerPrediction.toOriginalVp(schedule.sigmas(i),prediction,lowPredicted,latent).data
+            else SamplerPrediction.toOriginalEuler(schedule.sigmas(i),prediction,lowPredicted,latent).data
           val freshNoise=randomNoise(latentShape)
-          latent=Variable(PostDiffTransition.euler(clean,freshNoise,schedule.sigmas(i)),requiresGrad=false)
+          latent=Variable(if dpm || ddim.nonEmpty then PostDiffTransition.vp(clean,freshNoise,schedule.sigmas(i))
+            else PostDiffTransition.euler(clean,freshNoise,schedule.sigmas(i)),requiresGrad=false)
+          history=None
+          dpmMultistepSdeSolver.foreach(_.resetHistory())
+          uniPcSolver.foreach(_.resetHistory())
           Some(freshNoise)
         else None
         val stepNoisy=latent.data
@@ -973,7 +993,8 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
         else if lmsSolver.nonEmpty then
           latent=lmsSolver.get.step(i,predicted,latent).previous
         else if dpmMultistepSdeSolver.nonEmpty then
-          val z=Variable(randomNoise(),requiresGrad=false)
+          val curShape=Shape.from(Seq(1L,latent.data.shape.dims(1),latent.data.shape.dims(2),latent.data.shape.dims(3)))
+          val z=Variable(randomNoise(curShape),requiresGrad=false)
           latent=dpmMultistepSdeSolver.get.step(i,predicted,latent,z).previous
         else if uniPcSolver.nonEmpty then
           latent=uniPcSolver.get.step(i,predicted,latent).previous
@@ -991,18 +1012,20 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
           case None =>
             dpmSolver match
               case Some(solver) =>
-                val result=solver.step(i,predicted,latent,history)
+                val result=solver.step(i,predicted,latent,history,allowMissingHistory=postPlan.nonEmpty)
                 latent=result.previous
                 history=Some(result.predictedOriginal)
               case None => ancestralSolver match
                 case Some(solver) =>
                   val next=schedule.sigmas(i+1)
-                  val noise=if next>0 then randomNoise(Shape.from(Seq(1L,latent.data.shape.dims(1),latent.data.shape.dims(2),latent.data.shape.dims(3))))
+                  val curShape=Shape.from(Seq(1L,latent.data.shape.dims(1),latent.data.shape.dims(2),latent.data.shape.dims(3)))
+                  val noise=if next>0 then randomNoise(curShape)
                     else Tensor.fromFloats(new Array[Float](latent.data.shape.numel.toInt),latent.data.shape)
                   latent=sonarStepper.fold(solver.step(i,predicted,latent,Variable(noise,requiresGrad=false)).previous)(st => Variable(st.step(latent.data,predicted.data,schedule.sigmas(i),next,prediction,Some(noise)),requiresGrad=false))
                 case None => latent=ddim match
                   case Some(solver) =>
-                    val noise=Option.when(ddimEta>0)(Variable(randomNoise(),requiresGrad=false))
+                    val curShape=Shape.from(Seq(1L,latent.data.shape.dims(1),latent.data.shape.dims(2),latent.data.shape.dims(3)))
+                    val noise=Option.when(ddimEta>0)(Variable(randomNoise(curShape),requiresGrad=false))
                     solver.step(i+fullSchedule.timesteps.size-schedule.timesteps.size,predicted,latent,ddimEta,noise)
                   case None => sonarStepper.fold(scheduler.step(i,predicted,latent).previous)(st => Variable(st.step(latent.data,predicted.data,schedule.sigmas(i),schedule.sigmas(i+1),prediction,None),requiresGrad=false))
         if !nineChannelInput then latentMask.foreach { mask =>
@@ -1047,7 +1070,7 @@ final class EulerImagePipeline(val tokenizer: ClipFastTokenizer,val textEncoder:
         request.onStepObservation.foreach(cb => cb(i+1,schedule.timesteps.size,stepNoisy,stepDenoised,latent.data))
         onProgress(DiffusionImageProgress(i+1,schedule.timesteps.size,schedule.timesteps(i),latent.data))
         i+=1
-    } }
+    } } }
     checkCancelled()
     if returnLatents then latent.data
     else

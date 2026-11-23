@@ -16,9 +16,10 @@ final case class DpmPlusPlus2M(sigmas: Vector[Double],
     "invalid DPM sigma")
   require(sigmas.zip(sigmas.drop(1)).forall((a,b) => a>=b),"DPM sigmas must not increase")
   def step(index: Int,modelOutput: Variable,sample: Variable,
-      previousOriginal: Option[Variable]=None): DpmPlusPlusStep =
+      previousOriginal: Option[Variable]=None,allowMissingHistory: Boolean=false): DpmPlusPlusStep =
     require(index>=0 && index<sigmas.size-1,"DPM step out of range")
-    require(previousOriginal.isDefined==(index>0),"DPM history required exactly after first step")
+    require(if allowMissingHistory then index==0 || previousOriginal.isEmpty || previousOriginal.isDefined
+      else previousOriginal.isDefined==(index>0),"DPM history required exactly after first step")
     require(sample.data.shape.numel<=maxElements && sample.data.shape.numel<=Int.MaxValue,"DPM allocation limit")
     require(modelOutput.data.shape==sample.data.shape && previousOriginal.forall(_.data.shape==sample.data.shape),
       "DPM tensor shape mismatch")

@@ -359,6 +359,10 @@ final case class DpmPlusPlusMultistepSde(
   private val history = scala.collection.mutable.ArrayBuffer.empty[(Double, Variable)]
   private var lowerOrderNums: Int = 0
 
+  def resetHistory(): Unit =
+    history.clear()
+    lowerOrderNums = 0
+
   def step(index: Int, modelOutput: Variable, sample: Variable, noise: Variable): DpmPlusPlusStep =
     require(index >= 0 && index < sigmas.size - 1, "DPM++ SDE step index out of range")
     val s = sigmas(index)
@@ -432,6 +436,12 @@ final case class UniPcScheduler(
   private var lastSample: Option[Variable] = None
   private var thisOrder: Int = 1
   private var lowerOrderNums: Int = 0
+
+  def resetHistory(): Unit =
+    history.clear()
+    lastSample = None
+    thisOrder = 1
+    lowerOrderNums = 0
 
   def step(index: Int, modelOutput: Variable, sample: Variable): DpmPlusPlusStep =
     require(index >= 0 && index < sigmas.size - 1, "UniPC step index out of range")

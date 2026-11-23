@@ -46,6 +46,12 @@ private[ffm] final class CudaDriver private (
   def synchronize(stream: MemorySegment): Unit =
     val code: Int = syncHandle.invokeExact(stream)
     if code != 0 then throw IllegalStateException(s"cuStreamSynchronize failed with CUDA status $code")
+  private val memcpyDtoDLayouts: Seq[MemoryLayout] = Seq(JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS)
+  private lazy val memcpyDtoDHandle = handleFor("cuMemcpyDtoDAsync_v2", memcpyDtoDLayouts)
+  def copyDeviceToDevice(dst: Long, src: Long, bytes: Long, stream: MemorySegment): Unit =
+    if bytes > 0L then
+      val code: Int = memcpyDtoDHandle.invokeExact(dst, src, bytes, stream)
+      if code != 0 then throw IllegalStateException(s"cuMemcpyDtoDAsync_v2 failed with CUDA status $code")
   def call(name: String, layouts: Seq[MemoryLayout], args: AnyRef*): Unit =
     val code=result(name,layouts,args*)
     if code != 0 then throw IllegalStateException(s"$name failed with CUDA status $code")
