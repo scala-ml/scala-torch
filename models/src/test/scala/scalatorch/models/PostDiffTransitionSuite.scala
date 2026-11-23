@@ -48,4 +48,12 @@ class PostDiffTransitionSuite extends munit.FunSuite:
     intercept[IllegalArgumentException](PostDiffTransition.plan(128,96,20,0.0,0.2,8))
     intercept[IllegalArgumentException](PostDiffTransition.plan(128,96,20,0.75,1.0,8))
     intercept[IllegalArgumentException](PostDiffTransition.plan(128,96,20,0.70,0.2,8))
+    // Snapped planning handles SDXL 832x1216 (latent 104x152) at scale=0.75 (78->80, 114->112) aligned to 8
+    val snapped=PostDiffTransition.planSnapped(104,152,20,0.75,0.4,8)
+    assertEquals(snapped.lowWidth,80)
+    assertEquals(snapped.lowHeight,112)
+    assertEquals(snapped.lowWidth%8,0)
+    assertEquals(snapped.lowHeight%8,0)
+    assertEquals(snapped.transitionIndex,7)
+    intercept[IllegalArgumentException](PostDiffTransition.planSnapped(104,152,20,0.01,0.4,8))
   }

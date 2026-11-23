@@ -72,7 +72,13 @@ class NativePostDiffSuite extends munit.FunSuite:
       assertEquals((changed.getWidth,changed.getHeight),(16,16))
       val pixels=(0 until 16).flatMap(y=>(0 until 16).map(x=>(plain.getRGB(x,y),changed.getRGB(x,y))))
       assert(pixels.exists((a,b)=>a!=b),"experimental path must affect generated pixels")
-      intercept[IllegalArgumentException](run(base.updated("sampler_name",Str("Euler")).updated("extra",experiment)))
+      // Public postdiff and cfg_cache hooks also run on DPM++ 2M SDE, while unsupported samplers (Heun) reject cleanly
+      val hooked=base.updated("sampler_name",Str("DPM++ 2M SDE")).updated("scheduler",Str("Karras")).updated("cfg_scale",Number(7))
+        .updated("hooks",Obj(Map("postdiff"->Obj(Map("scale"->Number(BigDecimal("0.5")),"portion"->Number(BigDecimal("0.5")))),
+          "cfg_cache"->Obj(Map("start"->Number(BigDecimal("0.25")),"interval"->Number(2))))))
+      val hookedImg=image(hooked)
+      assertEquals((hookedImg.getWidth,hookedImg.getHeight),(16,16))
+      intercept[IllegalArgumentException](run(base.updated("sampler_name",Str("Heun")).updated("extra",experiment)))
     finally
       val paths=Files.walk(output)
       try paths.sorted(java.util.Comparator.reverseOrder[Path]()).forEach(Files.deleteIfExists(_)) finally paths.close()
@@ -108,7 +114,7 @@ class NativePostDiffSuite extends munit.FunSuite:
         "steps"->Number(4),"seed"->Number(42),"sampler_name"->Str("Euler a"),"cfg_scale"->Number(1),
         "extra"->Obj(Map("postdiff_experiment"->Str("{\"scale\":0.5,\"portion\":0.5}"))))
       def request(params: Map[String,NativeJson])=Map[String,NativeJson]("params"->Obj(params),"output_dir"->Str(output.toString))
-      send("bad","txt2img",request(base.updated("sampler_name",Str("Euler"))))
+      send("bad","txt2img",request(base.updated("sampler_name",Str("Heun"))))
       val bad=receive("bad")
       assertEquals(bad("type"),Str("error"))
       assertEquals(bad("code"),Str("invalid_params"))

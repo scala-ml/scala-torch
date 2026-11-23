@@ -881,6 +881,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         val (cfg,t)=kohya.get
         if KohyaHrFix.isActive(cfg,t) && cfg.downscaleFactor!=1.0 then
           next(up(KohyaHrFix.shrinkIfActive(hidden.toCpu,cfg,t)))
+      val freeU=FreeU.current
       model.downBlocks.zipWithIndex.foreach { (block,blockIdx) => if !(dcReuse && blockIdx>dcBranch) then Pag.withSection(s"down.$blockIdx") {
         block.layers.zipWithIndex.foreach { (l,layerIdx) =>
           layer(l)
@@ -912,13 +913,12 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
           require(session.shape(residual)==hidden.shape,"ControlNet middle residual shape mismatch")
           next(session.add(hidden,residual))
         }
-      val freeU=FreeU.current
       model.upBlocks.zipWithIndex.foreach { (block,stageIndex) => if !(dcReuse && stageIndex<dcUpKeep) then Pag.withSection(s"up.$stageIndex") {
         dcState.foreach { st =>
           if stageIndex==dcUpKeep then
             if dcReuse then
               while skips.size>dcNeededSkips do skips.remove(skips.size-1).close()
-              next(st.forecast(dcSlot,session))
+              next(st.forecast(dcSlot,dcDims.head,session))
             else st.recordWithSession(dcSlot,dcDims,hidden,session)
         }
         kohya.foreach { case (cfg,_) =>

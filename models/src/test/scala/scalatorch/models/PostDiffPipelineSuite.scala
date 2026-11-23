@@ -47,10 +47,14 @@ class PostDiffPipelineSuite extends munit.FunSuite:
     intercept[IllegalArgumentException](pipe.generateAncestralLatents(request,schedule,source=Some(DiffusionImageSource(image,0.5))))
     intercept[IllegalArgumentException](pipe.generateAncestralLatents(request.copy(variationSeed=Some(43),variationStrength=0.5),schedule))
     intercept[IllegalArgumentException](pipe.generateAncestralLatents(request.copy(postDiff=Some(PostDiffConfig(0.01,0.5))),schedule))
-    intercept[IllegalArgumentException](pipe.generateAncestralLatents(request.copy(cfgSchedule=Some(CfgSchedule(7,3,"linear"))),schedule))
-    DeepCache.install(Some(DeepCacheConfig(3,0,0)))
-    try intercept[IllegalArgumentException](pipe.generateAncestralLatents(request,schedule))
-    finally DeepCache.install(None)
+    // Euler, DPM++ 2M, CFG Schedule, CFG-Cache, and DeepCache all compose with PostDiff cleanly
+    assertEquals(pipe.generateLatents(request,schedule).shape.dims,Seq(1L,4L,8L,8L))
+    val dpmSched=DpmSchedule.karras(DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true),4)
+    assertEquals(pipe.generateDpmLatents(request,dpmSched).shape.dims,Seq(1L,4L,8L,8L))
+    assertEquals(pipe.generateDpmMultistepSde(request,dpmSched,returnLatents=true).shape.dims,Seq(1L,4L,8L,8L))
+    assertEquals(pipe.generateAncestralLatents(request.copy(guidanceScale=7f,cfgSchedule=Some(CfgSchedule(7,3,"linear")),cfgCache=Some(CfgCacheConfig(0.25,2))),schedule).shape.dims,Seq(1L,4L,8L,8L))
+    // Unsupported sampler (Heun) still raises IllegalArgumentException cleanly
+    intercept[IllegalArgumentException](pipe.generateHeun(request,schedule,returnLatents=true))
     var cancelled=false
     intercept[java.util.concurrent.CancellationException] {
       pipe.generateAncestralLatents(request,schedule,onProgress=_=>cancelled=true,cancelled=()=>cancelled)
@@ -80,5 +84,4 @@ class PostDiffPipelineSuite extends munit.FunSuite:
         val n=batched.length/2
         val seedDifference=batched.take(n).zip(batched.drop(n)).map((a,b)=>math.abs(a.toDouble-b.toDouble)).max
         assert(seedDifference>0.1,s"batch seeds unexpectedly similar: $seedDifference")
-    intercept[IllegalArgumentException](pipe.generateLatents(request,schedule))
   }

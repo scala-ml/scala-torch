@@ -18,12 +18,14 @@ final class TGateState(val config: TGateConfig) extends AutoCloseable:
   private var slot=0
   private var currentSlot: Option[Int]=None
   private var cfgPair=false
+  private var spatialWarmupUntil=0
   var cachedHits=0
   var recordedEntries=0
 
   def currentStep: Int = stepIndex
   def isCfgPair: Boolean = cfgPair
   def activeSlot: Option[Int] = currentSlot
+  def deferUntil(minStep: Int): Unit = spatialWarmupUntil=math.max(spatialWarmupUntil,minStep)
 
   /** Sets the 0-based diffusion step index (`0..steps-1`) and clears slot counter for the step. */
   def withStep[A](step: Int)(body: => A): A =
@@ -69,30 +71,37 @@ final class TGateState(val config: TGateConfig) extends AutoCloseable:
     cached.rank==target.rank && cached.dims.drop(1)==target.dims.drop(1) &&
       (target.dims(0)==cached.dims(0) || target.dims(0)==2L*cached.dims(0))
 
+  private def effectiveGateStep: Int = math.max(config.gateStep,spatialWarmupUntil)
+
   /** True when cached cross-attention should replace computation on this step if an entry is available. */
   def shouldReuse(slotIndex: Int,layer: DiffusionAttention): Option[CudaTensor] =
-    if stepIndex<config.gateStep then None
+    if stepIndex<effectiveGateStep then None
     else
       val m=perSlot.getOrElse(slotIndex,null)
       if m==null then None
       else Option(m.get(layer)).filter(t => !t.isReleased).map { t => cachedHits+=1; t }
 
   def shouldReuse(slotIndex: Int,layer: DiffusionAttention,targetShape: Shape): Option[CudaTensor] =
-    if stepIndex<config.gateStep then None
-    else
-      val m=perSlot.getOrElse(slotIndex,null)
-      if m==null then None
-      else Option(m.get(layer)).filter(t => !t.isReleased && compatibleShape(t.shape,targetShape)).map { t => cachedHits+=1; t }
+    val m=perSlot.getOrElse(slotIndex,null)
+    val raw=if m==null then null else m.get(layer)
+    if raw!=null && !raw.isReleased && raw.shape.dims.drop(1)!=targetShape.dims.drop(1) then
+      spatialWarmupUntil=math.max(spatialWarmupUntil,stepIndex+2)
+      None
+    else if stepIndex<effectiveGateStep || raw==null || raw.isReleased || !compatibleShape(raw.shape,targetShape) then None
+    else { cachedHits+=1; Some(raw) }
 
   /** True when the current step should capture (or refresh) the cross-attention cache for `layer`. */
   def shouldRecord(slotIndex: Int,layer: DiffusionAttention,dcInterval: Option[Int],targetShape: Option[Shape]=None): Boolean =
     val m=perSlot.getOrElse(slotIndex,null)
     val existing=if m==null then null else m.get(layer)
+    if existing!=null && !existing.isReleased && targetShape.exists(s => existing.shape.dims.drop(1)!=s.dims.drop(1)) then
+      spatialWarmupUntil=math.max(spatialWarmupUntil,stepIndex+2)
     val missing=existing==null || existing.isReleased || targetShape.exists(s => !compatibleShape(existing.shape,s))
-    if stepIndex>=config.gateStep then missing
+    val gate=effectiveGateStep
+    if stepIndex>=gate then missing
     else
       val window=dcInterval.getOrElse(1)
-      stepIndex==config.gateStep-1 || (window>1 && stepIndex>=config.gateStep-window)
+      stepIndex==gate-1 || (window>1 && stepIndex>=gate-window)
 
   def record(slotIndex: Int,layer: DiffusionAttention,value: CudaTensor): Unit =
     val m=mapFor(slotIndex)
@@ -108,6 +117,7 @@ final class TGateState(val config: TGateConfig) extends AutoCloseable:
         if t!=null && !t.isReleased then try t.close() catch case _: Throwable => ()
     }
     perSlot.clear()
+    spatialWarmupUntil=0
 
   def close(): Unit = clearCache()
 

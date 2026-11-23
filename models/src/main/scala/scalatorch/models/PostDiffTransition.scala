@@ -2,7 +2,7 @@ package scalatorch.models
 
 import scalatorch.*
 
-final case class PostDiffConfig(scale: Double,portion: Double)
+final case class PostDiffConfig(scale: Double,portion: Double,snap: Boolean=false)
 
 /** Spatial transition from the mixed-resolution denoising scheme of PostDiff (Du et al., ICCV 2025).
   * Input is a low-resolution clean prediction, not the noisy state. The caller supplies independent
@@ -25,6 +25,23 @@ private[models] object PostDiffTransition:
     val lowSteps=math.floor(steps*portion).toInt
     require(lowSteps>0 && lowSteps<steps,"PostDiff transition must leave steps on both sides")
     Plan(w.toInt,h.toInt,lowSteps-1)
+
+  /** Snaps `width * scale` and `height * scale` to the nearest valid multiple of `alignment` for arbitrary resolutions. */
+  def planSnapped(width: Int,height: Int,steps: Int,scale: Double,portion: Double,alignment: Int): Plan =
+    require(width>alignment && height>alignment && steps>=2 && alignment>0 && scale.isFinite && scale>0 && scale<1 &&
+      portion.isFinite && portion>0 && portion<1,"invalid PostDiff schedule")
+    val rawW=width.toDouble*scale
+    val rawH=height.toDouble*scale
+    require(rawW>=alignment*0.5 && rawH>=alignment*0.5,"PostDiff low dimensions are too small for U-Net alignment")
+    def snapDim(raw: Double,full: Int): Int =
+      val aligned=(math.rint(raw/alignment).toInt)*alignment
+      math.max(alignment,math.min(full-alignment,aligned))
+    val w=snapDim(rawW,width)
+    val h=snapDim(rawH,height)
+    require(w<width && h<height && w%alignment==0 && h%alignment==0,"PostDiff snapped dimensions must shrink below target")
+    val lowSteps=math.floor(steps*portion).toInt
+    require(lowSteps>0 && lowSteps<steps,"PostDiff transition must leave steps on both sides")
+    Plan(w,h,lowSteps-1)
 
   private def apply(clean: Tensor[Float],noise: Tensor[Float],sigma: Double,vp: Boolean): Tensor[Float] =
     val a=clean.shape.dims

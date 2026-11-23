@@ -47,7 +47,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
   if !sys.env.contains("SCALATORCH_CLIP_DEVICE") then unetExecution.device match
     case value if value.startsWith("cuda") => ClipCuda.enable(value.drop(5).toIntOption.getOrElse(0))
     case _ => ()
-  override def features: Vector[String]=Vector("img2img_hires_fix","loopback_scaler","tokenizer","latent_upscale","inpaint_difference","gpu_temperature_guard","rescale_cfg","cfg_schedule","sada","tgate","resharpen","latent_mirroring","color_grading","anti_burn","vectorscope_cc","detail_daemon","vae_tools","model_keyword","freeu","deepcache","dynamic_thresholding","tiling","cads","hypertile","metadata_utils","model_sampling","apg","mahiro","pag","weight_gradient","negpip","kohya_hrfix","token_downsampling","conditioning_highres_fix","multidiffusion","latent_modifier","soft_inpainting","neveroom","semantic_guidance","sonar","hires_fix_tweaks","pnginfo_injection","prevent_interrupt","controlnet","controlnet_preprocess_extras","system_info","save_intermediate","steps_animation","img2imgalt","cd_tuner","llul","agent_attention","incantations","characteristic_guidance","clip_io","prompt_fusion","neutral_prompt","composable_lora","embedding_merge","aesthetic_gradients","sag","reference","revision","ip_adapter","controllllite","fooocus_inpaint","compile","taesd","spandrel","vram_estimator","adetailer","batch_face_swap","face_restore","nsfw_checker","aesthetic_score","animatediff","cn_animation","controlnet_fastload_data","photomaker","caption","img2vid","novel_view","custom_code","ldsr","marigold","controlnet_aux","temporal_lab","clip_interrogator","chara_searcher","batch_interrogate_wd_v3_partial")
+  override def features: Vector[String]=Vector("img2img_hires_fix","loopback_scaler","tokenizer","latent_upscale","inpaint_difference","gpu_temperature_guard","rescale_cfg","cfg_schedule","cfg_cache","postdiff","sada","tgate","resharpen","latent_mirroring","color_grading","anti_burn","vectorscope_cc","detail_daemon","vae_tools","model_keyword","freeu","deepcache","dynamic_thresholding","tiling","cads","hypertile","metadata_utils","model_sampling","apg","mahiro","pag","weight_gradient","negpip","kohya_hrfix","token_downsampling","conditioning_highres_fix","multidiffusion","latent_modifier","soft_inpainting","neveroom","semantic_guidance","sonar","hires_fix_tweaks","pnginfo_injection","prevent_interrupt","controlnet","controlnet_preprocess_extras","system_info","save_intermediate","steps_animation","img2imgalt","cd_tuner","llul","agent_attention","incantations","characteristic_guidance","clip_io","prompt_fusion","neutral_prompt","composable_lora","embedding_merge","aesthetic_gradients","sag","reference","revision","ip_adapter","controllllite","fooocus_inpaint","compile","taesd","spandrel","vram_estimator","adetailer","batch_face_swap","face_restore","nsfw_checker","aesthetic_score","animatediff","cn_animation","controlnet_fastload_data","photomaker","caption","img2vid","novel_view","custom_code","ldsr","marigold","controlnet_aux","temporal_lab","clip_interrogator","chara_searcher","batch_interrogate_wd_v3_partial")
   override def usesCuda: Boolean=vaeExecution.device!="cpu" || unetExecution.device!="cpu"
   override def systemStatus: Map[String,NativeJson]=NativeSystemStatus.snapshot(modelSummary,vaeExecution.device,unetExecution.device,
     vaeExecution.offloadWeights,unetExecution.offloadWeights,maxAttentionScoreElements,vaeTilingEnabled,vaeAttentionLimit)
@@ -1272,10 +1272,11 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
                 case Bool(true) => Map.empty[String,NativeJson]
                 case Obj(v) => v
                 case _ => throw IllegalArgumentException("invalid deepcache hook")
-              require(fields.keySet.subsetOf(Set("enabled","interval","branch","full_first","order")),"unknown deepcache option")
+              require(fields.keySet.subsetOf(Set("enabled","interval","branch","full_first","order","contraction")),"unknown deepcache option")
               require(usesCuda,"DeepCache needs the CUDA U-Net")
               Some(DeepCacheConfig(number(fields,"interval",BigDecimal(3)).toInt,number(fields,"branch",BigDecimal(0)).toInt,
-                number(fields,"full_first",BigDecimal(5)).toInt,number(fields,"order",BigDecimal(0)).toInt))
+                number(fields,"full_first",BigDecimal(5)).toInt,number(fields,"order",BigDecimal(0)).toInt,
+                number(fields,"contraction",BigDecimal("1.0")).toDouble))
           }
           case _ => None
         DeepCache.install(deepCache)
@@ -1291,6 +1292,40 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
               require(fields.keySet.subsetOf(Set("enabled","gate_step")),"unknown tgate option")
               require(usesCuda,"T-GATE needs the CUDA U-Net")
               Some(TGateConfig(number(fields,"gate_step",BigDecimal(8)).toInt))
+          }
+          case _ => None
+        val cfgCacheHook=g.get("hooks") match
+          case Some(Obj(hooks)) => hooks.get("cfg_cache").flatMap {
+            case Null | Bool(false) => None
+            case Obj(fields) if fields.get("enabled").contains(Bool(false)) => None
+            case value =>
+              val fields=value match
+                case Bool(true) => Map.empty[String,NativeJson]
+                case Obj(v) => v
+                case _ => throw IllegalArgumentException("invalid cfg_cache hook")
+              require(fields.keySet.subsetOf(Set("enabled","start","interval","adaptive_threshold","hf_weight")),"unknown cfg_cache option")
+              Some(CfgCacheConfig(
+                start=number(fields,"start",BigDecimal("0.25")).toDouble,
+                interval=integer(fields,"interval",3),
+                adaptiveThreshold=number(fields,"adaptive_threshold",BigDecimal("0.0")).toDouble,
+                hfWeight=number(fields,"hf_weight",BigDecimal("0.0")).toDouble))
+          }
+          case _ => None
+        val postDiffHook=g.get("hooks") match
+          case Some(Obj(hooks)) => hooks.get("postdiff").flatMap {
+            case Null | Bool(false) => None
+            case Obj(fields) if fields.get("enabled").contains(Bool(false)) => None
+            case value =>
+              val fields=value match
+                case Bool(true) => Map.empty[String,NativeJson]
+                case Obj(v) => v
+                case _ => throw IllegalArgumentException("invalid postdiff hook")
+              require(fields.keySet.subsetOf(Set("enabled","scale","portion")),"unknown postdiff option")
+              val scale=number(fields,"scale",BigDecimal("0.5")).toDouble
+              val portion=number(fields,"portion",BigDecimal("0.4")).toDouble
+              require(scale.isFinite && scale>=0.25 && scale<=0.95,"PostDiff scale must be in 0.25..0.95")
+              require(portion.isFinite && portion>=0.05 && portion<=0.85,"PostDiff portion must be in 0.05..0.85")
+              Some(PostDiffConfig(scale,portion,snap=true))
           }
           case _ => None
         val freeU=g.get("hooks") match
@@ -1875,6 +1910,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val postDiffExperiment=g.get("extra") match
           case Some(Obj(extra)) => NativePostDiff.parse(extra.get("postdiff_experiment"))
           case _ => None
+        require(postDiffHook.isEmpty || postDiffExperiment.isEmpty,"cannot combine postdiff hook with experimental postdiff_experiment")
+        val postDiffConfig=postDiffHook.orElse(postDiffExperiment)
         val paperAysExperiment=g.get("extra") match
           case Some(Obj(extra)) => extra.get("paper_ays_experiment") match
             case None | Some(Null) => false
@@ -1884,7 +1921,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val baseImageRequest=DiffusionImageRequest(str(g,"prompt",""),str(g,"negative_prompt",""),
           integer(g,"width",512),integer(g,"height",512),seed,number(g,"cfg_scale",7).toFloat,
           clipSkip=integer(g,"clip_skip",1),sdxlSize=sdxlSize,
-          torchCpuNoise=NativeGenerationMetadata.torchCpuNoise(g.get("extra"),cudaAvailable=usesCuda),guidanceRescale=guidanceRescale,cfgSchedule=cfgSchedule,sada=sada,postDiff=postDiffExperiment,resharpen=resharpen,latentMirroring=latentMirroring,colorGrading=colorGrading,antiBurn=antiBurn,vectorscope=vectorscope,detailDaemon=detailDaemon,dynamicThresholding=dynamicThresholding,tiling=tilingHook,cads=cadsHook,hyperTile=hyperTileHook,apg=apgHook,mahiro=mahiroHook,pag=pagHook,trainingSigmas=activeNoise.floatTrainingSigmas,weightGradient=weightGradientHook,negPip=negPipHook,kohyaHrFix=kohyaHrFixHook,tokenDownsampling=tokenDownsamplingHook,latentModifier=latentModifierHook,softInpainting=softInpaintingHook,multiDiffusion=multiDiffusionHook,semanticGuidance=semanticGuidanceHook,sonar=sonarHook,cdTuner=cdTunerHook,llul=llulHook,agentAttention=agentAttentionHook,incantations=incantationsHook,characteristicGuidance=chgHook,clipIo=clipIoHook,promptFusion=promptFusionHook,neutralPrompt=neutralPromptHook,composableLora=composableLoraHook,aestheticGradients=aestheticGradientsHook,sag=sagHook,reference=referenceHook,revision=revisionHook,ipAdapter=ipAdapterHook,controlLLLite=controlLLLiteHook,fooocusInpaint=fooocusInpaintHook,compile=compileHook,tgate=tgateHook,controlNetPaths=controlnetPaths)
+          torchCpuNoise=NativeGenerationMetadata.torchCpuNoise(g.get("extra"),cudaAvailable=usesCuda),guidanceRescale=guidanceRescale,cfgSchedule=cfgSchedule,sada=sada,postDiff=postDiffConfig,resharpen=resharpen,latentMirroring=latentMirroring,colorGrading=colorGrading,antiBurn=antiBurn,vectorscope=vectorscope,detailDaemon=detailDaemon,dynamicThresholding=dynamicThresholding,tiling=tilingHook,cads=cadsHook,hyperTile=hyperTileHook,apg=apgHook,mahiro=mahiroHook,pag=pagHook,trainingSigmas=activeNoise.floatTrainingSigmas,weightGradient=weightGradientHook,negPip=negPipHook,kohyaHrFix=kohyaHrFixHook,tokenDownsampling=tokenDownsamplingHook,latentModifier=latentModifierHook,softInpainting=softInpaintingHook,multiDiffusion=multiDiffusionHook,semanticGuidance=semanticGuidanceHook,sonar=sonarHook,cdTuner=cdTunerHook,llul=llulHook,agentAttention=agentAttentionHook,incantations=incantationsHook,characteristicGuidance=chgHook,clipIo=clipIoHook,promptFusion=promptFusionHook,neutralPrompt=neutralPromptHook,composableLora=composableLoraHook,aestheticGradients=aestheticGradientsHook,sag=sagHook,reference=referenceHook,revision=revisionHook,ipAdapter=ipAdapterHook,controlLLLite=controlLLLiteHook,fooocusInpaint=fooocusInpaintHook,compile=compileHook,tgate=tgateHook,cfgCache=cfgCacheHook,controlNetPaths=controlnetPaths)
         val fallbackControlImage=if img2img then g.get("img2img") match
           case Some(Obj(fields)) => fields.get("init_image").collect { case Str(path) if path.nonEmpty => path }
           case _ => None
@@ -1904,7 +1941,7 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         val imageRequest=baseImageRequest.copy(controlNets=controlNet)
         val keywordPlan=NativeKeywordHook.plan(g.get("hooks"),imageRequest.prompt,
           modelSummary("hash").asInstanceOf[Str].value,root.getFileName.toString,iterations,seed,keywordState,
-          () => context.checkCancelled(),allowActive=Set("img2img_hires_fix","latent_upscale","inpaint_difference","gpu_temperature_guard","rescale_cfg","cfg_schedule","sada","tgate","resharpen","latent_mirroring","color_grading","anti_burn","vectorscope_cc","detail_daemon","freeu","deepcache","dynamic_thresholding","tiling","cads","hypertile","model_sampling","apg","mahiro","pag","weight_gradient","negpip","kohya_hrfix","token_downsampling","conditioning_highres_fix","multidiffusion","latent_modifier","soft_inpainting","neveroom","semantic_guidance","sonar","hires_fix_tweaks","pnginfo_injection","prevent_interrupt","save_intermediate","steps_animation","img2imgalt","cd_tuner","llul","agent_attention","incantations","characteristic_guidance","clip_io","prompt_fusion","neutral_prompt","composable_lora","embedding_merge","aesthetic_gradients","sag","reference","revision","ip_adapter","controllllite","fooocus_inpaint","compile","adetailer","batch_face_swap","face_restore","nsfw_checker","aesthetic_score","animatediff","photomaker"))
+          () => context.checkCancelled(),allowActive=Set("img2img_hires_fix","latent_upscale","inpaint_difference","gpu_temperature_guard","rescale_cfg","cfg_schedule","cfg_cache","postdiff","sada","tgate","resharpen","latent_mirroring","color_grading","anti_burn","vectorscope_cc","detail_daemon","freeu","deepcache","dynamic_thresholding","tiling","cads","hypertile","model_sampling","apg","mahiro","pag","weight_gradient","negpip","kohya_hrfix","token_downsampling","conditioning_highres_fix","multidiffusion","latent_modifier","soft_inpainting","neveroom","semantic_guidance","sonar","hires_fix_tweaks","pnginfo_injection","prevent_interrupt","save_intermediate","steps_animation","img2imgalt","cd_tuner","llul","agent_attention","incantations","characteristic_guidance","clip_io","prompt_fusion","neutral_prompt","composable_lora","embedding_merge","aesthetic_gradients","sag","reference","revision","ip_adapter","controllllite","fooocus_inpaint","compile","adetailer","batch_face_swap","face_restore","nsfw_checker","aesthetic_score","animatediff","photomaker"))
         val keywordRefinement=hiresFix.filter(_.prompt.isEmpty).flatMap(_ => keywordPlan.map(_.preview))
         val keywordRefinementAdapters=keywordRefinement.map { text =>
           val refs=manualLoras++NativeLoraPrompt.parse(text)._2
@@ -2246,15 +2283,15 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
         // Batched sampling: the `batch_size` images of one group share every U-Net pass (one batch of 2N with guidance) instead of
         // being sampled one after another. Only for the plain requests parallel count may split, with nothing per image but the seed.
         val batchedGroups=batchSize>1 && CudaUNet.batchedSampling && generationPipeline.unetExecution.isInstanceOf[UNetExecution.Cuda] &&
-          // DeepCache and T-GATE work on the whole U-Net batch (their state is per thread, so they stay off the parallel-count path only).
-          NativeParallelCount.plainTxt2img(request,keywordInert,Set("deepcache","cfg_schedule","sada","tgate")) && !img2img && source.isEmpty && hires.isEmpty && hiresFix.isEmpty &&
+          // DeepCache, T-GATE, CFG-Cache and PostDiff work on the whole U-Net batch (state is per thread, so they stay off parallel-count only).
+          NativeParallelCount.plainTxt2img(request,keywordInert,Set("deepcache","cfg_schedule","sada","tgate","cfg_cache","postdiff")) && !img2img && source.isEmpty && hires.isEmpty && hiresFix.isEmpty &&
           keywordPlan.forall(_.prompts.forall(_==imageRequest.prompt)) && requestedLoras.isEmpty && manualLoras.isEmpty && controlNet.isEmpty &&
           intermediateSession.isEmpty && variationStrength==0 && freeU.isEmpty && temperatureGuard.isEmpty &&
           hardware.isEmpty && !altActive && sonarHook.isEmpty && adetailerUnits.isEmpty && EulerImagePipeline.batchable(imageRequest)
         if batchSize>1 && !batchedGroups && sys.env.get("SCALATORCH_BATCHED_SAMPLING_LOG").contains("1") then
           System.err.println("[scala-torch] batched sampling not used: "+Seq(
             "switch"->CudaUNet.batchedSampling,"cuda"->generationPipeline.unetExecution.isInstanceOf[UNetExecution.Cuda],
-            "plain"->NativeParallelCount.plainTxt2img(request,keywordInert,Set("deepcache","cfg_schedule","sada","tgate")),"txt2img"->(!img2img && source.isEmpty),
+            "plain"->NativeParallelCount.plainTxt2img(request,keywordInert,Set("deepcache","cfg_schedule","sada","tgate","cfg_cache","postdiff")),"txt2img"->(!img2img && source.isEmpty),
             "noHires"->(hires.isEmpty && hiresFix.isEmpty),"samePrompt"->keywordPlan.forall(_.prompts.forall(_==imageRequest.prompt)),
             "noLora"->(requestedLoras.isEmpty && manualLoras.isEmpty),"noControlNet"->controlNet.isEmpty,
             "noRecorder"->intermediateSession.isEmpty,"noVariation"->(variationStrength==0),"noFreeU"->freeU.isEmpty,

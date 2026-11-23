@@ -194,19 +194,27 @@ object UNetExecution:
               Sag.applyGuidance(withPag,positive.data,degOut,sagCfg.scale)
             }
           VaeExecution.checkCancelled(cancelled)
+          val canCfgCacheCpu=effUncond.isDefined && guidance>1f && segUncond.isEmpty && refStep.isEmpty && chgShifted.isEmpty && neutralPlan.isEmpty
           addPagAndSag(effUncond.fold(positive.data) { context =>
-            val (negativeSampleBase,negativeTime)=input(false)
-            val negativeSample=chgShifted.fold(negativeSampleBase)(_._1)
-            val negativeWithRef=Incantations.withSeg(segUncond) {
-              refStep.foreach(_._1.resetLayerCounter(ReferenceOnly.Mode.ReadUncond))
-              ReferenceOnly.withBank(refStep.map(_._1)) {
-                NegPip.withSigns(negativeSigns)(evalCpuModel(negativeSample,negativeTime,context,baseNegAdded,negativeControls))
+            val cfgCacheOpt=if canCfgCacheCpu then CfgCache.current else None
+            val reuseCfgCpu=cfgCacheOpt.exists(st => st.shouldReuse(st.currentStep,sample.shape))
+            val negative=if reuseCfgCpu then
+              Variable(cfgCacheOpt.get.applyCached(cfgCacheOpt.get.currentStep,positive.data),requiresGrad=false)
+            else
+              val (negativeSampleBase,negativeTime)=input(false)
+              val negativeSample=chgShifted.fold(negativeSampleBase)(_._1)
+              val negativeWithRef=Incantations.withSeg(segUncond) {
+                refStep.foreach(_._1.resetLayerCounter(ReferenceOnly.Mode.ReadUncond))
+                ReferenceOnly.withBank(refStep.map(_._1)) {
+                  NegPip.withSigns(negativeSigns)(evalCpuModel(negativeSample,negativeTime,context,baseNegAdded,negativeControls))
+                }
               }
-            }
-            val negative=refStep.filter(_._1.config.styleFidelity>0.0).fold(negativeWithRef) { case (bank,_) =>
-              val plainNeg=Incantations.withSeg(segUncond)(NegPip.withSigns(negativeSigns)(evalCpuModel(negativeSample,negativeTime,context,baseNegAdded,negativeControls)))
-              Variable(ReferenceOnly.blendUncond(negativeWithRef.data,plainNeg.data,bank.config.styleFidelity),requiresGrad=false)
-            }
+              val computedNeg=refStep.filter(_._1.config.styleFidelity>0.0).fold(negativeWithRef) { case (bank,_) =>
+                val plainNeg=Incantations.withSeg(segUncond)(NegPip.withSigns(negativeSigns)(evalCpuModel(negativeSample,negativeTime,context,baseNegAdded,negativeControls)))
+                Variable(ReferenceOnly.blendUncond(negativeWithRef.data,plainNeg.data,bank.config.styleFidelity),requiresGrad=false)
+              }
+              cfgCacheOpt.foreach(st => st.record(st.currentStep,computedNeg.data,positive.data))
+              computedNeg
             VaeExecution.checkCancelled(cancelled)
             val synthPositive=neutralPlan.fold(positive) { np =>
               val negArr=negative.data.toFloatArray
@@ -257,20 +265,22 @@ object UNetExecution:
           val negativeContext=unconditional.map(x => use(session.upload(x)))
           val positiveAddition=positiveFeatures.map(x => use(session.upload(x)))
           val negativeAddition=negativeFeatures.map(x => use(session.upload(x)))
-          // [negative x N; positive x N] (positive x N without guidance) for batched sampling, built once per denoising loop.
-          var repeated: Option[(Int,Boolean,scalatorch.ffm.CudaTensor,Option[scalatorch.ffm.CudaTensor])]=None
+          // Keep separate [negative x N; positive x N] and [positive x N] caches so CFG-Cache does not thrash K/V context buffers.
+          var repeatedPair: Option[(Int,scalatorch.ffm.CudaTensor,Option[scalatorch.ffm.CudaTensor])]=None
+          var repeatedPos: Option[(Int,scalatorch.ffm.CudaTensor,Option[scalatorch.ffm.CudaTensor])]=None
           def repeatedConditioning(count: Int,pair: Boolean): (scalatorch.ffm.CudaTensor,Option[scalatorch.ffm.CudaTensor]) =
-            repeated match
-              case Some((n,p,context,addition)) if n==count && p==pair => (context,addition)
+            val cached=if pair then repeatedPair else repeatedPos
+            cached match
+              case Some((n,context,addition)) if n==count => (context,addition)
               case _ =>
                 // The manager also owns these handles; CudaTensor.close is idempotent.
-                repeated.foreach { case (_,_,context,addition) => context.close();addition.foreach(_.close()) }
-                repeated=None
+                cached.foreach { case (_,context,addition) => context.close();addition.foreach(_.close()) }
                 def tile(negative: Option[scalatorch.ffm.CudaTensor],positive: scalatorch.ffm.CudaTensor): scalatorch.ffm.CudaTensor =
                   use(session.cat((if pair then Seq.fill(count)(negative.get) else Seq.empty)++Seq.fill(count)(positive),0))
                 val context=tile(negativeContext,positiveContext)
                 val addition=positiveAddition.map(p => tile(negativeAddition,p))
-                repeated=Some((count,pair,context,addition))
+                val entry=(count,context,addition)
+                if pair then repeatedPair=Some(entry) else repeatedPos=Some(entry)
                 (context,addition)
           body(new UNetPredictor:
             def apply(sample: Tensor[Float],timesteps: Tensor[Float],guidance: Float,
@@ -296,7 +306,9 @@ object UNetExecution:
                 // A CFG schedule gives the guidance of this step. At exactly 1 the result is the positive prediction, so the
                 // negative pass is not needed at all (guidance limited to a part of the steps costs half on the other steps).
                 val effective=scheduled.getOrElse(guidance)
-                val positiveOnly=negativeContext.isDefined && guidance>1f && effective==1f
+                val cfgCacheActive=CfgCache.current.filter(_ => negativeContext.isDefined && guidance>1f && effective!=1f)
+                val reuseCfg=cfgCacheActive.exists(st => st.shouldReuse(st.currentStep,sample.shape))
+                val positiveOnly=negativeContext.isDefined && guidance>1f && (effective==1f || reuseCfg)
                 val pair=negativeContext.isDefined && guidance>1f && !positiveOnly
                 val plain=sample.shape.rank==4 && controls.isEmpty &&
                   detail.isEmpty && cads.isEmpty && refStep.isEmpty && chgState.isEmpty && multiDiffusion.isEmpty && pag.isEmpty && sagStep.isEmpty &&
@@ -327,16 +339,32 @@ object UNetExecution:
                         tg.withCfgPair(pair)(unet.applyPrepared(stacked,timesteps,context,addition,None))))
                       VaeExecution.checkCancelled(cancelled)
                       val both=output.toCpu
-                      if !pair then Some(both)
+                      if reuseCfg then
+                        val st=cfgCacheActive.get
+                        val negApprox=st.applyCached(st.currentStep,both)
+                        val nVals=negApprox.toFloatArray
+                        val pVals=both.toFloatArray
+                        val guided=Array.tabulate(pVals.length) { i =>
+                          val n=nVals(i);val p=pVals(i)
+                          n+(p+(-n))*effective
+                        }
+                        Some(Tensor.fromFloats(guided,both.shape))
+                      else if !pair then Some(both)
                       else
                         val values=both.toFloatArray
                         val half=values.length/2
+                        val singleShape=Shape.from(Seq(count.toLong)++both.shape.dims.drop(1))
+                        cfgCacheActive.foreach { st =>
+                          val negT=Tensor.fromFloats(java.util.Arrays.copyOfRange(values,0,half),singleShape)
+                          val posT=Tensor.fromFloats(java.util.Arrays.copyOfRange(values,half,values.length),singleShape)
+                          st.record(st.currentStep,negT,posT)
+                        }
                         // same operation order as the two-pass path: negative+(positive+(-negative))*guidance
                         val guided=Array.tabulate(half) { i =>
                           val n=values(i);val p=values(half+i)
                           n+(p+(-n))*effective
                         }
-                        Some(Tensor.fromFloats(guided,Shape.from(Seq(count.toLong)++both.shape.dims.drop(1))))
+                        Some(Tensor.fromFloats(guided,singleShape))
                     }.get
                   catch
                     // A single image falls back to two passes; a batch goes back to the caller, which samples the images one by one.
@@ -476,58 +504,81 @@ object UNetExecution:
                   sagOutOpt.fold(withPag) { case (posCpuForSag,degOut,sagScale) =>
                     Sag.applyGuidance(withPag,posCpuForSag,degOut,sagScale)
                   }
-                val positiveCpu=if (rescale!=0 || scheduled.nonEmpty || dynamicThresholding.nonEmpty || guidanceHook.nonEmpty || neutralPlan.nonEmpty) && effNegCtx.nonEmpty then Some(positive.toCpu) else None
+                val cfgCacheGeneralOpt=if effNegCtx.isDefined && guidance>1f && segUncond.isEmpty && refStep.isEmpty && chgShifted.isEmpty && neutralPlan.isEmpty then CfgCache.current else None
+                val reuseCfgGeneral=cfgCacheGeneralOpt.exists(st => st.shouldReuse(st.currentStep,sample.shape))
+                val positiveCpu=if (rescale!=0 || scheduled.nonEmpty || dynamicThresholding.nonEmpty || guidanceHook.nonEmpty || neutralPlan.nonEmpty || cfgCacheGeneralOpt.isDefined) && effNegCtx.nonEmpty then Some(positive.toCpu) else None
                 var scheduledResult: Option[Tensor[Float]]=None
                 VaeExecution.checkCancelled(cancelled)
                 val predicted=effNegCtx.fold(positive) { context =>
-                  val negativeControl=residuals(context,false,baseNegAddition)
-                  val (negativeInputBase,negativeTime)=adjusted(false)
-                  val negativeInput=chgShifted.fold(negativeInputBase)(s => temporary(session.upload(s._1)))
-                  val negativeWithRef=Incantations.withSeg(segUncond) {
-                    refStep.foreach(_._1.resetLayerCounter(ReferenceOnly.Mode.ReadUncond))
-                    ReferenceOnly.withBank(refStep.map(_._1)) {
-                      NegPip.withSigns(negativeSigns)(evalCudaModel(negativeInput,negativeTime,context,baseNegAddition,negativeControl))
-                    }
-                  }
-                  val negative=refStep.filter(_._1.config.styleFidelity>0.0).fold(negativeWithRef) { case (bank,_) =>
-                    val plainNeg=Incantations.withSeg(segUncond)(NegPip.withSigns(negativeSigns)(evalCudaModel(negativeInput,negativeTime,context,baseNegAddition,negativeControl)))
-                    temporary(session.upload(ReferenceOnly.blendUncond(negativeWithRef.toCpu,plainNeg.toCpu,bank.config.styleFidelity)))
-                  }
-                  VaeExecution.checkCancelled(cancelled)
-                  if scheduled.nonEmpty || dynamicThresholding.nonEmpty || guidanceHook.nonEmpty || neutralPlan.nonEmpty then
-                    val negCpu=negative.toCpu
-                    val synthPosCpu=neutralPlan.fold(positiveCpu.get) { np =>
-                      val negArr=negCpu.toFloatArray
-                      val deltas=np.branches.zipWithIndex.map { case (br,bIdx) =>
-                        val bOut=if bIdx==0 then positiveCpu.get
-                        else
-                          val bCtx=temporary(session.upload(br.cond))
-                          val bAdd=br.posAdded.fold(basePosAddition)(pa => model.addedFeatures(br.cond.shape.dims.head,Some(pa)).map(x => temporary(session.upload(x))))
-                          NegPip.withSigns(br.posSigns)(evalCudaModel(positiveInput,positiveTime,bCtx,bAdd,positiveControl)).toCpu
-                        val bArr=bOut.toFloatArray
-                        Tensor.fromFloats(Array.tabulate(bArr.length)(idx => bArr(idx)-negArr(idx)),bOut.shape)
-                      }
-                      val comb=NeutralPrompt.combineDeltas(np.tree,deltas).toFloatArray
-                      Tensor.fromFloats(Array.tabulate(comb.length)(idx => negArr(idx)+comb(idx)),negCpu.shape)
-                    }
-                    val ghPos=guidanceHook.filter(_=>guidance>1f).fold(synthPosCpu)(gh =>
-                      gh.rewriteConditional(sample,negCpu,synthPosCpu,timesteps.toFloatArray(0),guidance,prediction))
+                  if reuseCfgGeneral then
+                    val st=cfgCacheGeneralOpt.get
+                    val posCpu=positiveCpu.get
+                    positive.close()
+                    val negCpu=st.applyCached(st.currentStep,posCpu)
+                    val ghPos=guidanceHook.filter(_=>guidance>1f).fold(posCpu)(gh =>
+                      gh.rewriteConditional(sample,negCpu,posCpu,timesteps.toFloatArray(0),guidance,prediction))
                     val effPos=dynamicThresholding.filter(_=>guidance>1f).fold(ghPos)(dt =>
                       dt.rewriteConditional(sample,negCpu,ghPos,timesteps.toFloatArray(0),guidance,prediction))
                     val gOut=Autograd.noGrad { guided(Variable(negCpu),Variable(effPos),guidance,rescale,scheduled) }
-                    scheduledResult=Some(neutralPlan.filter(_.phi>0.0).fold(gOut)(np => NeutralPrompt.rescale(gOut,synthPosCpu,np.phi)))
-                  // Preserve CPU subtraction and CFG operation ordering and rounding.
-                  val negated=temporary(session.scale(negative,-1f))
-                  val difference=temporary(session.add(positive,negated));negated.close();positive.close()
-                  val scaled=temporary(session.scale(difference,guidance));difference.close()
-                  val result=temporary(session.add(negative,scaled));negative.close();scaled.close()
-                  result
+                    scheduledResult=Some(gOut)
+                    positive
+                  else
+                    val negativeControl=residuals(context,false,baseNegAddition)
+                    val (negativeInputBase,negativeTime)=adjusted(false)
+                    val negativeInput=chgShifted.fold(negativeInputBase)(s => temporary(session.upload(s._1)))
+                    val negativeWithRef=Incantations.withSeg(segUncond) {
+                      refStep.foreach(_._1.resetLayerCounter(ReferenceOnly.Mode.ReadUncond))
+                      ReferenceOnly.withBank(refStep.map(_._1)) {
+                        NegPip.withSigns(negativeSigns)(evalCudaModel(negativeInput,negativeTime,context,baseNegAddition,negativeControl))
+                      }
+                    }
+                    val negative=refStep.filter(_._1.config.styleFidelity>0.0).fold(negativeWithRef) { case (bank,_) =>
+                      val plainNeg=Incantations.withSeg(segUncond)(NegPip.withSigns(negativeSigns)(evalCudaModel(negativeInput,negativeTime,context,baseNegAddition,negativeControl)))
+                      temporary(session.upload(ReferenceOnly.blendUncond(negativeWithRef.toCpu,plainNeg.toCpu,bank.config.styleFidelity)))
+                    }
+                    VaeExecution.checkCancelled(cancelled)
+                    if scheduled.nonEmpty || dynamicThresholding.nonEmpty || guidanceHook.nonEmpty || neutralPlan.nonEmpty then
+                      val negCpu=negative.toCpu
+                      cfgCacheGeneralOpt.foreach(st => st.record(st.currentStep,negCpu,positiveCpu.get))
+                      val synthPosCpu=neutralPlan.fold(positiveCpu.get) { np =>
+                        val negArr=negCpu.toFloatArray
+                        val deltas=np.branches.zipWithIndex.map { case (br,bIdx) =>
+                          val bOut=if bIdx==0 then positiveCpu.get
+                          else
+                            val bCtx=temporary(session.upload(br.cond))
+                            val bAdd=br.posAdded.fold(basePosAddition)(pa => model.addedFeatures(br.cond.shape.dims.head,Some(pa)).map(x => temporary(session.upload(x))))
+                            NegPip.withSigns(br.posSigns)(evalCudaModel(positiveInput,positiveTime,bCtx,bAdd,positiveControl)).toCpu
+                          val bArr=bOut.toFloatArray
+                          Tensor.fromFloats(Array.tabulate(bArr.length)(idx => bArr(idx)-negArr(idx)),bOut.shape)
+                        }
+                        val comb=NeutralPrompt.combineDeltas(np.tree,deltas).toFloatArray
+                        Tensor.fromFloats(Array.tabulate(comb.length)(idx => negArr(idx)+comb(idx)),negCpu.shape)
+                      }
+                      val ghPos=guidanceHook.filter(_=>guidance>1f).fold(synthPosCpu)(gh =>
+                        gh.rewriteConditional(sample,negCpu,synthPosCpu,timesteps.toFloatArray(0),guidance,prediction))
+                      val effPos=dynamicThresholding.filter(_=>guidance>1f).fold(ghPos)(dt =>
+                        dt.rewriteConditional(sample,negCpu,ghPos,timesteps.toFloatArray(0),guidance,prediction))
+                      val gOut=Autograd.noGrad { guided(Variable(negCpu),Variable(effPos),guidance,rescale,scheduled) }
+                      scheduledResult=Some(neutralPlan.filter(_.phi>0.0).fold(gOut)(np => NeutralPrompt.rescale(gOut,synthPosCpu,np.phi)))
+                    else
+                      cfgCacheGeneralOpt.foreach(st => st.record(st.currentStep,negative.toCpu,positiveCpu.get))
+                    // Preserve CPU subtraction and CFG operation ordering and rounding.
+                    val negated=temporary(session.scale(negative,-1f))
+                    val difference=temporary(session.add(positive,negated));negated.close();positive.close()
+                    val scaled=temporary(session.scale(difference,guidance));difference.close()
+                    val result=temporary(session.add(negative,scaled));negative.close();scaled.close()
+                    result
                 }
                 input.close()
                 VaeExecution.checkCancelled(cancelled)
-                val result=predicted.toCpu
-                VaeExecution.checkCancelled(cancelled)
-                addPagAndSag(scheduledResult.getOrElse(positiveCpu.fold(result)(positive=>GuidanceRescale(result,positive,rescale))))
+                scheduledResult match
+                  case Some(cpuOut) =>
+                    if effNegCtx.nonEmpty && !reuseCfgGeneral then predicted.close()
+                    addPagAndSag(cpuOut)
+                  case None =>
+                    val result=predicted.toCpu
+                    VaeExecution.checkCancelled(cancelled)
+                    addPagAndSag(positiveCpu.filter(_ => effNegCtx.nonEmpty && rescale!=0f).fold(result)(positive=>GuidanceRescale(result,positive,rescale)))
               }.get } })
           )
         }.get
