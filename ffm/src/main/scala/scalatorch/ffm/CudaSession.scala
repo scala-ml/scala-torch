@@ -182,6 +182,8 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       "h_attention_fused_r1c4","h_attention_fused_r2c4","h_attention_fused_r4c4",
       "h_attention_fused_r1c5","h_attention_fused_r2c5",
       "h_fa2_w4r1c3","h_fa2_w4r1c4","h_fa2_w4r1c5","h_fa2_w4r2c3","h_fa2_w4r2c4",
+      "h_sage_k_mean","h_sage_quant_k","h_sage_w4r1c3","h_sage_w4r1c4","h_sage_w4r1c5","h_sage_w4r2c4",
+      "h_quantize_rows_i8","h_dequant_i32_bias_res","h_dequant_i32_geglu_bias",
       "h_downsample_tokens_exact","h_taylor_diff","h_taylor_forecast1","h_taylor_forecast2","h_tgate_avg_half","h_tgate_add_broadcast",
       "h_wmma_layout","h_softmax","h_gelu_erf","h_quick_gelu","h_softmax_causal").map { name =>
     name -> driver.pointerResult("cuModuleGetFunction",Seq(ADDRESS,ADDRESS),halfModule,driver.arena.allocateFrom(name))
@@ -219,10 +221,10 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   def allocatedBytes: Long = { check();used }
   def shape(value: CudaTensor): Shape = { validate(value);value.shape }
 
-  private def allocate(shape: Shape,half: Boolean=false): CudaTensor =
+  private def allocateRaw(shape: Shape,byteSize: Long,half: Boolean=false): CudaTensor =
     check()
     require(shape.numel <= Int.MaxValue,"CUDA tensor exceeds Int indexing")
-    val bytes=math.max(shape.numel*(if half then 2L else 4L),1L)
+    val bytes=math.max(byteSize,1L)
     while bytes>maxBytes-used && pressure(bytes-(maxBytes-used)) do ()
     require(bytes <= maxBytes-used,"CUDA session allocation budget exceeded")
     val from=if sharedAllocation then { weightArenaUsed=true;weightArena } else arena
@@ -232,6 +234,9 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     if used>peakUsed then peakUsed=used
     if arena.ownedBytes>peakOwned then peakOwned=arena.ownedBytes
     tensor
+
+  private def allocate(shape: Shape,half: Boolean=false): CudaTensor =
+    allocateRaw(shape,shape.numel*(if half then 2L else 4L),half)
 
   def reshape(value: CudaTensor,shape: Shape): CudaTensor =
     validate(value)
@@ -762,10 +767,45 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
   private def selectFusedAttention(qt: Int,kt: Int,d: Int): (String,Int,Int) =
     val chunks=(d+15)/16
     if CudaSession.flashAttention2 && chunks>=4 && (qt>=256 || kt>=256) then
-      if qt%128==0 && chunks==4 && qt>=2048 && kt>=1024 then return (s"h_fa2_w4r2c$chunks",128,128)
-      if qt%64==0 && (chunks>=5 || kt<=512) then return (s"h_fa2_w4r1c$chunks",128,64)
+      if qt%128==0 && chunks==4 && qt>=1024 && kt>=1024 then return (s"h_fa2_w4r2c$chunks",128,128)
+      if qt%64==0 && (chunks>=5 || kt<=512 || (qt>=512 && kt>=512)) then return (s"h_fa2_w4r1c$chunks",128,64)
     val tiles=Seq(4,2,1).find(t => t<=CudaSession.fusedHalfAttentionTiles && qt%(16*t)==0 && (t<4 || chunks<=4)).get
     (s"h_attention_fused_r${tiles}c$chunks",32,16*tiles)
+
+  private def canAttendSage(qt: Int,kt: Int,d: Int,dv: Int): Boolean =
+    val chunks=(d+15)/16
+    CudaSession.sageAttention && wmmaStandardLayout && chunks>=3 && chunks<=5 && dv==d && d%8==0 &&
+      qt>=2048 && kt>=2048 && ((qt%128==0 && chunks==4) || qt%64==0)
+
+  /** SageAttention (channel-smoothed INT8 QK^T + FP16-accum PV) + SpargeAttn warp-level online PV-skip. */
+  private[ffm] def attentionSage(q: CudaTensor,k: CudaTensor,v: CudaTensor,out: CudaTensor,
+      heads: Int,qt: Int,kt: Int,d: Int,dv: Int,hParam: Int,strideIn: Int,strideOut: Int,
+      skipDelta: Float=CudaSession.attentionSparseDelta): Unit =
+    val chunks=(d+15)/16
+    val dPad=chunks*16
+    val sTiles=(kt+15)/16
+    val sPad=sTiles*16
+    val (kernelName,qPerBlock)=
+      if qt%128==0 && chunks==4 && qt>=512 then ("h_sage_w4r2c4",128)
+      else (s"h_sage_w4r1c$chunks",64)
+    val groupsPerHead=qt/qPerBlock
+    Using.Manager { use =>
+      val kMean=use(allocateRaw(Shape.from(Seq(heads.toLong,d.toLong)),heads.toLong*d*4L))
+      val kI8=use(allocateRaw(Shape.from(Seq(heads.toLong,sPad.toLong,dPad.toLong)),heads.toLong*sPad*dPad))
+      val kScale=use(allocateRaw(Shape.from(Seq(heads.toLong,sTiles.toLong)),heads.toLong*sTiles*4L))
+      launchGridFast(heads,1,1,256,1,1,0,halfKernels("h_sage_k_mean"),"h_sage_k_mean") { b =>
+        b.ptr(k.address).ptr(kMean.address).i32(heads).i32(kt).i32(d).i32(hParam).i32(strideIn)
+      }
+      launchGridFast(sTiles,heads,1,128,1,1,0,halfKernels("h_sage_quant_k"),"h_sage_quant_k") { b =>
+        b.ptr(k.address).ptr(kMean.address).ptr(kI8.address).ptr(kScale.address)
+          .i32(heads).i32(kt).i32(sPad).i32(d).i32(dPad).i32(hParam).i32(strideIn)
+      }
+      launchGridFast(heads*groupsPerHead,1,1,128,1,1,0,halfKernels(kernelName),kernelName) { b =>
+        b.ptr(q.address).ptr(kI8.address).ptr(kScale.address).ptr(v.address).ptr(out.address)
+          .i32(heads).i32(qt).i32(kt).i32(sPad).i32(d).i32(dv)
+          .f32((1.0/math.sqrt(d.toDouble)).toFloat).f32(skipDelta).i32(hParam).i32(strideIn).i32(strideOut)
+      }
+    }.get
 
   /** Non-causal attention over [batch, heads, tokens, width] Float16 tensors via cuBLAS and a block softmax. */
   private def attentionHalf(query: CudaTensor,key: CudaTensor,value: CudaTensor,output: Shape,causal: Boolean,queryStart: Int): CudaTensor =
@@ -776,8 +816,11 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     val batch=(q(0)*q(1)).toInt;val qt=q(2).toInt;val kt=k(2).toInt;val d=q(3).toInt;val dv=v(3).toInt
     val result=allocate(output,half=true)
     try
-      // Tensor-core kernel that keeps the scores in shared memory (see h_attention_fused / h_fa2): no score matrix in device memory.
+      // Tensor-core kernel that keeps the scores in shared memory (see h_attention_fused / h_fa2 / h_sage): no score matrix in device memory.
       val fusedChunks=(d+15)/16
+      if !causal && CudaSession.fusedHalfAttention && canAttendSage(qt,kt,d,dv) then
+        attentionSage(query,key,value,result,batch,qt,kt,d,dv,0,0,0)
+        return result
       if !causal && CudaSession.fusedHalfAttention && wmmaStandardLayout && qt%16==0 && (kt%16==0 || CudaSession.fusedHalfAttentionAnyKeys) && qt>=16 &&
           kt>=CudaSession.fusedHalfAttentionMinKeys && d>=33 && d<=80 && (dv+15)/16==fusedChunks && d%8==0 && dv%8==0 then // fragment loads need 16-byte aligned rows
         val (kernelName,threads,qPerBlock)=selectFusedAttention(qt,kt,d)
@@ -1027,15 +1070,18 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
       heads>0 && q(2)%heads==0,"tokens-major attention shape mismatch")
     val width=(q(2)/heads).toInt;val qt=q(1).toInt;val kt=k(1).toInt
     require(canAttendTokensMajor(qt,kt,width),"shape not supported by the fused attention kernels")
-    val (kernelName,threads,qPerBlock)=selectFusedAttention(qt,kt,width)
     val all=(q(0)*heads).toInt
     val result=allocate(query.shape,half=true)
     try
-      launchFast(all.toLong*(qt/qPerBlock),halfKernels(kernelName),threads,threads,kernelName) { b =>
-        b.ptr(query.address).ptr(key.address).ptr(value.address).ptr(result.address)
-          .i32(all).i32(qt).i32(kt).i32(width).i32(width)
-          .f32((1.0/math.sqrt(width.toDouble)).toFloat).i32(heads).i32(0).i32(0)
-      }
+      if canAttendSage(qt,kt,width,width) then
+        attentionSage(query,key,value,result,all,qt,kt,width,width,heads,0,0)
+      else
+        val (kernelName,threads,qPerBlock)=selectFusedAttention(qt,kt,width)
+        launchFast(all.toLong*(qt/qPerBlock),halfKernels(kernelName),threads,threads,kernelName) { b =>
+          b.ptr(query.address).ptr(key.address).ptr(value.address).ptr(result.address)
+            .i32(all).i32(qt).i32(kt).i32(width).i32(width)
+            .f32((1.0/math.sqrt(width.toDouble)).toFloat).i32(heads).i32(0).i32(0)
+        }
       result
     catch case error: Throwable =>
       try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
@@ -1051,10 +1097,11 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     require(dims.size==3 && heads>0 && dims(2)%(3L*heads)==0,"packed attention shape mismatch")
     val inner=(dims(2)/3).toInt;val width=inner/heads;val tokens=dims(1).toInt
     require(canAttendTokensMajor(tokens,tokens,width),"shape not supported by the fused attention kernels")
-    val (kernelName,threads,qPerBlock)=selectFusedAttention(tokens,tokens,width)
     val all=(dims(0)*heads).toInt
     val result=allocate(Shape.from(Seq(dims(0),dims(1),inner.toLong)),half=true)
     try
+      // Packed layout uses a single QKV tensor view across pointers; sage path uses strideIn=3*inner cleanly too.
+      val (kernelName,threads,qPerBlock)=selectFusedAttention(tokens,tokens,width)
       launchFast(all.toLong*(tokens/qPerBlock),halfKernels(kernelName),threads,threads,kernelName) { b =>
         b.ptr(packed.address).ptr(packed.address+inner*2L).ptr(packed.address+inner*4L).ptr(result.address)
           .i32(all).i32(tokens).i32(tokens).i32(width).i32(width)
@@ -1064,6 +1111,85 @@ final class CudaSession private[ffm] (driver: CudaDriver, val deviceIndex: Int,
     catch case error: Throwable =>
       try result.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
       throw error
+
+  /** Per-row symmetric INT8 quantization of a 2D Float16 tensor: returns `(qInt8, rowScalesF32)`. */
+  def quantizeRowsInt8(x: CudaTensor): (CudaTensor,CudaTensor) =
+    validate(x)
+    require(x.half && x.shape.rank==2,"INT8 row quantization requires a 2D Float16 tensor")
+    val rows=x.shape.dims(0).toInt;val cols=x.shape.dims(1).toInt
+    require(rows>0 && cols>0,"empty tensor for INT8 quantization")
+    val q=allocateRaw(x.shape,x.shape.numel)
+    val scales=allocateRaw(Shape.from(Seq(rows.toLong)),rows.toLong*4L)
+    try
+      launchGridFast(rows,1,1,256,1,1,0,halfKernels("h_quantize_rows_i8"),"h_quantize_rows_i8") { b =>
+        b.ptr(x.address).ptr(q.address).ptr(scales.address).i32(rows).i32(cols)
+      }
+      (q,scales)
+    catch case error: Throwable =>
+      try q.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      try scales.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+      throw error
+
+  /** Dynamic W8A8 Linear: `(x[m,k] -> INT8) * wq[n,k]^T (INT8) * scaleX * scaleW + bias + residual`. */
+  def linearInt8(x: CudaTensor,wq: CudaTensor,scaleW: CudaTensor,bias: Option[CudaTensor]=None,residual: Option[CudaTensor]=None): CudaTensor =
+    validate(x);validate(wq);validate(scaleW);bias.foreach(validate);residual.foreach(validate)
+    require(cublas.isDefined && x.half && x.shape.rank==2 && wq.shape.rank==2 && x.shape.dims(1)==wq.shape.dims(1),"W8A8 linear shape mismatch")
+    val m=x.shape.dims(0).toInt;val k=x.shape.dims(1).toInt;val n=wq.shape.dims(0).toInt
+    require(m>0 && n>0 && k>0 && n%4==0 && k%4==0,"W8A8 GEMM requires dimensions divisible by 4")
+    Using.Manager { use =>
+      val (xq,scaleX)=quantizeRowsInt8(x)
+      use(xq);use(scaleX)
+      val acc=use(allocateRaw(Shape.from(Seq(m.toLong,n.toLong)),m.toLong*n*4L))
+      val started=if profileEnabled then System.nanoTime() else 0L
+      val t0=if launchStats then System.nanoTime() else 0L
+      cublas.get.gemmInt8RowMajorBT(m,n,k,xq.address,wq.address,acc.address)
+      if launchStats then { libraryNanos+=System.nanoTime()-t0;libraryCalls+=1 }
+      if profileEnabled then
+        driver.synchronize(stream)
+        record(s"int8_gemm_bt[$m,$n,$k]",started)
+      val out=allocate(Shape.from(Seq(m.toLong,n.toLong)),half=true)
+      try
+        launchFast(vec2(m.toLong*n),halfKernels("h_dequant_i32_bias_res"),256,1,"h_dequant_i32_bias_res") { b =>
+          b.ptr(acc.address).ptr(scaleX.address).ptr(scaleW.address)
+            .ptr(bias.fold(0L)(_.address)).ptr(residual.fold(0L)(_.address)).ptr(out.address)
+            .i32(m*n).i32(n)
+        }
+        out
+      catch case error: Throwable =>
+        try out.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+        throw error
+    }.get
+
+  /** Dynamic W8A8 FFN projection + bias + GEGLU: `x[m,k] * wq[2*w,k]^T -> out[m,w]`. */
+  def linearInt8Geglu(x: CudaTensor,wq: CudaTensor,scaleW: CudaTensor,bias: Option[CudaTensor]=None): CudaTensor =
+    validate(x);validate(wq);validate(scaleW);bias.foreach(validate)
+    require(cublas.isDefined && x.half && x.shape.rank==2 && wq.shape.rank==2 && x.shape.dims(1)==wq.shape.dims(1),"W8A8 GEGLU shape mismatch")
+    val m=x.shape.dims(0).toInt;val k=x.shape.dims(1).toInt;val n=wq.shape.dims(0).toInt
+    require(m>0 && n>0 && k>0 && n%4==0 && k%4==0,"W8A8 GEGLU requires dimensions divisible by 4")
+    val width=n/2
+    Using.Manager { use =>
+      val (xq,scaleX)=quantizeRowsInt8(x)
+      use(xq);use(scaleX)
+      val acc=use(allocateRaw(Shape.from(Seq(m.toLong,n.toLong)),m.toLong*n*4L))
+      val started=if profileEnabled then System.nanoTime() else 0L
+      val t0=if launchStats then System.nanoTime() else 0L
+      cublas.get.gemmInt8RowMajorBT(m,n,k,xq.address,wq.address,acc.address)
+      if launchStats then { libraryNanos+=System.nanoTime()-t0;libraryCalls+=1 }
+      if profileEnabled then
+        driver.synchronize(stream)
+        record(s"int8_gemm_bt[$m,$n,$k]",started)
+      val out=allocate(Shape.from(Seq(m.toLong,width.toLong)),half=true)
+      try
+        launchFast(m.toLong*width,halfKernels("h_dequant_i32_geglu_bias"),256,1,"h_dequant_i32_geglu_bias") { b =>
+          b.ptr(acc.address).ptr(scaleX.address).ptr(scaleW.address)
+            .ptr(bias.fold(0L)(_.address)).ptr(out.address)
+            .i32(m*width).i32(width)
+        }
+        out
+      catch case error: Throwable =>
+        try out.close() catch case cleanup: Throwable => error.addSuppressed(cleanup)
+        throw error
+    }.get
 
   /** True when the fragments of this device have the element positions h_attention_fused is written for: accumulator and matrix_a
     * alike, lane L (g = L / 4, t = L % 4) holding row g in slots 0, 1, 4, 5 and row g + 8 in slots 2, 3, 6, 7, columns
@@ -1832,6 +1958,13 @@ object CudaSession:
   private[ffm] val mergedConvolution: Boolean = !sys.env.get("SCALATORCH_CUDA_MERGED_CONV").contains("0")
   /** FlashAttention-2 multi-warp Q-split shared-memory K/V attention (`SCALATORCH_CUDA_FA2=0` keeps single-warp fused kernels). */
   private[ffm] val flashAttention2: Boolean = !sys.env.get("SCALATORCH_CUDA_FA2").contains("0")
+  /** SageAttention (channel-smoothed INT8 QK^T + FP16-accum PV + SpargeAttn warp skip; `SCALATORCH_CUDA_SAGE_ATTN=0` disables). */
+  private[scalatorch] val sageAttention: Boolean = !sys.env.get("SCALATORCH_CUDA_SAGE_ATTN").contains("0")
+  /** SpargeAttn warp-level online log2 threshold (`SCALATORCH_CUDA_ATTN_SPARSE_DELTA`, 0 disables skipping). */
+  private[scalatorch] val attentionSparseDelta: Float =
+    sys.env.get("SCALATORCH_CUDA_ATTN_SPARSE_DELTA").flatMap(_.trim.toFloatOption).getOrElse(11.0f)
+  /** Dynamic W8A8 INT8 FFN linear projections (`SCALATORCH_CUDA_W8A8=0` keeps FP16 cuBLAS). */
+  private[scalatorch] val w8a8Linear: Boolean = !sys.env.get("SCALATORCH_CUDA_W8A8").contains("0")
   /** Float16 self-attention through the fused tensor-core kernels (h_attention_fused_*): no score matrix in device memory.
     * RTX 3090: [16,4096,40] 3.08 -> 1.09 ms, [64,4096,40] 12.4 -> 3.95 ms, [20,4096,64] 3.86 -> 1.83 ms against the cuBLAS path.
     * Used when the fragment layout of the device is the expected one; `SCALATORCH_CUDA_FUSED_ATTENTION_HALF=0` keeps cuBLAS. */

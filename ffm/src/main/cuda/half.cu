@@ -978,6 +978,225 @@ __device__ __forceinline__ void fa2_body(const __half* q, const __half* k, const
   }
 }
 
+// SageAttention (ICLR 2025) + SpargeAttn (ICML 2025) multi-warp WMMA step:
+// - Q/K quantized to INT8 with per-16-row scale -> s8*s8->s32 WMMA tensor cores (2x-4x on Ampere)
+// - Warp-level online SpargeAttn PV-skip when all rows in the warp tile fall `skipDelta` below running max (log2 scale)
+// - PV matrix multiply uses FP16-accumulator WMMA (2x throughput on RTX 3090) summed into FP32 running accumulators
+template <int R, int C, int WARPS, int LDK_I8, int LDK_V, bool PARTIAL>
+__device__ __forceinline__ void sage_step(
+    const signed char* kI8Head, const __half* vh, unsigned S, unsigned S_pad, unsigned D, unsigned Dv,
+    unsigned strideV, unsigned tailV, float scaleLog2, float kScaleVal, float skipDelta,
+    unsigned key0, unsigned tid, unsigned lane,
+    signed char* smemK, __half* smemV,
+    const float (&qScale)[R],
+    const nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16, signed char, nvcuda::wmma::row_major> (&qa)[R][C],
+    nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> (&result)[R][C],
+    float (&maxLow)[R], float (&maxHigh)[R], float (&sumLow)[R], float (&sumHigh)[R]) {
+  using namespace nvcuda;
+  constexpr int D_PAD = C * 16;
+  unsigned kr = tid >> 3, colStart = tid & 7;
+  bool validRow = !PARTIAL || (key0 + kr < S);
+
+  const uint32_t* kSrc4 = (const uint32_t*)(kI8Head + (unsigned long long)(key0 + kr) * (unsigned)D_PAD);
+  uint32_t* kDst4 = (uint32_t*)(smemK + kr * LDK_I8);
+  constexpr unsigned d4 = D_PAD >> 2;
+  #pragma unroll
+  for (unsigned c4 = colStart; c4 < d4; c4 += 8u) kDst4[c4] = validRow ? kSrc4[c4] : 0u;
+
+  if (aligned4(vh) && ((strideV & 1u) == 0u) && ((Dv & 1u) == 0u)) {
+    unsigned dv2 = Dv >> 1;
+    const __half2* vSrc2 = (const __half2*)(vh + (unsigned long long)(key0 + kr) * strideV);
+    __half2* vDst2 = (__half2*)(smemV + kr * LDK_V);
+    __half2 zero2 = __halves2half2(__float2half_rn(0.f), __float2half_rn(0.f));
+    for (unsigned c2 = colStart; c2 < dv2; c2 += 8u) vDst2[c2] = validRow ? vSrc2[c2] : zero2;
+  } else {
+    const __half* vSrc = vh + (unsigned long long)(key0 + kr) * strideV;
+    __half* vDst = smemV + kr * LDK_V;
+    __half z = __float2half_rn(0.f);
+    for (unsigned c0 = colStart; c0 < Dv; c0 += 8u) vDst[c0] = validRow ? vSrc[c0] : z;
+  }
+  __syncthreads();
+
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, signed char, wmma::col_major> kb[C];
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> vb[C];
+  wmma::fragment<wmma::accumulator, 16, 16, 16, int> acci;
+  wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> pa;
+  wmma::fragment<wmma::accumulator, 16, 16, 16, __half> pvt;
+  #pragma unroll
+  for (int c = 0; c < C; ++c) wmma::load_matrix_sync(kb[c], smemK + c * 16, LDK_I8);
+  #pragma unroll
+  for (int c = 0; c < C; ++c) {
+    unsigned e0v = (c == C - 1 && tailV != 0) ? Dv - 16 : c * 16;
+    wmma::load_matrix_sync(vb[c], smemV + e0v, LDK_V);
+  }
+
+  float kScaleLog2 = kScaleVal * scaleLog2;
+  #pragma unroll
+  for (int r = 0; r < R; ++r) {
+    wmma::fill_fragment(acci, 0);
+    #pragma unroll
+    for (int c = 0; c < C; ++c) wmma::mma_sync(acci, qa[r][c], kb[c], acci);
+    float qkScale = qScale[r] * kScaleLog2;
+    float s0 = (float)acci.x[0] * qkScale, s1 = (float)acci.x[1] * qkScale;
+    float s2 = (float)acci.x[2] * qkScale, s3 = (float)acci.x[3] * qkScale;
+    float s4 = (float)acci.x[4] * qkScale, s5 = (float)acci.x[5] * qkScale;
+    float s6 = (float)acci.x[6] * qkScale, s7 = (float)acci.x[7] * qkScale;
+    if (PARTIAL) {
+      unsigned valid = S - key0, t2 = (lane & 3) * 2;
+      const float none = -3.402823466e+38f;
+      if (t2 >= valid) { s0 = none; s2 = none; }
+      if (t2 + 1 >= valid) { s1 = none; s3 = none; }
+      if (t2 + 8 >= valid) { s4 = none; s6 = none; }
+      if (t2 + 9 >= valid) { s5 = none; s7 = none; }
+    }
+    float tileMaxLow = att_group_max(fmaxf(fmaxf(s0, s1), fmaxf(s4, s5)));
+    float tileMaxHigh = att_group_max(fmaxf(fmaxf(s2, s3), fmaxf(s6, s7)));
+    if (skipDelta > 0.f && __all_sync(0xffffffffu, tileMaxLow < maxLow[r] - skipDelta && tileMaxHigh < maxHigh[r] - skipDelta)) {
+      continue;
+    }
+    if (tileMaxLow > maxLow[r]) {
+      float downLow = fast_exp2f(maxLow[r] - tileMaxLow);
+      maxLow[r] = tileMaxLow;
+      sumLow[r] *= downLow;
+      #pragma unroll
+      for (int c = 0; c < C; ++c) {
+        result[r][c].x[0] *= downLow; result[r][c].x[1] *= downLow;
+        result[r][c].x[4] *= downLow; result[r][c].x[5] *= downLow;
+      }
+    }
+    if (tileMaxHigh > maxHigh[r]) {
+      float downHigh = fast_exp2f(maxHigh[r] - tileMaxHigh);
+      maxHigh[r] = tileMaxHigh;
+      sumHigh[r] *= downHigh;
+      #pragma unroll
+      for (int c = 0; c < C; ++c) {
+        result[r][c].x[2] *= downHigh; result[r][c].x[3] *= downHigh;
+        result[r][c].x[6] *= downHigh; result[r][c].x[7] *= downHigh;
+      }
+    }
+    float ml = maxLow[r], mh = maxHigh[r];
+    __half e0 = __float2half_rn(fast_exp2f(s0 - ml)), e1 = __float2half_rn(fast_exp2f(s1 - ml));
+    __half e4 = __float2half_rn(fast_exp2f(s4 - ml)), e5 = __float2half_rn(fast_exp2f(s5 - ml));
+    __half e2 = __float2half_rn(fast_exp2f(s2 - mh)), e3 = __float2half_rn(fast_exp2f(s3 - mh));
+    __half e6 = __float2half_rn(fast_exp2f(s6 - mh)), e7 = __float2half_rn(fast_exp2f(s7 - mh));
+    pa.x[0] = e0; pa.x[1] = e1; pa.x[2] = e2; pa.x[3] = e3; pa.x[4] = e4; pa.x[5] = e5; pa.x[6] = e6; pa.x[7] = e7;
+    sumLow[r] += __half2float(e0) + __half2float(e1) + __half2float(e4) + __half2float(e5);
+    sumHigh[r] += __half2float(e2) + __half2float(e3) + __half2float(e6) + __half2float(e7);
+    #pragma unroll
+    for (int c = 0; c < C; ++c) {
+      wmma::fill_fragment(pvt, __float2half_rn(0.f));
+      wmma::mma_sync(pvt, pa, vb[c], pvt);
+      result[r][c].x[0] += __half2float(pvt.x[0]); result[r][c].x[1] += __half2float(pvt.x[1]);
+      result[r][c].x[2] += __half2float(pvt.x[2]); result[r][c].x[3] += __half2float(pvt.x[3]);
+      result[r][c].x[4] += __half2float(pvt.x[4]); result[r][c].x[5] += __half2float(pvt.x[5]);
+      result[r][c].x[6] += __half2float(pvt.x[6]); result[r][c].x[7] += __half2float(pvt.x[7]);
+    }
+  }
+  __syncthreads();
+}
+
+template <int R, int C, int WARPS>
+__device__ __forceinline__ void sage_body(const __half* q, const signed char* kI8, const float* kScale, const __half* v, __half* out,
+                                          unsigned heads, unsigned T, unsigned S, unsigned S_pad, unsigned D, unsigned Dv, float scale,
+                                          float skipDelta, unsigned H, unsigned strideIn, unsigned strideOut) {
+  using namespace nvcuda;
+  constexpr int D_PAD = C * 16;
+  constexpr int LDK_I8 = C * 16 + 16;
+  constexpr int LDK_V = C * 16 + 8;
+  __shared__ __align__(16) signed char smemK[16 * LDK_I8];
+  __shared__ __align__(16) __half smemV[16 * LDK_V];
+  __shared__ __align__(16) float warpScores[WARPS][320];
+
+  unsigned groupsPerHead = T / (16u * WARPS * R);
+  unsigned head = blockIdx.x / groupsPerHead;
+  if (head >= heads) return;
+  unsigned warpId = threadIdx.x >> 5, lane = threadIdx.x & 31, row = lane & 15, col0 = (lane >> 4) * 8;
+  unsigned row0 = ((blockIdx.x % groupsPerHead) * WARPS + warpId) * 16u * R;
+  unsigned strideQ = H ? (strideIn ? strideIn : H * D) : D, strideV = H ? (strideIn ? strideIn : H * Dv) : Dv;
+  unsigned strideO = H ? (strideOut ? strideOut : H * Dv) : Dv;
+  unsigned long long member = H ? head / H : 0, within = H ? head % H : 0;
+  const __half* qBase = H ? q + member * T * strideQ + within * D : q + (unsigned long long)head * T * D;
+  const signed char* kI8Head = kI8 + (unsigned long long)head * S_pad * (unsigned)D_PAD;
+  const float* kScaleHead = kScale + (unsigned long long)head * (S_pad >> 4);
+  const __half* vh = H ? v + member * S * strideV + within * Dv : v + (unsigned long long)head * S * Dv;
+  __half* outBase = H ? out + member * T * strideO + within * Dv : out + (unsigned long long)head * T * Dv;
+  unsigned tailV = Dv % 16;
+
+  signed char* warpTileI8 = reinterpret_cast<signed char*>(warpScores[warpId]);
+  float qScale[R];
+  wmma::fragment<wmma::matrix_a, 16, 16, 16, signed char, wmma::row_major> qa[R][C];
+  unsigned tr = lane >> 1, tc = lane & 1;
+  #pragma unroll
+  for (int r = 0; r < R; ++r) {
+    const __half* qh = qBase + (unsigned long long)(row0 + r * 16) * strideQ;
+    float localMax = 0.f;
+    for (unsigned c = tc; c < D; c += 2u) {
+      localMax = fmaxf(localMax, fabsf(__half2float(qh[(unsigned long long)tr * strideQ + c])));
+    }
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) localMax = fmaxf(localMax, __shfl_xor_sync(0xffffffffu, localMax, off));
+    float qs = (localMax > 0.f) ? (localMax / 127.f) : 1.f;
+    float qInv = (localMax > 0.f) ? (127.f / localMax) : 0.f;
+    qScale[r] = qs;
+    for (unsigned c = tc; c < (unsigned)D_PAD; c += 2u) {
+      signed char qv = 0;
+      if (c < D) {
+        int iv = __float2int_rn(__half2float(qh[(unsigned long long)tr * strideQ + c]) * qInv);
+        if (iv > 127) iv = 127; else if (iv < -127) iv = -127;
+        qv = (signed char)iv;
+      }
+      warpTileI8[tr * (unsigned)D_PAD + c] = qv;
+    }
+    __syncwarp();
+    #pragma unroll
+    for (int c = 0; c < C; ++c) wmma::load_matrix_sync(qa[r][c], warpTileI8 + c * 16, D_PAD);
+    __syncwarp();
+  }
+
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> result[R][C];
+  float maxLow[R], maxHigh[R], sumLow[R], sumHigh[R];
+  #pragma unroll
+  for (int r = 0; r < R; ++r) {
+    #pragma unroll
+    for (int c = 0; c < C; ++c) wmma::fill_fragment(result[r][c], 0.f);
+    maxLow[r] = -3.402823466e+38f; maxHigh[r] = -3.402823466e+38f; sumLow[r] = 0.f; sumHigh[r] = 0.f;
+  }
+
+  float scaleLog2 = scale * 1.4426950408889634f;
+  unsigned key0 = 0;
+  for (; key0 + 16u <= S; key0 += 16u) {
+    float kScaleVal = kScaleHead[key0 >> 4];
+    sage_step<R, C, WARPS, LDK_I8, LDK_V, false>(kI8Head, vh, S, S_pad, D, Dv, strideV, tailV, scaleLog2,
+      kScaleVal, skipDelta, key0, threadIdx.x, lane, smemK, smemV, qScale, qa, result, maxLow, maxHigh, sumLow, sumHigh);
+  }
+  if (key0 < S) {
+    float kScaleVal = kScaleHead[key0 >> 4];
+    sage_step<R, C, WARPS, LDK_I8, LDK_V, true>(kI8Head, vh, S, S_pad, D, Dv, strideV, tailV, scaleLog2,
+      kScaleVal, skipDelta, key0, threadIdx.x, lane, smemK, smemV, qScale, qa, result, maxLow, maxHigh, sumLow, sumHigh);
+  }
+
+  float* myScores = warpScores[warpId];
+  #pragma unroll
+  for (int r = 0; r < R; ++r) {
+    float invLow = 1.f / att_group_sum(sumLow[r]), invHigh = 1.f / att_group_sum(sumHigh[r]);
+    __half* oh = outBase + (unsigned long long)(row0 + r * 16) * strideO;
+    #pragma unroll
+    for (int c = 0; c < C; ++c) {
+      bool last = c == C - 1 && tailV != 0;
+      unsigned e0v = last ? Dv - 16 : c * 16, skip = last ? 16 - tailV : 0;
+      result[r][c].x[0] *= invLow; result[r][c].x[1] *= invLow; result[r][c].x[4] *= invLow; result[r][c].x[5] *= invLow;
+      result[r][c].x[2] *= invHigh; result[r][c].x[3] *= invHigh; result[r][c].x[6] *= invHigh; result[r][c].x[7] *= invHigh;
+      wmma::store_matrix_sync(myScores, result[r][c], 16, wmma::mem_row_major);
+      __syncwarp();
+      for (unsigned j = 0; j < 8; ++j) {
+        unsigned cc = col0 + j;
+        if (cc >= skip) oh[row * strideO + e0v + cc] = __float2half_rn(myScores[row * 16 + cc]);
+      }
+      __syncwarp();
+    }
+  }
+}
+
 extern "C" {
 // One warp per block. Variants: query tiles per warp x largest number of 16-wide chunks (width up to 16 * chunks).
 #define ATT_KERNEL(NAME, R, C) \
@@ -1009,6 +1228,190 @@ FA2_KERNEL(h_fa2_w4r1c4, 1, 4, 4)
 FA2_KERNEL(h_fa2_w4r1c5, 1, 5, 4)
 FA2_KERNEL(h_fa2_w4r2c3, 2, 3, 4)
 FA2_KERNEL(h_fa2_w4r2c4, 2, 4, 4)
+
+#define SAGE_KERNEL(NAME, R, C, WARPS) \
+  __global__ void NAME(const __half* q, const signed char* kI8, const float* kScale, const __half* v, __half* out, \
+                       unsigned heads, unsigned T, unsigned S, unsigned S_pad, unsigned D, unsigned Dv, float scale, \
+                       float skipDelta, unsigned H, unsigned strideIn, unsigned strideOut) { \
+    sage_body<R, C, WARPS>(q, kI8, kScale, v, out, heads, T, S, S_pad, D, Dv, scale, skipDelta, H, strideIn, strideOut); \
+  }
+SAGE_KERNEL(h_sage_w4r1c3, 1, 3, 4)
+SAGE_KERNEL(h_sage_w4r1c4, 1, 4, 4)
+SAGE_KERNEL(h_sage_w4r1c5, 1, 5, 4)
+SAGE_KERNEL(h_sage_w4r2c4, 2, 4, 4)
+
+// SageAttention channel-wise K smoothing mean (one 256-thread block per head, coalesced along head dim D <= 80).
+__global__ void h_sage_k_mean(const __half* k, float* kMean, unsigned heads, unsigned S, unsigned D,
+                              unsigned H, unsigned strideIn) {
+  __shared__ float warpAcc[8][80];
+  unsigned head = blockIdx.x;
+  if (head >= heads) return;
+  unsigned warpId = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  unsigned strideQ = H ? (strideIn ? strideIn : H * D) : D;
+  unsigned long long member = H ? head / H : 0, within = H ? head % H : 0;
+  const __half* kh = H ? k + member * S * strideQ + within * D : k + (unsigned long long)head * S * D;
+  for (unsigned pass = 0; pass * 32u < D; ++pass) {
+    unsigned c = pass * 32u + lane;
+    float sum = 0.f;
+    if (c < D) {
+      for (unsigned s = warpId; s < S; s += 8u) sum += ld(kh, (unsigned long long)s * strideQ + c);
+      warpAcc[warpId][c] = sum;
+    }
+  }
+  __syncthreads();
+  float invS = S > 0u ? (1.f / (float)S) : 0.f;
+  for (unsigned c = threadIdx.x; c < D; c += blockDim.x) {
+    float tot = 0.f;
+    #pragma unroll
+    for (int w = 0; w < 8; ++w) tot += warpAcc[w][c];
+    kMean[(unsigned long long)head * D + c] = tot * invS;
+  }
+}
+
+// Subtract K channel mean and quantize 16-row tiles to contiguous [heads, S_pad, D_pad] INT8 + [heads, S_pad/16] scale.
+__global__ void h_sage_quant_k(const __half* k, const float* kMean, signed char* kOut, float* kScale,
+                               unsigned heads, unsigned S, unsigned S_pad, unsigned D, unsigned D_pad,
+                               unsigned H, unsigned strideIn) {
+  __shared__ float svals[16][80];
+  __shared__ float tileMax[128];
+  unsigned tileIdx = blockIdx.x, head = blockIdx.y;
+  if (head >= heads) return;
+  unsigned strideQ = H ? (strideIn ? strideIn : H * D) : D;
+  unsigned long long member = H ? head / H : 0, within = H ? head % H : 0;
+  const __half* kh = H ? k + member * S * strideQ + within * D : k + (unsigned long long)head * S * D;
+  const float* meanH = kMean ? kMean + (unsigned long long)head * D : nullptr;
+  unsigned tid = threadIdx.x;
+  unsigned rInTile = tid >> 3, cLane = tid & 7;
+  unsigned row = tileIdx * 16u + rInTile;
+  float amax = 0.f;
+  for (unsigned c = cLane; c < D; c += 8u) {
+    float v = 0.f;
+    if (row < S) {
+      v = ld(kh, (unsigned long long)row * strideQ + c) - (meanH ? meanH[c] : 0.f);
+      amax = fmaxf(amax, fabsf(v));
+    }
+    svals[rInTile][c] = v;
+  }
+  tileMax[tid] = amax;
+  __syncthreads();
+  for (unsigned s = 64u; s > 0u; s >>= 1) {
+    if (tid < s) tileMax[tid] = fmaxf(tileMax[tid], tileMax[tid + s]);
+    __syncthreads();
+  }
+  float gMax = tileMax[0];
+  float scale = (gMax > 0.f) ? (gMax / 127.f) : 1.f;
+  float invScale = (gMax > 0.f) ? (127.f / gMax) : 0.f;
+  if (tid == 0) kScale[(unsigned long long)head * (S_pad >> 4) + tileIdx] = scale;
+  signed char* dst = kOut + (((unsigned long long)head * S_pad + row) * D_pad);
+  for (unsigned c = cLane; c < D_pad; c += 8u) {
+    if (row < S && c < D) {
+      int qv = __float2int_rn(svals[rInTile][c] * invScale);
+      if (qv > 127) qv = 127; else if (qv < -127) qv = -127;
+      dst[c] = (signed char)qv;
+    } else {
+      dst[c] = (signed char)0;
+    }
+  }
+}
+
+// W8A8 per-row symmetric INT8 activation quantization (`rows` blocks x 256 threads).
+__global__ void h_quantize_rows_i8(const __half* x, signed char* q, float* scales, unsigned rows, unsigned cols) {
+  __shared__ float shared[32];
+  unsigned row = blockIdx.x;
+  if (row >= rows) return;
+  const __half* base = x + (unsigned long long)row * cols;
+  signed char* dst = q + (unsigned long long)row * cols;
+  float amax = 0.f;
+  if (aligned4(base) && ((cols & 1u) == 0u)) {
+    const __half2* b2 = (const __half2*)base;
+    unsigned c2 = cols >> 1;
+    for (unsigned i = threadIdx.x; i < c2; i += blockDim.x) {
+      float2 f = __half22float2(b2[i]);
+      amax = fmaxf(amax, fmaxf(fabsf(f.x), fabsf(f.y)));
+    }
+    float rowMax = block_max(amax, shared);
+    float scale = (rowMax > 0.f) ? (rowMax / 127.f) : 1.f;
+    float invScale = (rowMax > 0.f) ? (127.f / rowMax) : 0.f;
+    if (threadIdx.x == 0) scales[row] = scale;
+    if (aligned4(dst) && ((cols & 3u) == 0u)) {
+      const __half2* b2p = (const __half2*)base;
+      char2* d2 = (char2*)dst;
+      for (unsigned i = threadIdx.x; i < c2; i += blockDim.x) {
+        float2 f = __half22float2(b2p[i]);
+        int q0 = __float2int_rn(f.x * invScale); if (q0 > 127) q0 = 127; else if (q0 < -127) q0 = -127;
+        int q1 = __float2int_rn(f.y * invScale); if (q1 > 127) q1 = 127; else if (q1 < -127) q1 = -127;
+        char2 pack; pack.x = (signed char)q0; pack.y = (signed char)q1;
+        d2[i] = pack;
+      }
+    } else {
+      for (unsigned i = threadIdx.x; i < cols; i += blockDim.x) {
+        int qv = __float2int_rn(ld(base, i) * invScale);
+        if (qv > 127) qv = 127; else if (qv < -127) qv = -127;
+        dst[i] = (signed char)qv;
+      }
+    }
+    return;
+  }
+  for (unsigned i = threadIdx.x; i < cols; i += blockDim.x) amax = fmaxf(amax, fabsf(ld(base, i)));
+  float rowMax = block_max(amax, shared);
+  float scale = (rowMax > 0.f) ? (rowMax / 127.f) : 1.f;
+  float invScale = (rowMax > 0.f) ? (127.f / rowMax) : 0.f;
+  if (threadIdx.x == 0) scales[row] = scale;
+  for (unsigned i = threadIdx.x; i < cols; i += blockDim.x) {
+    int qv = __float2int_rn(ld(base, i) * invScale);
+    if (qv > 127) qv = 127; else if (qv < -127) qv = -127;
+    dst[i] = (signed char)qv;
+  }
+}
+
+// Dequantize Int32 GEMM output `acc [rows, cols]`, fold optional bias [cols] and residual [rows, cols].
+__global__ void h_dequant_i32_bias_res(const int* acc, const float* scaleX, const float* scaleW,
+                                       const __half* bias, const __half* residual, __half* out,
+                                       unsigned n, unsigned cols) {
+  unsigned j = (blockIdx.x * blockDim.x + threadIdx.x) << 1;
+  if (j >= n) return;
+  if (j + 1u < n && ((cols & 1u) == 0u) && aligned8(acc) && aligned8(scaleW) && aligned4(out) &&
+      (!bias || aligned4(bias)) && (!residual || aligned4(residual))) {
+    unsigned row = j / cols, col = j % cols;
+    float sx = scaleX[row];
+    int2 a2 = ((const int2*)acc)[j >> 1];
+    float2 sw2 = ((const float2*)scaleW)[col >> 1];
+    float r0 = (float)a2.x * sx * sw2.x;
+    float r1 = (float)a2.y * sx * sw2.y;
+    if (bias) {
+      float2 b2 = __half22float2(((const __half2*)bias)[col >> 1]);
+      r0 += b2.x; r1 += b2.y;
+    }
+    if (residual) {
+      float2 res2 = __half22float2(((const __half2*)residual)[j >> 1]);
+      r0 += res2.x; r1 += res2.y;
+    }
+    ((__half2*)out)[j >> 1] = __floats2half2_rn(r0, r1);
+  } else {
+    unsigned row0 = j / cols, col0 = j % cols;
+    float r0 = (float)acc[j] * scaleX[row0] * scaleW[col0] + (bias ? ld(bias, col0) : 0.f) + (residual ? ld(residual, j) : 0.f);
+    st(out, j, r0);
+    if (j + 1u < n) {
+      unsigned j1 = j + 1u, row1 = j1 / cols, col1 = j1 % cols;
+      float r1 = (float)acc[j1] * scaleX[row1] * scaleW[col1] + (bias ? ld(bias, col1) : 0.f) + (residual ? ld(residual, j1) : 0.f);
+      st(out, j1, r1);
+    }
+  }
+}
+
+// Dequantize Int32 FFN up-projection `acc [rows, 2*width]` + bias + GEGLU into `out [rows, width]`.
+__global__ void h_dequant_i32_geglu_bias(const int* acc, const float* scaleX, const float* scaleW,
+                                         const __half* bias, __half* out, unsigned n, unsigned width) {
+  GRID_INDEX(i, n)
+  unsigned row = i / width, col = i % width;
+  float sx = scaleX[row];
+  unsigned idxV = row * 2u * width + col;
+  unsigned idxG = idxV + width;
+  float v = (float)acc[idxV] * sx * scaleW[col] + (bias ? ld(bias, col) : 0.f);
+  float g = (float)acc[idxG] * sx * scaleW[width + col] + (bias ? ld(bias, width + col) : 0.f);
+  float gelu = 0.5f * g * (1.f + erff(g * 0.70710678118654752f));
+  st(out, i, v * gelu);
+}
 
 // Where the elements of 16x16 fragments live: out[kind * 256 + lane * 8 + slot] = row * 16 + column, for kind 0 = accumulator
 // (float), 1 = matrix_a (half, row major), 2 = matrix_b (half, column major), 3 = matrix_b (half, row major). One warp.

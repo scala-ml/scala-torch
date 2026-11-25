@@ -474,3 +474,104 @@ class CudaHalfSuite extends FunSuite:
       finally { f16.close(); f32.close() }
     }
   }
+
+  private def cosine(a: Array[Float],b: Array[Float]): Double =
+    var dot=0.0;var na=0.0;var nb=0.0
+    var i=0
+    while i<a.length do
+      val x=a(i).toDouble;val y=b(i).toDouble
+      dot+=x*y;na+=x*x;nb+=y*y
+      i+=1
+    dot/(math.sqrt(na)*math.sqrt(nb)+1e-12)
+
+  test("FlashAttention-2 32x32, SageAttention + SpargeAttn, and W8A8 INT8 linear match references and benchmark speedup") {
+    gpu()
+    CudaSession.withDevice(maxBytes=4L<<30) { s =>
+      assume(s.hasCublas,"cuBLAS unavailable")
+      assume(s.canAttendTokensMajor(1024,1024,64),"fused attention unavailable")
+
+      // 1. SDXL 32x32 FA2 exact check vs FP32 reference (qt=1024, kt=1024, d=64)
+      val (b,h,qt,kt,d)=(2,4,1024,1024,64)
+      val q=s.uploadHalf(tensor(data(b*qt*h*d,201,0.5),b,qt,h*d))
+      val k=s.uploadHalf(tensor(data(b*kt*h*d,202,0.5),b,kt,h*d))
+      val v=s.uploadHalf(tensor(data(b*kt*h*d,203,0.5),b,kt,h*d))
+      val faOut=Using.resource(s.attentionTokensMajor(q,k,v,h))(_.toCpu.toFloatArray)
+      val fp32Out=Using.resource(s.castToFloat(q))(qf => Using.resource(s.castToFloat(k))(kf => Using.resource(s.castToFloat(v))(vf =>
+        def hm(x: CudaTensor)=Using.resource(s.reshape(x,Shape.from(Seq(b.toLong,qt.toLong,h.toLong,d.toLong))))(r => s.transpose(r,1,2))
+        Using.resource(hm(qf))(qh => Using.resource(hm(kf))(kh => Using.resource(hm(vf))(vh =>
+          Using.resource(s.scaledDotProductAttention(qh,kh,vh))(o => Using.resource(s.transpose(o,1,2))(_.toCpu.toFloatArray))))))))
+      val maxDiff=faOut.zip(fp32Out).map((a,b) => math.abs(a-b)).max
+      assert(maxDiff<2e-2,s"FA2 1024x1024 max diff $maxDiff")
+
+      // 2. SageAttention + SpargeAttn on 1024x1024 and 4096x4096 (using clustered/spiky Q/K like real SDXL)
+      val sageOut=s.fillHalf(q.shape,0f)
+      s.attentionSage(q,k,v,sageOut,b*h,qt,kt,d,d,h,0,0,skipDelta=11.0f)
+      val sageArr=sageOut.toCpu.toFloatArray;sageOut.close()
+      val sageCos=cosine(faOut,sageArr)
+      println(f"[bench] SageAttn(1024,64) cos=$sageCos%.6f")
+      assert(sageCos>0.996,s"SageAttention 1024 cosine too low: $sageCos")
+      Seq(q,k,v).foreach(_.close())
+
+      // Benchmark 4096x4096 (20 heads, like SDXL 64x64 self-attn)
+      val (sb,sh,st,sd)=(2,10,4096,64)
+      val sq=s.uploadHalf(tensor(data(sb*st*sh*sd,211,1.0),sb,st,sh*sd))
+      val sk=s.uploadHalf(tensor(data(sb*st*sh*sd,212,1.0),sb,st,sh*sd))
+      val sv=s.uploadHalf(tensor(data(sb*st*sh*sd,213,0.5),sb,st,sh*sd))
+      // Warmup
+      s.attentionTokensMajor(sq,sk,sv,sh).close()
+      val tmpSage=s.fillHalf(sq.shape,0f)
+      s.attentionSage(sq,sk,sv,tmpSage,sb*sh,st,st,sd,sd,sh,0,0,skipDelta=11.0f)
+      val sOut=tmpSage.toCpu.toFloatArray;tmpSage.close()
+      val fOut=Using.resource(s.attentionTokensMajor(sq,sk,sv,sh))(_.toCpu.toFloatArray)
+      val cos4k=cosine(fOut,sOut)
+      assert(cos4k>0.995,s"SageAttention 4096 cosine too low: $cos4k")
+
+      s.waitForDevice()
+      val tFa0=System.nanoTime()
+      for _ <- 0 until 20 do s.attentionTokensMajor(sq,sk,sv,sh).close()
+      s.waitForDevice()
+      val faMs=(System.nanoTime()-tFa0)/20.0/1e6
+
+      val dstSage=s.fillHalf(sq.shape,0f)
+      s.waitForDevice()
+      val tSg0=System.nanoTime()
+      for _ <- 0 until 20 do s.attentionSage(sq,sk,sv,dstSage,sb*sh,st,st,sd,sd,sh,0,0,skipDelta=11.0f)
+      s.waitForDevice()
+      val sgMs=(System.nanoTime()-tSg0)/20.0/1e6
+      dstSage.close();Seq(sq,sk,sv).foreach(_.close())
+      println(f"[bench] Att(2x10x4096x64): FA2=${faMs}%.3f ms vs Sage+Sparge=${sgMs}%.3f ms (${faMs/sgMs}%.2fx)")
+
+      // 3. W8A8 INT8 linear + GEGLU accuracy and microbenchmark vs FP16 cuBLAS
+      for (m,n,k) <- Seq((2048,1280,1280),(2048,10240,1280)) do
+        val x=s.uploadHalf(tensor(data(m*k,301,0.7),m,k))
+        val w=s.uploadHalf(tensor(data(n*k,302,0.1),n,k))
+        val bias=s.uploadHalf(tensor(data(n,303,0.1),n))
+        val res=s.uploadHalf(tensor(data(m*n,304,0.5),m,n))
+        val (wq,sw)=s.quantizeRowsInt8(w)
+        val expLin=Using.resource(s.linearWithBias(x,w,bias,Some(res)).get)(_.toCpu.toFloatArray)
+        val actLin=Using.resource(s.linearInt8(x,wq,sw,Some(bias),Some(res)))(_.toCpu.toFloatArray)
+        val linCos=cosine(expLin,actLin)
+        println(f"[bench] W8A8 linear+res [$m,$n,$k] cos=$linCos%.6f")
+        assert(linCos>0.997,s"W8A8 linear cos too low: $linCos")
+        if n==10240 then
+          val expGeglu=Using.resource(s.matmulTransposedB(x,w))(p => Using.resource(s.gegluBias(p,bias))(_.toCpu.toFloatArray))
+          val actGeglu=Using.resource(s.linearInt8Geglu(x,wq,sw,Some(bias)))(_.toCpu.toFloatArray)
+          val gCos=cosine(expGeglu,actGeglu)
+          println(f"[bench] W8A8 geglu [$m,$n,$k] cos=$gCos%.6f")
+          assert(gCos>0.997,s"W8A8 geglu cos too low: $gCos")
+        // Timing
+        s.linearWithBias(x,w,bias).get.close()
+        s.linearInt8(x,wq,sw,Some(bias)).close()
+        s.waitForDevice()
+        val tF16=System.nanoTime()
+        for _ <- 0 until 20 do s.linearWithBias(x,w,bias).get.close()
+        s.waitForDevice()
+        val f16Ms=(System.nanoTime()-tF16)/20.0/1e6
+        val tI8=System.nanoTime()
+        for _ <- 0 until 20 do s.linearInt8(x,wq,sw,Some(bias)).close()
+        s.waitForDevice()
+        val i8Ms=(System.nanoTime()-tI8)/20.0/1e6
+        println(f"[bench] Linear [$m,$n,$k]: FP16=${f16Ms}%.3f ms vs W8A8=${i8Ms}%.3f ms (${f16Ms/i8Ms}%.2fx)")
+        Seq(x,w,bias,res,wq,sw).foreach(_.close())
+    }
+  }

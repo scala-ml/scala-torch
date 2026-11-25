@@ -110,3 +110,12 @@ class CfgCacheSuite extends munit.FunSuite:
     assertEquals(st.fullSteps, 1)
     assert(st.shouldReuse(10, shapeHigh))
   }
+
+  test("CfgSchedule activeStart enforces Limited Interval CFG") {
+    val sched = CfgSchedule(startCfg = 7.0, endCfg = 1.0, curve = "linear", start = 0.69, end = 0.70, activeStart = 0.15)
+    assertEquals(sched.at(0.0), 1.0f)
+    assertEquals(sched.at(0.14), 1.0f)
+    assertEquals(sched.at(0.15), 7.0f)
+    assertEquals(sched.at(0.50), 7.0f)
+    assertEquals(sched.at(0.75), 1.0f)
+  }

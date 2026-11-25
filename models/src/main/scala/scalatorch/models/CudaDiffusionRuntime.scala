@@ -164,14 +164,36 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
     scala.collection.mutable.HashMap.empty[Parameter,scala.collection.mutable.ArrayBuffer[(CudaTensor,CudaTensor,CudaTensor)]]
   // Query, key and value weights of a self-attention layer stacked into one matrix, by the query weight. Built on first use.
   private val packedWeights=scala.collection.mutable.HashMap.empty[Parameter,CudaTensor]
+  // Cached per-channel INT8 weight tensors `(wq, scaleW)` keyed by the resident Float16 CudaTensor identity.
+  private val int8Weights=new java.util.IdentityHashMap[CudaTensor,(CudaTensor,CudaTensor)]()
   private val mergeEnabled= !sys.env.get("SCALATORCH_LORA_MERGE").contains("0")
+
+  private def quantizedWeight(w: CudaTensor): (CudaTensor,CudaTensor) =
+    val cached=int8Weights.get(w)
+    if cached!=null then cached
+    else
+      val q=session.quantizeRowsInt8(w)
+      int8Weights.put(w,q)
+      q
+
+  private def evictInt8Weight(w: CudaTensor): Unit =
+    val old=int8Weights.remove(w)
+    if old!=null then { old._1.close();old._2.close() }
+
+  private def useInt8(x: CudaTensor,w: CudaTensor): Boolean =
+    CudaSession.w8a8Linear && host.isEmpty && x.half && w.half && session.hasCublas &&
+      session.shape(x).rank==2 && w.shape.rank==2 &&
+      x.shape.dims(0)>=1024 && (x.shape.dims(0)%4==0) &&
+      w.shape.dims(0)>=640 && w.shape.dims(1)>=640 &&
+      (w.shape.dims(0)%4==0) && (w.shape.dims(1)%4==0) &&
+      x.shape.dims(0)*w.shape.dims(0)*w.shape.dims(1)>=8000000000L
 
   private def mergedWeight(l: Linear,adapters: Vector[(LowRankAdapter,Float)]): CudaTensor =
     val signature=adapters.map((a,m)=>(a:AnyRef,m))
     mergedWeights.get(l.weight) match
       case Some((sig,w)) if sig.size==signature.size && sig.zip(signature).forall((x,y)=>(x._1 eq y._1) && x._2==y._2) => w
       case old =>
-        old.foreach(_._2.close())
+        old.foreach { (_,w) => evictInt8Weight(w);w.close() }
         mergedWeights.remove(l.weight)
         val base=weights(l.weight)
         var acc=session.scale(base,1f)
@@ -194,22 +216,25 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
         weightShape(l.weight).rank==2 && weights.contains(l.weight) && adapters.forall((a,_)=>weights.contains(a.a) && weights.contains(a.b)) then
       scope { use =>
         val merged=mergedWeight(l,adapters)
-        val fused=l.bias.flatMap(p => session.linearWithBias(x,merged,weight(p,use)))
-        if fused.nonEmpty then use(fused.get)
+        if useInt8(x,merged) then
+          val (wq,sw)=quantizedWeight(merged)
+          use(session.linearInt8(x,wq,sw,l.bias.map(p => weight(p,use)),None))
         else
-         val out=use(session.matmulTransposedB(x,merged))
-         l.bias.fold(out) { p =>
-          val withBias=use(session.addBroadcast(out,weight(p,use)))
-          out.close()
-          withBias
-         }
+          val fused=l.bias.flatMap(p => session.linearWithBias(x,merged,weight(p,use)))
+          if fused.nonEmpty then use(fused.get)
+          else
+           val out=use(session.matmulTransposedB(x,merged))
+           l.bias.fold(out) { p =>
+            val withBias=use(session.addBroadcast(out,weight(p,use)))
+            out.close()
+            withBias
+           }
       }
     else linearPlain(x,l)
 
-  /** The weight of a linear layer with a bias when the product and the bias can be issued separately: Float16 rows, cuBLAS,
-    * and adapters (if any) merged into the weight. */
-  private def separableWeight(x: CudaTensor,l: Linear,use: Using.Manager): Option[CudaTensor] =
-    if !(l.bias.nonEmpty && x.half && session.hasCublas && session.shape(x).rank==2 && weightShape(l.weight).rank==2) then None
+  /** Resident Float16 weight (base or merged LoRA) for linear layers that do not depend on unmerged adapters. */
+  private def effectiveHalfWeight(x: CudaTensor,l: Linear,use: Using.Manager): Option[CudaTensor] =
+    if !(x.half && session.hasCublas && session.shape(x).rank==2 && weightShape(l.weight).rank==2) then None
     else
       val adapters=l.lora.toVector.map(a=>(a,1f))++LinearAdapterScope.forWeight(l.weight).toVector
       if adapters.isEmpty then Some(weight(l.weight,use))
@@ -217,23 +242,47 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
           adapters.forall((a,_)=>weights.contains(a.a) && weights.contains(a.b)) then Some(mergedWeight(l,adapters))
       else None
 
+  /** The weight of a linear layer with a bias when the product and the bias can be issued separately: Float16 rows, cuBLAS,
+    * and adapters (if any) merged into the weight. */
+  private def separableWeight(x: CudaTensor,l: Linear,use: Using.Manager): Option[CudaTensor] =
+    if l.bias.isEmpty then None else effectiveHalfWeight(x,l,use)
+
   /** `residual + linear(x)` for rows [m, width]: one pass over the output where the fused form applies, else linear and add. */
   private def linearAdd(x: CudaTensor,l: Linear,residual: CudaTensor): CudaTensor = scope { use =>
-    separableWeight(x,l,use).flatMap(w => session.linearWithBias(x,w,weight(l.bias.get,use),Some(residual))) match
-      case Some(out) => use(out)
-      case None =>
-        val out=use(linear(x,l))
-        val sum=use(session.add(residual,out));out.close()
-        sum
+    val eff=effectiveHalfWeight(x,l,use)
+    val int8Out=eff.filter(w => useInt8(x,w) && residual.half && session.shape(residual).rank==2 &&
+        session.shape(residual).dims(0)==session.shape(x).dims(0) && session.shape(residual).dims(1)==w.shape.dims(0)).map { w =>
+      val (wq,sw)=quantizedWeight(w)
+      use(session.linearInt8(x,wq,sw,l.bias.map(p => weight(p,use)),Some(residual)))
+    }
+    int8Out.getOrElse {
+      (if l.bias.nonEmpty then eff else None).flatMap(w => session.linearWithBias(x,w,weight(l.bias.get,use),Some(residual))) match
+        case Some(out) => use(out)
+        case None =>
+          val out=use(linear(x,l))
+          val sum=use(session.add(residual,out));out.close()
+          sum
+    }
   }
 
   private def linearPlain(x: CudaTensor,l: Linear): CudaTensor = scope { use =>
-    // no adapter: product and bias in one pass over the output
-    val direct=
-      if l.lora.isEmpty && l.bias.nonEmpty && session.hasCublas && weightShape(l.weight).rank==2 && session.shape(x).rank==2 &&
-          LinearAdapterScope.forWeight(l.weight).isEmpty then session.linearWithBias(x,weight(l.weight,use),weight(l.bias.get,use))
+    val int8Out=
+      if l.lora.isEmpty && LinearAdapterScope.forWeight(l.weight).isEmpty && CudaSession.w8a8Linear && x.half &&
+          session.hasCublas && session.shape(x).rank==2 && weightShape(l.weight).rank==2 then
+        val w=weight(l.weight,use)
+        if useInt8(x,w) then
+          val (wq,sw)=quantizedWeight(w)
+          Some(use(session.linearInt8(x,wq,sw,l.bias.map(p => weight(p,use)),None)))
+        else None
       else None
-    if direct.nonEmpty then use(direct.get) else linearRest(x,l,use)
+    int8Out.getOrElse {
+      // no adapter: product and bias in one pass over the output
+      val direct=
+        if l.lora.isEmpty && l.bias.nonEmpty && session.hasCublas && weightShape(l.weight).rank==2 && session.shape(x).rank==2 &&
+            LinearAdapterScope.forWeight(l.weight).isEmpty then session.linearWithBias(x,weight(l.weight,use),weight(l.bias.get,use))
+        else None
+      if direct.nonEmpty then use(direct.get) else linearRest(x,l,use)
+    }
   }
 
   private def linearRest(x: CudaTensor,l: Linear,use: Using.Manager): CudaTensor =
@@ -507,18 +556,25 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
 
   /** GEGLU of the projection of rows; the bias of the projection is added inside the GEGLU kernel where that applies. */
   private def gatedProjection(flat: CudaTensor,model: DiffusionFeedForward,use: Using.Manager): CudaTensor =
-    val fused=separableWeight(flat,model.projection,use).flatMap { w =>
-      val bias=weight(model.projection.bias.get,use)
-      val product=use(session.matmulTransposedB(flat,w))
-      if session.canGegluBias(product,bias) then
-        val gated=session.gegluBias(product,bias);product.close()
-        Some(gated)
-      else { product.close();None }
+    val eff=effectiveHalfWeight(flat,model.projection,use)
+    val int8Fused=eff.filter(useInt8(flat,_)).map { w =>
+      val (wq,sw)=quantizedWeight(w)
+      session.linearInt8Geglu(flat,wq,sw,model.projection.bias.map(p => weight(p,use)))
     }
-    fused.getOrElse {
-      val projected=use(linear(flat,model.projection))
-      val gated=session.geglu(projected,fast=true);projected.close()
-      gated
+    int8Fused.getOrElse {
+      val fused=(if model.projection.bias.nonEmpty then eff else None).flatMap { w =>
+        val bias=weight(model.projection.bias.get,use)
+        val product=use(session.matmulTransposedB(flat,w))
+        if session.canGegluBias(product,bias) then
+          val gated=session.gegluBias(product,bias);product.close()
+          Some(gated)
+        else { product.close();None }
+      }
+      fused.getOrElse {
+        val projected=use(linear(flat,model.projection))
+        val gated=session.geglu(projected,fast=true);projected.close()
+        gated
+      }
     }
 
   def feedForward(input: CudaTensor,model: DiffusionFeedForward): CudaTensor =
@@ -1112,6 +1168,7 @@ private[models] final class CudaDiffusionRuntime private (session: CudaSession,
           f"transient=$offloadedWeightTransientUploads evictions=$offloadedWeightEvictions")
       weights.values.foreach(_.close())
       mergedWeights.values.foreach(_._2.close());mergedWeights.clear()
+      int8Weights.values().forEach { (wq,sw) => wq.close();sw.close() }; int8Weights.clear()
       packedWeights.values.foreach(_.close());packedWeights.clear()
       contextProjections.values.foreach(_.foreach { v => v._2.close();v._3.close() });contextProjections.clear()
       contextTokens.values.foreach(_.foreach { v => v._2.close();v._3.close() });contextTokens.clear()

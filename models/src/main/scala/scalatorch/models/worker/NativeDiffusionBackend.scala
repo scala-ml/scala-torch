@@ -1172,9 +1172,10 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
                 case Bool(true) => Map.empty[String,NativeJson]
                 case Obj(v) => v
                 case _ => throw IllegalArgumentException("invalid cfg_schedule hook")
-              require(fields.keySet.subsetOf(Set("enabled","start_cfg","end_cfg","curve","start","end")),"unknown cfg_schedule option")
+              require(fields.keySet.subsetOf(Set("enabled","start_cfg","end_cfg","curve","start","end","active_start")),"unknown cfg_schedule option")
               Some(CfgSchedule(number(fields,"start_cfg",7).toDouble,number(fields,"end_cfg",3).toDouble,
-                str(fields,"curve","linear").toLowerCase(java.util.Locale.ROOT),number(fields,"start",0).toDouble,number(fields,"end",1).toDouble))
+                str(fields,"curve","linear").toLowerCase(java.util.Locale.ROOT),number(fields,"start",0).toDouble,number(fields,"end",1).toDouble,
+                number(fields,"active_start",0).toDouble))
           }
           case _ => None
         val sada=g.get("hooks") match
@@ -2180,7 +2181,8 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
             case "Uniform" | "Normal" => DiffusionTimestepSpacing.Linspace
             case "Simple" | "SGM Uniform" => DiffusionTimestepSpacing.Trailing
             case "DDIM" => DiffusionTimestepSpacing.Leading
-            case "Polyexponential" | "Align Your Steps" | "KL Optimal" =>
+            case "Align Your Steps" => return activeNoise.alignYourStepsEuler(count,generationPipeline.sdxlConditioning.nonEmpty)
+            case "Polyexponential" | "KL Optimal" =>
               samplerWarnings += s"schedule '$requested' is not available for sampler 'Euler a'; using Karras"
               samplerWarnings += s"schedule '$requested' is not supported by sampler 'Euler a'; using the sampler's default spacing"
               config.spacing
@@ -2235,6 +2237,10 @@ final class NativeDiffusionBackend(modelRoot: Path,schedulerConfig: Path,
                 activeNoise.betas.size==1000 &&
                 activeNoise.betas.zip(DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true).betas).forall((a,b)=>math.abs(a-b)<=1e-7) =>
               DpmSchedule.paperAys(activeNoise,generationPipeline.sdxlConditioning.nonEmpty,count)
+            case "Align Your Steps" if samplerName=="DPM++ 2M" &&
+                activeNoise.betas.size==1000 &&
+                activeNoise.betas.zip(DiffusionNoiseSchedule.linear(1000,.00085,.012,scaled=true).betas).forall((a,b)=>math.abs(a-b)<=1e-7) =>
+              DpmSchedule.paperAysZeroTerminal(activeNoise,generationPipeline.sdxlConditioning.nonEmpty,count)
             case "Polyexponential" | "Align Your Steps" | "KL Optimal" =>
               samplerWarnings += s"schedule '$requested' is not available for sampler '$samplerName'; using Karras"
               DpmSchedule.karras(activeNoise,count)

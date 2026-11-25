@@ -84,3 +84,11 @@ class PaperAysScheduleSuite extends munit.FunSuite:
     println(s"tiny SD SDE AYS max latent error=$maxError")
     assert(maxError<0.001,s"tiny SD SDE AYS max latent error=$maxError")
   }
+
+  test("DpmSchedule.paperAysZeroTerminal matches paperAys timesteps and ends at sigma 0") {
+    val noise=DiffusionNoiseSchedule.linear(1000,0.00085,0.012,scaled=true)
+    val s=DpmSchedule.paperAysZeroTerminal(noise,sdxl=true,steps=10)
+    assertEquals(s.timesteps.size,10)
+    assertEquals(s.sigmas.size,11)
+    assertEquals(s.sigmas.last,0.0)
+  }

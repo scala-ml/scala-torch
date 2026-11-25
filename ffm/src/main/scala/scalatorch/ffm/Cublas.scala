@@ -15,6 +15,8 @@ private[ffm] final class Cublas private (handle: MemorySegment,sgemmHandle: Meth
     require(status==0,"cublasSetStream_v2 failed")
   private val alpha=arena.allocate(JAVA_FLOAT); alpha.set(JAVA_FLOAT,0,1f)
   private val beta=arena.allocate(JAVA_FLOAT); beta.set(JAVA_FLOAT,0,0f)
+  private val alphaI32=arena.allocate(JAVA_INT); alphaI32.set(JAVA_INT,0,1)
+  private val betaI32=arena.allocate(JAVA_INT); betaI32.set(JAVA_INT,0,0)
   private val scaleBuf=arena.allocate(JAVA_FLOAT); scaleBuf.set(JAVA_FLOAT,0,1f)
   /** Row-major C[m,n] = A[m,k] * B[k,n] with leading dimensions lda, ldb, ldc (column-major trick). */
   def sgemmRowMajor(m: Int,n: Int,k: Int,a: Long,lda: Int,b: Long,ldb: Int,c: Long,ldc: Int): Unit =
@@ -59,6 +61,13 @@ private[ffm] final class Cublas private (handle: MemorySegment,sgemmHandle: Meth
       MemorySegment.ofAddress(w),2,k,MemorySegment.ofAddress(a),2,k,if accumulate then alpha else beta,
       MemorySegment.ofAddress(c),2,n,68,99)
     if status!=0 then throw IllegalStateException(s"cublasGemmEx (half, transposed) failed with status $status")
+
+  /** Row-major C[m,n] (Int32) = A[m,k] (Int8) * W[n,k]^T (Int8) with Int32 tensor-core accumulation (`CUBLAS_COMPUTE_32I`). */
+  def gemmInt8RowMajorBT(m: Int,n: Int,k: Int,a: Long,w: Long,c: Long): Unit =
+    val status: Int=gemmExHandle.invokeExact(handle,1,0,n,m,k,alphaI32,
+      MemorySegment.ofAddress(w),3,k,MemorySegment.ofAddress(a),3,k,betaI32,
+      MemorySegment.ofAddress(c),10,n,72,99)
+    if status!=0 then throw IllegalStateException(s"cublasGemmEx (int8, transposed) failed with status $status")
 
   /** Column-major strided-batched GEMM, all Float16 with Float32 accumulation. Transpose codes 0 (N) / 1 (T). */
   def gemmHalfStridedBatched(transA: Int,transB: Int,m: Int,n: Int,k: Int,alphaValue: Float,

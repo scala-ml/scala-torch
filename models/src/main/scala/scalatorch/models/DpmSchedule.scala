@@ -45,6 +45,10 @@ object DpmSchedule:
     }
     DpmSchedule(times,levels)
 
+  private[models] def paperAysZeroTerminal(noise: DiffusionNoiseSchedule,sdxl: Boolean,steps: Int=10): DpmSchedule =
+    val s=paperAys(noise,sdxl,steps)
+    DpmSchedule(s.timesteps,s.sigmas.dropRight(1) :+ 0.0)
+
   /** Diffusers leading spacing used by the DDIM schedule fallback. */
   def leading(noise: DiffusionNoiseSchedule,steps: Int,stepsOffset: Int=0): DpmSchedule =
     require(steps>0 && steps<=10000,"invalid DPM inference step count")
